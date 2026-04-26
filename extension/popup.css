@@ -1,0 +1,587 @@
+:root {
+  --bg: #0f1115;
+  --panel: #181b22;
+  --panel-2: #1f232c;
+  --text: #e6e8ef;
+  --muted: #8b93a7;
+  --accent: #5b8def;
+  --accent-hover: #7aa3ff;
+  --border: #2a2f3a;
+  --border-strong: #3a4051;
+  --ok: #4ade80;
+  --bad: #f87171;
+  --warn: #fbbf24;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  background: var(--bg);
+  color: var(--text);
+}
+
+body {
+  width: 440px;
+  padding: 14px;
+}
+
+/* ---------- topbar ---------- */
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
+}
+
+.health {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: background 0.2s;
+}
+
+.dot.ok {
+  background: var(--ok);
+  box-shadow: 0 0 8px rgba(74, 222, 128, 0.6);
+}
+
+.dot.bad {
+  background: var(--bad);
+  box-shadow: 0 0 8px rgba(248, 113, 113, 0.6);
+}
+
+/* ---------- resume picker bar ---------- */
+
+.resume-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.resume-bar label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+
+.resume-bar select {
+  flex: 1;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 14px) 50%,
+    calc(100% - 9px) 50%;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 26px;
+}
+
+.resume-bar select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.resume-bar select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.resume-bar.empty {
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+.resume-bar.empty::after {
+  content: "No resumes - drop a .txt into backend/resumes/";
+  color: var(--bad);
+  font-size: 11px;
+}
+
+/* ---------- tabs ---------- */
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 12px;
+}
+
+.tab {
+  flex: 1;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 8px 6px;
+  margin: 0;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.panel {
+  display: none;
+}
+
+.panel.active {
+  display: block;
+}
+
+/* ---------- forms ---------- */
+
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--muted);
+  margin-top: 4px;
+}
+
+label .hint {
+  font-weight: 400;
+  font-style: italic;
+  opacity: 0.7;
+}
+
+input[type="text"],
+textarea,
+select {
+  width: 100%;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+input[type="text"]:focus,
+textarea:focus,
+select:focus {
+  border-color: var(--accent);
+}
+
+input[readonly] {
+  background: var(--panel-2);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 60px;
+  max-height: 320px;
+  line-height: 1.4;
+}
+
+select {
+  appearance: none;
+  background-image: linear-gradient(
+      45deg,
+      transparent 50%,
+      var(--muted) 50%
+    ),
+    linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 14px) 14px,
+    calc(100% - 9px) 14px;
+  background-size:
+    5px 5px,
+    5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 28px;
+}
+
+button[type="submit"] {
+  margin-top: 10px;
+  padding: 9px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: white;
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+button[type="submit"]:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+button:disabled {
+  background: var(--border);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+/* ---------- status ---------- */
+
+.status {
+  margin-top: 10px;
+  font-size: 12px;
+  min-height: 16px;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.status.working {
+  color: var(--warn);
+}
+
+.status.ok {
+  color: var(--ok);
+}
+
+.status.err {
+  color: var(--bad);
+}
+
+/* ---------- result area (email/outreach) ---------- */
+
+.result {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.result.hidden {
+  display: none;
+}
+
+.result-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.result-row label {
+  margin: 0;
+  flex: 1;
+}
+
+.copy-btn {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.copy-btn:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.copy-btn.copied {
+  background: var(--ok);
+  border-color: var(--ok);
+  color: #0f1115;
+}
+
+.char-count {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+.char-count.warn {
+  color: var(--warn);
+}
+
+.char-count.over {
+  color: var(--bad);
+  font-weight: 600;
+}
+
+/* ---------- score display ---------- */
+
+.score-display {
+  margin-top: 14px;
+  padding: 14px 14px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.score-display.compact {
+  margin-top: 12px;
+  padding: 10px 12px;
+  gap: 10px;
+}
+
+.score-display.hidden {
+  display: none;
+}
+
+.score-number-wrap {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: baseline;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.score-number {
+  font-size: 38px;
+  font-weight: 700;
+  color: var(--text);
+  letter-spacing: -1px;
+}
+
+.score-display.compact .score-number {
+  font-size: 28px;
+}
+
+.score-denom {
+  font-size: 14px;
+  color: var(--muted);
+  margin-left: 2px;
+}
+
+.score-display.compact .score-denom {
+  font-size: 12px;
+}
+
+.score-verdict {
+  flex: 1;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.score-display.compact .score-verdict {
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+/* color bands by score */
+.score-display.band-poor .score-number {
+  color: var(--bad);
+}
+.score-display.band-poor {
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+.score-display.band-marginal .score-number {
+  color: var(--warn);
+}
+.score-display.band-marginal {
+  border-color: rgba(251, 191, 36, 0.4);
+}
+
+.score-display.band-solid .score-number {
+  color: var(--accent);
+}
+
+.score-display.band-strong .score-number {
+  color: var(--ok);
+}
+.score-display.band-strong {
+  border-color: rgba(74, 222, 128, 0.4);
+}
+
+.score-display.loading .score-number {
+  opacity: 0.4;
+}
+
+/* ---------- score leaderboard list ---------- */
+
+.score-list {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.score-list.hidden {
+  display: none;
+}
+
+.score-row {
+  position: relative;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 12px;
+  row-gap: 2px;
+  align-items: center;
+}
+
+.score-row .score-row-label {
+  grid-column: 2 / 3;
+  grid-row: 1 / 2;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.score-row .score-number-wrap {
+  grid-column: 1 / 2;
+  grid-row: 1 / 3;
+  display: inline-flex;
+  align-items: baseline;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.score-row .score-number {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: -1px;
+  color: var(--text);
+}
+
+.score-row .score-denom {
+  font-size: 12px;
+  color: var(--muted);
+  margin-left: 2px;
+}
+
+.score-row .score-verdict {
+  grid-column: 2 / 3;
+  grid-row: 2 / 3;
+  font-size: 12px;
+  line-height: 1.35;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.score-row.clickable {
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s, transform 0.08s;
+}
+
+.score-row.clickable:hover {
+  background: var(--panel-2);
+  border-color: var(--border-strong);
+}
+
+.score-row.clickable:active {
+  transform: translateY(1px);
+}
+
+/* color bands by score */
+.score-row.band-poor .score-number {
+  color: var(--bad);
+}
+.score-row.band-marginal .score-number {
+  color: var(--warn);
+}
+.score-row.band-solid .score-number {
+  color: var(--accent);
+}
+.score-row.band-strong .score-number {
+  color: var(--ok);
+}
+
+/* leader highlight */
+.score-row.top {
+  border-color: var(--accent);
+  background: linear-gradient(
+    180deg,
+    rgba(91, 141, 239, 0.08),
+    rgba(91, 141, 239, 0.02)
+  );
+}
+
+.score-row.top::before {
+  content: "TOP";
+  position: absolute;
+  top: -7px;
+  left: 10px;
+  padding: 1px 6px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  background: var(--accent);
+  color: #0b0d12;
+  border-radius: 3px;
+}
+
+.score-row.error {
+  border-color: rgba(248, 113, 113, 0.3);
+}
+
+.score-row.error .score-number {
+  color: var(--muted);
+}
+
+.score-row.active {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}

@@ -1,0 +1,54 @@
+Amogh Ramagiri
+Tel: +1 571-478-2290 | Email: amoghr@gwmail.gwu.edu | LinkedIn | Github | Publications | Portfolio | Washington, DC
+
+EDUCATION
+
+George Washington University
+Master of Science in Data Science (CCAS Dean's Award)
+Aug 2024 – May 2026
+Washington, DC
+
+PROFESSIONAL EXPERIENCE
+
+Fulton Bank — Data Scientist
+May 2025 – Dec 2025 | Lancaster, PA
+- Built mortgage default prediction models using Random Forest processing 1M+ data points, identifying high risk applications with 91% recall and reducing potential loan losses by 18%.
+- Streamlined 20+ SQL queries for credit risk reporting, reducing processing time by 15% and improving data accuracy for the Lending team across business lines.
+- Migrated on-premises data infrastructure to Azure (Data Factory, Synapse), achieving 20% improvement in data quality and 43% faster system performance.
+- Rebuilt and optimized 37+ Power BI dashboards and published to Microsoft Fabric on Azure, enabling real time analytics and supporting faster decision-making across major business lines.
+
+Factocart, Velabh Technologies Pvt. Ltd. — Data Scientist
+Mar 2024 – Aug 2024 | Bengaluru, KA
+- Processed 2M+ transactions records from AWS RDS using PySpark and SQL, built demand forecasting models with Scikit-learn achieving 92% accuracy, reducing stockouts by 13% across 10+ categories.
+- Conducted hypothesis testing and A/B experiments to evaluate marketing campaigns, identifying high impact strategies that increased conversion rates by 15% and drove 11% sales growth.
+- Developed and maintained 12+ recurring performance reports and dashboards to track acquisition, sales, and campaign KPIs, enabling stakeholders to monitor trends and make data driven decisions.
+
+Embedded System Lab, NCUE — Research Scientist
+Sep 2023 – Mar 2024 | Changhua, Taiwan
+- Analyzed multi-modal biometric data combining facial and voice features, performing comparative analysis that identified optimization opportunities and improved system accuracy by 30%.
+- Conducted statistical root cause analysis on authentication failure data, identifying four key failure patterns and delivering recommendations that improved system reliability.
+- Engineered automated data pipeline to collect and process 10,000+ records from distributed edge devices, enabling centralized reporting and streamlined analysis workflows.
+
+Wodo — Data Analyst
+Jun 2022 – Sep 2023 | Bengaluru, KA
+- Analyzed marketing campaign performance using Python and SQL, building automated reporting pipelines that delivered actionable insights to 13+ clients across digital platforms.
+- Created real-time dashboards tracking engagement and purchase metrics, enabling clients to optimize marketing allocation and reduce wasted spend by 20%.
+- Performed customer segmentation analysis using clustering techniques, identifying high-value audience segments that improved campaign targeting and increased conversion rates by 12%.
+
+TECHNICAL SKILLS
+
+Programming and Tools: Python, R, SQL, PostgreSQL, Git, Linux, FastAPI, CI/CD
+Analytics and Visualization: Pandas, NumPy, Matplotlib, Seaborn, Tableau, Power BI, DAX, Excel, Looker, Alteryx
+Statistics and Experimentation: Hypothesis Testing, A/B Testing, ad-hoc analysis, regression analysis, ANOVA
+Data and Machine Learning: SSMS, MongoDB, PySpark, scikit-learn, TensorFlow, Databricks, Snowflake
+Cloud and MLOps: AWS (EC2, RDS, Redshift, S3, SageMaker, EMR), Azure, Hadoop
+
+PROJECTS
+
+Operational Performance and Reporting Analytics
+- Standardized operational metrics across teams, improving reporting consistency and reducing data discrepancies by 20%.
+- Automated KPI dashboards and visualizations, cutting manual reporting effort by 30% for stakeholders.
+
+Customer Acquisition and Funnel Analytics
+- Analyzed multi-channel acquisition data using SQL and Python, identifying funnel drop offs to improve conversions by 12%.
+- Built KPI dashboards tracking CAC and conversion metrics, helping marketing reduce acquisition costs by 10%.

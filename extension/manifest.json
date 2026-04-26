@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "Cover Letter Generator",
+  "version": "1.0.0",
+  "description": "Generate a tailored, LaTeX-compiled PDF cover letter from a company name and job description.",
+  "action": {
+    "default_title": "Cover Letter Generator",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon.png",
+      "48": "icon.png",
+      "128": "icon.png"
+    }
+  },
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  },
+  "permissions": ["downloads", "storage"],
+  "host_permissions": ["http://localhost:8000/*", "http://127.0.0.1:8000/*"]
+}

@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Cover Letter Generator</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>Apply Tools</h1>
+      <div class="health" id="health" title="Backend status">
+        <span class="dot" id="healthDot"></span>
+        <span class="health-label" id="healthLabel">checking...</span>
+      </div>
+    </header>
+
+    <div class="resume-bar">
+      <label for="resumeSelect">Resume</label>
+      <select id="resumeSelect" aria-label="Active resume">
+        <option value="default">Loading...</option>
+      </select>
+    </div>
+
+    <nav class="tabs" role="tablist">
+      <button
+        type="button"
+        class="tab active"
+        role="tab"
+        data-tab="cover"
+        aria-selected="true"
+      >
+        Cover Letter
+      </button>
+      <button type="button" class="tab" role="tab" data-tab="email" aria-selected="false">
+        Email
+      </button>
+      <button type="button" class="tab" role="tab" data-tab="outreach" aria-selected="false">
+        Outreach
+      </button>
+      <button type="button" class="tab" role="tab" data-tab="score" aria-selected="false">
+        Score
+      </button>
+    </nav>
+
+    <!-- ============ Cover Letter tab ============ -->
+    <section class="panel active" data-panel="cover">
+      <form id="coverForm" autocomplete="off">
+        <label for="cover-company">Company</label>
+        <input
+          type="text"
+          id="cover-company"
+          placeholder="Anthropic"
+          required
+          maxlength="200"
+        />
+
+        <label for="cover-jd">Job description</label>
+        <textarea
+          id="cover-jd"
+          placeholder="Paste the full JD here..."
+          required
+          rows="9"
+          maxlength="20000"
+        ></textarea>
+
+        <button type="submit" id="coverSubmit">Generate PDF</button>
+      </form>
+      <div id="coverScore" class="score-display compact hidden">
+        <div class="score-number-wrap">
+          <span class="score-number">-</span><span class="score-denom">/10</span>
+        </div>
+        <div class="score-verdict"></div>
+      </div>
+      <div id="coverStatus" class="status" role="status" aria-live="polite"></div>
+    </section>
+
+    <!-- ============ Email tab ============ -->
+    <section class="panel" data-panel="email">
+      <form id="emailForm" autocomplete="off">
+        <label for="email-company">Company</label>
+        <input
+          type="text"
+          id="email-company"
+          placeholder="Anthropic"
+          required
+          maxlength="200"
+        />
+
+        <label for="email-jd">Job description</label>
+        <textarea
+          id="email-jd"
+          placeholder="Paste the full JD here..."
+          required
+          rows="7"
+          maxlength="20000"
+        ></textarea>
+
+        <label for="email-intent">
+          What is this email for? <span class="hint">(optional)</span>
+        </label>
+        <textarea
+          id="email-intent"
+          placeholder="e.g. asking the recruiter to consider me for this role"
+          rows="2"
+          maxlength="2000"
+        ></textarea>
+
+        <button type="submit" id="emailSubmit">Generate email</button>
+      </form>
+
+      <div id="emailStatus" class="status" role="status" aria-live="polite"></div>
+
+      <div id="emailResult" class="result hidden">
+        <div class="result-row">
+          <label for="email-subject-out">Subject</label>
+          <button type="button" class="copy-btn" data-copy="email-subject-out">Copy</button>
+        </div>
+        <input type="text" id="email-subject-out" readonly />
+
+        <div class="result-row">
+          <label for="email-body-out">Body</label>
+          <button type="button" class="copy-btn" data-copy="email-body-out">Copy</button>
+        </div>
+        <textarea id="email-body-out" rows="12"></textarea>
+      </div>
+    </section>
+
+    <!-- ============ Outreach tab ============ -->
+    <section class="panel" data-panel="outreach">
+      <form id="outreachForm" autocomplete="off">
+        <label for="outreach-channel">Channel</label>
+        <select id="outreach-channel" required>
+          <option value="linkedin_invitation">LinkedIn invitation (~280 chars)</option>
+          <option value="linkedin_message">LinkedIn message / InMail</option>
+          <option value="email">Email</option>
+        </select>
+
+        <label for="outreach-profile">
+          Their LinkedIn profile <span class="hint">(paste text)</span>
+        </label>
+        <textarea
+          id="outreach-profile"
+          placeholder="Paste their profile: name, headline, current role, recent experience, posts they've written..."
+          required
+          rows="7"
+          maxlength="30000"
+        ></textarea>
+
+        <label for="outreach-context">
+          What is this about? <span class="hint">(optional)</span>
+        </label>
+        <textarea
+          id="outreach-context"
+          placeholder="e.g. asking for a referral at their company / interested in their work on X / want a 15-min chat about Y"
+          rows="2"
+          maxlength="2000"
+        ></textarea>
+
+        <button type="submit" id="outreachSubmit">Generate message</button>
+      </form>
+
+      <div id="outreachStatus" class="status" role="status" aria-live="polite"></div>
+
+      <div id="outreachResult" class="result hidden">
+        <div class="result-row" id="outreachSubjectRow" style="display: none;">
+          <label for="outreach-subject-out">Subject</label>
+          <button type="button" class="copy-btn" data-copy="outreach-subject-out">Copy</button>
+        </div>
+        <input type="text" id="outreach-subject-out" readonly style="display: none;" />
+
+        <div class="result-row">
+          <label for="outreach-message-out">Message</label>
+          <span id="outreachCharCount" class="char-count"></span>
+          <button type="button" class="copy-btn" data-copy="outreach-message-out">Copy</button>
+        </div>
+        <textarea id="outreach-message-out" rows="10"></textarea>
+      </div>
+    </section>
+
+    <!-- ============ Score tab ============ -->
+    <section class="panel" data-panel="score">
+      <form id="scoreForm" autocomplete="off">
+        <label for="score-company">
+          Company <span class="hint">(optional)</span>
+        </label>
+        <input
+          type="text"
+          id="score-company"
+          placeholder="Anthropic"
+          maxlength="200"
+        />
+
+        <label for="score-jd">Job description</label>
+        <textarea
+          id="score-jd"
+          placeholder="Paste the JD - score appears in ~3-5s"
+          required
+          rows="10"
+          maxlength="20000"
+        ></textarea>
+
+        <button type="submit" id="scoreSubmit">Score against all resumes</button>
+      </form>
+
+      <div id="scoreStatus" class="status" role="status" aria-live="polite"></div>
+
+      <div id="scoreList" class="score-list hidden"></div>
+    </section>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
