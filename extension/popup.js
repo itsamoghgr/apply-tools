@@ -20,6 +20,22 @@ const STORAGE_KEYS = {
     company: "score.company",
     jd: "score.jd",
   },
+  question: {
+    company: "question.company",
+    jd: "question.jd",
+    text: "question.text",
+  },
+  track: {
+    company: "track.company",
+    role: "track.role",
+    location: "track.location",
+    jd: "track.jd",
+    status: "track.status",
+    interview: "track.interview",
+    appliedDate: "track.appliedDate",
+    notes: "track.notes",
+    jobUrl: "track.jobUrl",
+  },
 };
 
 const DEFAULT_RESUME_ID = "default";
@@ -167,11 +183,526 @@ function activateTab(name) {
     p.classList.toggle("active", p.dataset.panel === name);
   });
   storageSet({ [STORAGE_KEYS.activeTab]: name });
+  syncAutodetectBarVisibility();
 }
 
 tabs.forEach((tab) => {
   tab.addEventListener("click", () => activateTab(tab.dataset.tab));
 });
+
+// ---------- auto-detect from page ----------
+
+const AUTODETECT_TARGETS = {
+  cover: {
+    company: "cover-company",
+    jd: "cover-jd",
+    storage: { company: STORAGE_KEYS.cover.company, jd: STORAGE_KEYS.cover.jd },
+  },
+  email: {
+    company: "email-company",
+    jd: "email-jd",
+    storage: { company: STORAGE_KEYS.email.company, jd: STORAGE_KEYS.email.jd },
+  },
+  score: {
+    company: "score-company",
+    jd: "score-jd",
+    storage: { company: STORAGE_KEYS.score.company, jd: STORAGE_KEYS.score.jd },
+  },
+  question: {
+    company: "question-company",
+    jd: "question-jd",
+    storage: { company: STORAGE_KEYS.question.company, jd: STORAGE_KEYS.question.jd },
+  },
+  // Track tab uses extra fields beyond company+jd; runAutoDetect handles
+  // these by name when the active tab is "track".
+  track: {
+    company: "track-company",
+    jd: "track-jd",
+    role: "track-role",
+    location: "track-location",
+    storage: {
+      company: STORAGE_KEYS.track.company,
+      jd: STORAGE_KEYS.track.jd,
+      role: STORAGE_KEYS.track.role,
+      location: STORAGE_KEYS.track.location,
+      jobUrl: STORAGE_KEYS.track.jobUrl,
+    },
+  },
+};
+
+const autodetectBar = $("autodetectBar");
+const autoDetectBtn = $("autoDetectBtn");
+const autoDetectStatus = $("autoDetectStatus");
+
+function setAutodetectStatus(text, kind = "") {
+  autoDetectStatus.textContent = text;
+  autoDetectStatus.className = "autodetect-status" + (kind ? " " + kind : "");
+}
+
+function getActiveTabName() {
+  const t = document.querySelector(".tab.active");
+  return t ? t.dataset.tab : "cover";
+}
+
+function syncAutodetectBarVisibility() {
+  const supported = Boolean(AUTODETECT_TARGETS[getActiveTabName()]);
+  autodetectBar.classList.toggle("hidden", !supported);
+}
+
+// Self-contained extractor; runs in the active tab's page context.
+// Must not reference any popup-scope variables.
+function extractJdFromPage() {
+  const MIN_JD_LEN = 200;
+  const MAX_TEXT = 40000;
+
+  const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+  // Some sites (CBRE, certain Workday tenants) emit JD content as already-
+  // serialised HTML inside JSON-LD or text nodes - so what looks like rendered
+  // text actually contains literal "<div>..." characters. Detect and strip.
+  const looksLikeHtml = (s) =>
+    typeof s === "string" && /<\/?[a-z][\s\S]*?>/i.test(s);
+  const stripHtml = (s) => {
+    if (!s) return "";
+    const tmp = document.createElement("div");
+    tmp.innerHTML = s;
+    // Two passes handle the double-encoded case (e.g. "&lt;div&gt;").
+    let out = tmp.innerText || tmp.textContent || "";
+    if (looksLikeHtml(out)) {
+      tmp.innerHTML = out;
+      out = tmp.innerText || tmp.textContent || "";
+    }
+    return out;
+  };
+  const blockText = (el) => {
+    if (!el) return "";
+    const clone = el.cloneNode(true);
+    clone.querySelectorAll("script,style,noscript").forEach((n) => n.remove());
+    let text = (clone.innerText || clone.textContent || "")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    if (looksLikeHtml(text)) text = stripHtml(text);
+    return text;
+  };
+  const pickText = (selectors) => {
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      const t = blockText(el);
+      if (t) return t;
+    }
+    return "";
+  };
+  const pickCompany = (selectors) => {
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      const t = norm(el && (el.textContent || el.getAttribute("content")));
+      if (t) return t;
+    }
+    return "";
+  };
+  const ogSiteName = () => {
+    const m = document.querySelector('meta[property="og:site_name"]');
+    return norm(m && m.getAttribute("content"));
+  };
+  // schema.org JobPosting JSON-LD: emitted by Ashby (and many other ATS)
+  // at server-render time, so it works before any client-side React renders.
+  const jsonLdJobPosting = () => {
+    const scripts = document.querySelectorAll('script[type="application/ld+json"]');
+    for (const s of scripts) {
+      try {
+        const parsed = JSON.parse(s.textContent || "");
+        const items = Array.isArray(parsed) ? parsed : [parsed];
+        for (const item of items) {
+          if (!item || typeof item !== "object") continue;
+          const t = item["@type"];
+          const isJob = t === "JobPosting" || (Array.isArray(t) && t.includes("JobPosting"));
+          if (isJob) return item;
+        }
+      } catch (_e) {
+        // skip malformed JSON-LD blocks
+      }
+    }
+    return null;
+  };
+  const fromJsonLd = () => {
+    const job = jsonLdJobPosting();
+    if (!job) return { company: "", jd: "", role: "", location: "" };
+    const c =
+      norm(job.hiringOrganization?.name) ||
+      norm(job.hiringOrganization) ||
+      "";
+    const title = norm(job.title);
+    const descHtml = job.description || "";
+    const tmp = document.createElement("div");
+    tmp.innerHTML = typeof descHtml === "string" ? descHtml : "";
+    const desc = blockText(tmp);
+    const jdText = title ? `${title}\n\n${desc}`.trim() : desc;
+
+    // jobLocation is sometimes an object, sometimes an array. Take the first.
+    let loc = "";
+    const locField = job.jobLocation;
+    const locItem = Array.isArray(locField) ? locField[0] : locField;
+    if (locItem && typeof locItem === "object") {
+      const addr = locItem.address || {};
+      const parts = [
+        norm(addr.addressLocality),
+        norm(addr.addressRegion),
+        norm(addr.addressCountry?.name) || norm(addr.addressCountry),
+      ].filter(Boolean);
+      loc = parts.join(", ");
+    }
+    if (!loc && job.jobLocationType) {
+      // e.g. "TELECOMMUTE" -> "Remote"
+      const t = String(job.jobLocationType).toLowerCase();
+      if (t.includes("telecommute")) loc = "Remote";
+    }
+    return { company: c, jd: jdText, role: title, location: loc };
+  };
+
+  const host = location.hostname.toLowerCase();
+  const url = location.href;
+  const page_title = document.title || "";
+
+  let company = "";
+  let jd = "";
+  let role = "";
+  let job_location = "";
+
+  try {
+    if (host.includes("linkedin.com")) {
+      company = pickCompany([
+        ".job-details-jobs-unified-top-card__company-name a",
+        ".job-details-jobs-unified-top-card__company-name",
+        ".topcard__org-name-link",
+        ".jobs-unified-top-card__company-name a",
+        ".jobs-unified-top-card__company-name",
+      ]);
+      role = pickCompany([
+        ".job-details-jobs-unified-top-card__job-title h1",
+        ".job-details-jobs-unified-top-card__job-title",
+        ".jobs-unified-top-card__job-title",
+        ".topcard__title",
+        "h1.t-24",
+      ]);
+      job_location = pickCompany([
+        ".job-details-jobs-unified-top-card__primary-description-container .tvm__text:first-child",
+        ".job-details-jobs-unified-top-card__bullet",
+        ".jobs-unified-top-card__bullet",
+        ".topcard__flavor--bullet",
+      ]);
+      jd = pickText([
+        ".jobs-description__content .jobs-box__html-content",
+        ".jobs-description-content__text",
+        ".jobs-box__html-content",
+        ".show-more-less-html__markup",
+        "#job-details",
+      ]);
+    } else if (host.endsWith("greenhouse.io")) {
+      company =
+        pickCompany([".company-name", "header .company-name", "h1.company-name"]) ||
+        ogSiteName();
+      jd = pickText(["#content", ".section-wrapper.body", "#main #content"]);
+    } else if (host === "jobs.lever.co" || host.endsWith(".lever.co")) {
+      company =
+        ogSiteName() ||
+        pickCompany([".main-header-logo img[alt]", ".main-header-text-logo"]);
+      const headlineEl = document.querySelector(".posting-headline h2");
+      const headline = norm(headlineEl && headlineEl.textContent);
+      const desc = pickText([
+        ".section-wrapper.page-full-width .section.page-centered",
+        ".posting-page .content",
+        ".posting-page",
+      ]);
+      jd = headline ? `${headline}\n\n${desc}`.trim() : desc;
+    } else if (host === "jobs.ashbyhq.com" || host.endsWith(".ashbyhq.com")) {
+      const ld = fromJsonLd();
+      if (ld.jd) {
+        company = ld.company;
+        jd = ld.jd;
+      }
+      if (!jd) {
+        try {
+          const next = document.getElementById("__NEXT_DATA__");
+          if (next && next.textContent) {
+            const data = JSON.parse(next.textContent);
+            const job =
+              data?.props?.pageProps?.posting ||
+              data?.props?.pageProps?.jobPosting ||
+              data?.props?.pageProps?.job ||
+              null;
+            if (job) {
+              company =
+                job.organizationName ||
+                job.organization?.name ||
+                job.company ||
+                "";
+              const title = job.title || job.role || "";
+              const descHtml =
+                job.descriptionHtml ||
+                job.description ||
+                job.jobDescriptionHtml ||
+                "";
+              const tmp = document.createElement("div");
+              tmp.innerHTML = descHtml;
+              const desc = blockText(tmp);
+              jd = title ? `${title}\n\n${desc}`.trim() : desc;
+            }
+          }
+        } catch (_e) {
+          // fall through to selector-based attempt
+        }
+      }
+      if (!jd) {
+        jd = pickText([
+          '[class*="_descriptionText"]',
+          '[class*="_jobPostingDescription"]',
+          "main",
+        ]);
+      }
+      if (!company) company = ogSiteName();
+    } else if (host.endsWith("myworkdayjobs.com")) {
+      jd = pickText([
+        '[data-automation-id="jobPostingDescription"]',
+        '[data-automation-id="jobPostingPage"]',
+      ]);
+      company =
+        ogSiteName() ||
+        (host.split(".")[0] || "").replace(/[-_]+/g, " ").trim();
+      if (company) company = company.charAt(0).toUpperCase() + company.slice(1);
+    } else if (host.includes("indeed.com")) {
+      company = pickCompany([
+        '[data-testid="inlineHeader-companyName"] a',
+        '[data-testid="inlineHeader-companyName"]',
+        '[data-company-name="true"]',
+      ]);
+      jd = pickText(["#jobDescriptionText"]);
+    }
+  } catch (_e) {
+    // best-effort; selector errors fall through to fallback
+  }
+
+  if (!jd) {
+    try {
+      const ld = fromJsonLd();
+      if (ld.jd) {
+        if (!company) company = ld.company;
+        jd = ld.jd;
+      }
+      if (!role && ld.role) role = ld.role;
+      if (!job_location && ld.location) job_location = ld.location;
+    } catch (_e) {
+      // ignore
+    }
+  }
+
+  // Fill role/location from JSON-LD even when site selectors gave us the JD,
+  // since the site-specific branches above don't always pick these up.
+  if (!role || !job_location) {
+    try {
+      const ld = fromJsonLd();
+      if (!role && ld.role) role = ld.role;
+      if (!job_location && ld.location) job_location = ld.location;
+    } catch (_e) {
+      // ignore
+    }
+  }
+
+  // Final safety net: if any extraction path leaked literal HTML into jd
+  // (e.g. double-encoded JSON-LD descriptions), strip it before returning.
+  if (looksLikeHtml(jd)) jd = stripHtml(jd);
+
+  const matched = Boolean(company && jd && jd.length >= MIN_JD_LEN);
+
+  let page_text = "";
+  if (!matched) {
+    page_text = blockText(document.body).slice(0, MAX_TEXT);
+    if (looksLikeHtml(page_text)) page_text = stripHtml(page_text);
+  }
+
+  return {
+    matched,
+    host,
+    url,
+    page_title,
+    company,
+    jd,
+    role,
+    location: job_location,
+    page_text,
+  };
+}
+
+// When a company embeds an ATS in an iframe (e.g. voleon.com → Ashby),
+// the top frame is just marketing chrome. Prefer frames that look like
+// known ATS hosts so the extractor's site-specific selectors fire.
+function isAtsHost(host) {
+  if (!host) return false;
+  return (
+    host.endsWith(".ashbyhq.com") ||
+    host === "jobs.ashbyhq.com" ||
+    host.endsWith("greenhouse.io") ||
+    host === "jobs.lever.co" ||
+    host.endsWith(".lever.co") ||
+    host.endsWith("myworkdayjobs.com")
+  );
+}
+
+function pickBestFrameResult(executeScriptOut) {
+  if (!Array.isArray(executeScriptOut) || executeScriptOut.length === 0) {
+    return null;
+  }
+  const results = executeScriptOut
+    .map((entry) => entry && entry.result)
+    .filter((r) => r && typeof r === "object");
+  if (results.length === 0) return null;
+
+  const matched = results.find((r) => r.matched);
+  if (matched) return matched;
+
+  const ats = results.find((r) => isAtsHost(r.host));
+  if (ats) return ats;
+
+  const withText = results.find((r) => r.page_text && r.page_text.length > 0);
+  if (withText) return withText;
+
+  return results[0];
+}
+
+async function runAutoDetect() {
+  const active = getActiveTabName();
+  const targets = AUTODETECT_TARGETS[active];
+  if (!targets) return;
+
+  let tab;
+  try {
+    [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  } catch (_e) {
+    setAutodetectStatus("Could not read active tab.", "err");
+    return;
+  }
+  if (!tab || !tab.id) {
+    setAutodetectStatus("Could not read active tab.", "err");
+    return;
+  }
+  if (/^(chrome|edge|brave|about|chrome-extension):/.test(tab.url || "")) {
+    setAutodetectStatus("Open a job posting page first.", "err");
+    return;
+  }
+
+  autoDetectBtn.disabled = true;
+  setAutodetectStatus("Detecting...", "working");
+
+  let result;
+  try {
+    const out = await chrome.scripting.executeScript({
+      target: { tabId: tab.id, allFrames: true },
+      func: extractJdFromPage,
+    });
+    result = pickBestFrameResult(out);
+  } catch (err) {
+    setAutodetectStatus(
+      `Failed to read page: ${err.message || err}`,
+      "err"
+    );
+    autoDetectBtn.disabled = false;
+    return;
+  }
+
+  if (!result) {
+    setAutodetectStatus("No data extracted from page.", "err");
+    autoDetectBtn.disabled = false;
+    return;
+  }
+
+  let company = result.company || "";
+  let jd = result.jd || "";
+  let role = result.role || "";
+  let job_location = result.location || "";
+  let source = result.host ? `selectors: ${result.host}` : "selectors";
+
+  if (!result.matched) {
+    if (!result.page_text) {
+      setAutodetectStatus("Page has no readable text.", "err");
+      autoDetectBtn.disabled = false;
+      return;
+    }
+    setAutodetectStatus("Detecting via Groq...", "working");
+    try {
+      const res = await fetch(`${BACKEND}/extract-jd`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: result.url || "",
+          page_title: result.page_title || "",
+          page_text: result.page_text,
+        }),
+      });
+      if (!res.ok) {
+        const detail = await readErrorDetail(res);
+        throw new Error(detail || `HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      company = data.company || "";
+      jd = data.job_description || "";
+      // Groq returns these on newer backend; older deploys won't.
+      if (data.job_role) role = data.job_role;
+      if (data.location) job_location = data.location;
+      source = "groq";
+    } catch (err) {
+      setAutodetectStatus(`Failed: ${err.message || err}`, "err");
+      autoDetectBtn.disabled = false;
+      return;
+    }
+  }
+
+  if (!company && !jd) {
+    const msg = source === "groq"
+      ? "Page doesn't look like a single job posting. Open the specific posting and try again."
+      : "This site is supported but the posting markup looks different - try copy/paste.";
+    setAutodetectStatus(msg, "err");
+    autoDetectBtn.disabled = false;
+    return;
+  }
+
+  const companyEl = $(targets.company);
+  const jdEl = $(targets.jd);
+  if (companyEl) companyEl.value = company;
+  if (jdEl) jdEl.value = jd;
+
+  const storageItems = {
+    [targets.storage.company]: company,
+    [targets.storage.jd]: jd,
+  };
+
+  // Track tab also gets role / location populated, plus the page URL shown
+  // in the visible jobUrl field and stashed in storage for save time.
+  if (active === "track") {
+    const roleEl = $(targets.role);
+    const locEl = $(targets.location);
+    const jobUrlEl = $("track-job-url");
+    if (roleEl) roleEl.value = role;
+    if (locEl) locEl.value = job_location;
+    if (jobUrlEl && tab && tab.url) jobUrlEl.value = tab.url;
+    storageItems[targets.storage.role] = role;
+    storageItems[targets.storage.location] = job_location;
+    if (tab && tab.url) {
+      storageItems[targets.storage.jobUrl] = tab.url;
+    }
+  }
+
+  await storageSet(storageItems);
+
+  if (company && !jd) {
+    setAutodetectStatus("Detected company but no job description on this page.", "err");
+  } else if (!company && jd) {
+    setAutodetectStatus("Detected a description but no company name. Fill it in manually.", "err");
+  } else {
+    setAutodetectStatus(`Filled from ${source}.`, "ok");
+  }
+  autoDetectBtn.disabled = false;
+}
+
+autoDetectBtn.addEventListener("click", runAutoDetect);
 
 // ---------- score display helper ----------
 
@@ -249,8 +780,11 @@ const coverForm = $("coverForm");
 const coverCompany = $("cover-company");
 const coverJd = $("cover-jd");
 const coverSubmit = $("coverSubmit");
+const coverTextBtn = $("coverTextBtn");
 const coverStatus = $("coverStatus");
 const coverScore = $("coverScore");
+const coverTextResult = $("coverTextResult");
+const coverBodyOut = $("cover-body-out");
 
 async function fetchScoreSilently(jd, company) {
   try {
@@ -348,6 +882,63 @@ coverForm.addEventListener("submit", async (e) => {
     setStatus(coverStatus, `Failed: ${err.message || err}`, "err");
   } finally {
     coverSubmit.disabled = false;
+  }
+});
+
+coverTextBtn.addEventListener("click", async () => {
+  const company = coverCompany.value.trim();
+  const jd = coverJd.value.trim();
+  if (!company || !jd) {
+    setStatus(coverStatus, "Fill in both fields.", "err");
+    return;
+  }
+
+  await storageSet({
+    [STORAGE_KEYS.cover.company]: company,
+    [STORAGE_KEYS.cover.jd]: jd,
+  });
+
+  coverSubmit.disabled = true;
+  coverTextBtn.disabled = true;
+  setStatus(coverStatus, "Generating cover letter text...", "working");
+  coverTextResult.classList.add("hidden");
+
+  // Fire score in parallel; same UX as the PDF flow.
+  coverScore.classList.remove("hidden");
+  showScoreLoading(coverScore, { compact: true });
+  fetchScoreSilently(jd, company).then((data) => {
+    if (data && typeof data.score === "number") {
+      renderScore(coverScore, data, { compact: true });
+    } else {
+      hideScore(coverScore);
+    }
+  });
+
+  try {
+    const res = await fetch(`${BACKEND}/cover-text`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        company,
+        job_description: jd,
+        resume_id: getResumeId(),
+      }),
+    });
+    if (!res.ok) {
+      const detail = await readErrorDetail(res);
+      throw new Error(detail || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    const greeting = `Dear ${data.hiring_manager || "Hiring Team"},`;
+    const signoff = "Best regards,\nAmogh Ramagiri";
+    coverBodyOut.value = `${greeting}\n\n${(data.body || "").trim()}\n\n${signoff}`;
+    coverTextResult.classList.remove("hidden");
+    setStatus(coverStatus, "Done. Edit if you want, then copy.", "ok");
+  } catch (err) {
+    setStatus(coverStatus, `Failed: ${err.message || err}`, "err");
+  } finally {
+    coverSubmit.disabled = false;
+    coverTextBtn.disabled = false;
   }
 });
 
@@ -656,6 +1247,162 @@ scoreForm.addEventListener("submit", async (e) => {
 });
 
 // ============================================================================
+// Question tab
+// ============================================================================
+
+const questionForm = $("questionForm");
+const questionCompany = $("question-company");
+const questionJd = $("question-jd");
+const questionText = $("question-text");
+const questionSubmit = $("questionSubmit");
+const questionStatus = $("questionStatus");
+const questionResult = $("questionResult");
+const questionAnswerOut = $("question-answer-out");
+
+questionForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const company = questionCompany.value.trim();
+  const jd = questionJd.value.trim();
+  const question = questionText.value.trim();
+  if (!company || !jd || !question) {
+    setStatus(
+      questionStatus,
+      "Fill in company, job description, and the question.",
+      "err"
+    );
+    return;
+  }
+
+  await storageSet({
+    [STORAGE_KEYS.question.company]: company,
+    [STORAGE_KEYS.question.jd]: jd,
+    [STORAGE_KEYS.question.text]: question,
+  });
+
+  questionSubmit.disabled = true;
+  setStatus(questionStatus, "Generating answer...", "working");
+  questionResult.classList.add("hidden");
+
+  try {
+    const res = await fetch(`${BACKEND}/answer-question`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        company,
+        job_description: jd,
+        question,
+        resume_id: getResumeId(),
+      }),
+    });
+    if (!res.ok) {
+      const detail = await readErrorDetail(res);
+      throw new Error(detail || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    questionAnswerOut.value = data.answer || "";
+    questionResult.classList.remove("hidden");
+    setStatus(questionStatus, "Done. Edit if you want, then copy.", "ok");
+  } catch (err) {
+    setStatus(questionStatus, `Failed: ${err.message || err}`, "err");
+  } finally {
+    questionSubmit.disabled = false;
+  }
+});
+
+// ============================================================================
+// Track tab
+// ============================================================================
+
+const trackForm = $("trackForm");
+const trackCompany = $("track-company");
+const trackRole = $("track-role");
+const trackLocation = $("track-location");
+const trackJobUrl = $("track-job-url");
+const trackJd = $("track-jd");
+const trackStatusSel = $("track-status");
+const trackInterview = $("track-interview");
+const trackAppliedDate = $("track-applied-date");
+const trackNotes = $("track-notes");
+const trackSubmit = $("trackSubmit");
+const trackStatusEl = $("trackStatus");
+
+function todayIsoDate() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+trackForm.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const company = trackCompany.value.trim();
+  if (!company) {
+    setStatus(trackStatusEl, "Company is required.", "err");
+    return;
+  }
+
+  // Read jobUrl from the visible input; fall back to the active tab's URL.
+  let jobUrl = trackJobUrl.value.trim();
+  if (!jobUrl) {
+    try {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (tab && tab.url && !/^(chrome|edge|brave|about|chrome-extension):/.test(tab.url)) {
+        jobUrl = tab.url;
+      }
+    } catch (_e) {
+      // ignore
+    }
+  }
+
+  const payload = {
+    companyName: company,
+    jobRole: trackRole.value.trim() || null,
+    location: trackLocation.value.trim() || null,
+    interviewStatus: trackInterview.value.trim() || null,
+    status: trackStatusSel.value || "Applied",
+    appliedDate: trackAppliedDate.value || todayIsoDate(),
+    resumeId: getResumeId() || null,
+    jobUrl: jobUrl || null,
+    notes: trackNotes.value.trim() || null,
+    jobDescription: trackJd.value.trim() || null,
+  };
+
+  await storageSet({
+    [STORAGE_KEYS.track.company]: payload.companyName,
+    [STORAGE_KEYS.track.role]: payload.jobRole || "",
+    [STORAGE_KEYS.track.location]: payload.location || "",
+    [STORAGE_KEYS.track.jobUrl]: payload.jobUrl || "",
+    [STORAGE_KEYS.track.status]: payload.status,
+    [STORAGE_KEYS.track.interview]: payload.interviewStatus || "",
+    // Don't persist appliedDate — it should always default to "today" when
+    // the popup opens, not whatever was last saved.
+    [STORAGE_KEYS.track.notes]: payload.notes || "",
+    [STORAGE_KEYS.track.jd]: payload.jobDescription || "",
+  });
+
+  trackSubmit.disabled = true;
+  setStatus(trackStatusEl, "Saving...", "working");
+
+  try {
+    const res = await fetch(`${BACKEND}/track`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      const detail = await readErrorDetail(res);
+      throw new Error(detail || `HTTP ${res.status}`);
+    }
+    setStatus(trackStatusEl, `Saved. ${payload.companyName} - ${payload.status}.`, "ok");
+  } catch (err) {
+    setStatus(trackStatusEl, `Failed: ${err.message || err}`, "err");
+  } finally {
+    trackSubmit.disabled = false;
+  }
+});
+
+// ============================================================================
 // Restore persisted fields & active tab
 // ============================================================================
 
@@ -672,6 +1419,18 @@ async function restoreAll() {
     STORAGE_KEYS.outreach.context,
     STORAGE_KEYS.score.company,
     STORAGE_KEYS.score.jd,
+    STORAGE_KEYS.question.company,
+    STORAGE_KEYS.question.jd,
+    STORAGE_KEYS.question.text,
+    STORAGE_KEYS.track.company,
+    STORAGE_KEYS.track.role,
+    STORAGE_KEYS.track.location,
+    STORAGE_KEYS.track.jobUrl,
+    STORAGE_KEYS.track.jd,
+    STORAGE_KEYS.track.status,
+    STORAGE_KEYS.track.interview,
+    STORAGE_KEYS.track.appliedDate,
+    STORAGE_KEYS.track.notes,
   ]);
 
   if (data[STORAGE_KEYS.cover.company]) coverCompany.value = data[STORAGE_KEYS.cover.company];
@@ -688,8 +1447,28 @@ async function restoreAll() {
   if (data[STORAGE_KEYS.score.company]) scoreCompany.value = data[STORAGE_KEYS.score.company];
   if (data[STORAGE_KEYS.score.jd]) scoreJd.value = data[STORAGE_KEYS.score.jd];
 
+  if (data[STORAGE_KEYS.question.company]) questionCompany.value = data[STORAGE_KEYS.question.company];
+  if (data[STORAGE_KEYS.question.jd]) questionJd.value = data[STORAGE_KEYS.question.jd];
+  if (data[STORAGE_KEYS.question.text]) questionText.value = data[STORAGE_KEYS.question.text];
+
+  if (data[STORAGE_KEYS.track.company]) trackCompany.value = data[STORAGE_KEYS.track.company];
+  if (data[STORAGE_KEYS.track.role]) trackRole.value = data[STORAGE_KEYS.track.role];
+  if (data[STORAGE_KEYS.track.location]) trackLocation.value = data[STORAGE_KEYS.track.location];
+  if (data[STORAGE_KEYS.track.jobUrl]) trackJobUrl.value = data[STORAGE_KEYS.track.jobUrl];
+  if (data[STORAGE_KEYS.track.jd]) trackJd.value = data[STORAGE_KEYS.track.jd];
+  if (data[STORAGE_KEYS.track.status]) trackStatusSel.value = data[STORAGE_KEYS.track.status];
+  if (data[STORAGE_KEYS.track.interview]) trackInterview.value = data[STORAGE_KEYS.track.interview];
+  // Always default Applied date to today on popup load. The stored value is
+  // ignored on purpose: if you tracked a job yesterday, opening the popup
+  // today should show today, not "yesterday".
+  trackAppliedDate.value = todayIsoDate();
+  if (data[STORAGE_KEYS.track.notes]) trackNotes.value = data[STORAGE_KEYS.track.notes];
+
   const activeTab = data[STORAGE_KEYS.activeTab];
-  if (activeTab && ["cover", "email", "outreach", "score"].includes(activeTab)) {
+  if (
+    activeTab &&
+    ["cover", "email", "outreach", "score", "question", "track"].includes(activeTab)
+  ) {
     activateTab(activeTab);
   }
 

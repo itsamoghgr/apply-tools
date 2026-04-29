@@ -1,0 +1,63 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Resume {
+  id              String           @id
+  label           String
+  content         String
+  isActive        Boolean          @default(true)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  applications    Application[]
+  jobApplications JobApplication[]
+}
+
+model Application {
+  id             String   @id
+  mode           String
+  company        String?
+  jobDescription String?
+  resumeId       String?
+  resume         Resume?  @relation(fields: [resumeId], references: [id], onDelete: SetNull)
+  output         String?
+  scoreData     String?
+  pdfPath        String?
+  createdAt      DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([mode])
+}
+
+model JobApplication {
+  id                String    @id
+  companyName       String
+  jobRole           String?
+  jobUrl            String?
+  location          String?
+  interviewStatus   String?
+  status            String    @default("Applied")
+  appliedDate       DateTime  @default(now())
+  resumeId          String?
+  resume            Resume?   @relation(fields: [resumeId], references: [id], onDelete: SetNull)
+  companyCareerPage String?
+  decisionDate      DateTime?
+  decisionTime      String?
+  notes             String?
+  hrName            String?
+  hrLinkedin        String?
+  hrEmail           String?
+  referral          String?
+  referralLinkedin  String?
+  jobDescription    String?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([createdAt])
+  @@index([status])
+}
