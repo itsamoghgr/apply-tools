@@ -139,6 +139,64 @@ body {
   font-size: 11px;
 }
 
+/* ---------- autodetect bar ---------- */
+
+.autodetect-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.autodetect-bar.hidden {
+  display: none;
+}
+
+#autoDetectBtn {
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+
+#autoDetectBtn:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+#autoDetectBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.autodetect-status {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.autodetect-status.working {
+  color: var(--warn);
+}
+
+.autodetect-status.ok {
+  color: var(--ok);
+}
+
+.autodetect-status.err {
+  color: var(--bad);
+}
+
 /* ---------- tabs ---------- */
 
 .tabs {
@@ -201,6 +259,8 @@ label .hint {
 }
 
 input[type="text"],
+input[type="url"],
+input[type="date"],
 textarea,
 select {
   width: 100%;
@@ -215,7 +275,13 @@ select {
   transition: border-color 0.15s;
 }
 
+input[type="date"] {
+  color-scheme: dark;
+}
+
 input[type="text"]:focus,
+input[type="url"]:focus,
+input[type="date"]:focus,
 textarea:focus,
 select:focus {
   border-color: var(--accent);
@@ -268,6 +334,42 @@ button[type="submit"]:hover:not(:disabled) {
 }
 
 button:disabled {
+  background: var(--border);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.cover-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.cover-actions button[type="submit"] {
+  margin-top: 0;
+  flex: 1;
+}
+
+.btn-secondary {
+  padding: 9px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  flex: 1;
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.btn-secondary:disabled {
   background: var(--border);
   color: var(--muted);
   cursor: not-allowed;
@@ -584,4 +686,41 @@ button:disabled {
 .score-row.active {
   outline: 2px solid var(--accent);
   outline-offset: -1px;
+}
+
+/* ---------- track tab ---------- */
+
+.track-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.track-row .track-cell {
+  display: flex;
+  flex-direction: column;
+}
+
+.track-jd-details {
+  margin-top: 4px;
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.track-jd-details > summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+  user-select: none;
+}
+
+.track-jd-details > summary:hover {
+  color: var(--text);
+}
+
+.track-jd-details textarea {
+  margin-top: 8px;
 }

@@ -23,6 +23,15 @@ backend/venv/
 # Generated PDFs (avoid committing personal cover letters)
 *.pdf
 
+# Local SQLite DB + generated PDFs
+data/
+
+# Node / Next.js
+node_modules/
+.next/
+frontend/.env*.local
+frontend/next-env.d.ts
+
 # OS
 .DS_Store
 Thumbs.db

@@ -21,6 +21,22 @@
       </select>
     </div>
 
+    <div class="autodetect-bar" id="autodetectBar">
+      <button
+        type="button"
+        id="autoDetectBtn"
+        title="Detect company + JD from the active tab"
+      >
+        Auto-detect from page
+      </button>
+      <span
+        id="autoDetectStatus"
+        class="autodetect-status"
+        role="status"
+        aria-live="polite"
+      ></span>
+    </div>
+
     <nav class="tabs" role="tablist">
       <button
         type="button"
@@ -39,6 +55,12 @@
       </button>
       <button type="button" class="tab" role="tab" data-tab="score" aria-selected="false">
         Score
+      </button>
+      <button type="button" class="tab" role="tab" data-tab="question" aria-selected="false">
+        Question
+      </button>
+      <button type="button" class="tab" role="tab" data-tab="track" aria-selected="false">
+        Track
       </button>
     </nav>
 
@@ -63,7 +85,10 @@
           maxlength="20000"
         ></textarea>
 
-        <button type="submit" id="coverSubmit">Generate PDF</button>
+        <div class="cover-actions">
+          <button type="submit" id="coverSubmit">Generate PDF</button>
+          <button type="button" id="coverTextBtn" class="btn-secondary">Generate text</button>
+        </div>
       </form>
       <div id="coverScore" class="score-display compact hidden">
         <div class="score-number-wrap">
@@ -72,6 +97,14 @@
         <div class="score-verdict"></div>
       </div>
       <div id="coverStatus" class="status" role="status" aria-live="polite"></div>
+
+      <div id="coverTextResult" class="result hidden">
+        <div class="result-row">
+          <label for="cover-body-out">Cover letter</label>
+          <button type="button" class="copy-btn" data-copy="cover-body-out">Copy</button>
+        </div>
+        <textarea id="cover-body-out" rows="16"></textarea>
+      </div>
     </section>
 
     <!-- ============ Email tab ============ -->
@@ -205,6 +238,136 @@
       <div id="scoreStatus" class="status" role="status" aria-live="polite"></div>
 
       <div id="scoreList" class="score-list hidden"></div>
+    </section>
+
+    <!-- ============ Question tab ============ -->
+    <section class="panel" data-panel="question">
+      <form id="questionForm" autocomplete="off">
+        <label for="question-company">Company</label>
+        <input
+          type="text"
+          id="question-company"
+          placeholder="Anthropic"
+          required
+          maxlength="200"
+        />
+
+        <label for="question-jd">Job description</label>
+        <textarea
+          id="question-jd"
+          placeholder="Paste the full JD here..."
+          required
+          rows="7"
+          maxlength="20000"
+        ></textarea>
+
+        <label for="question-text">Application question</label>
+        <textarea
+          id="question-text"
+          placeholder="Paste the application question here..."
+          required
+          rows="4"
+          maxlength="4000"
+        ></textarea>
+
+        <button type="submit" id="questionSubmit">Generate answer</button>
+      </form>
+
+      <div id="questionStatus" class="status" role="status" aria-live="polite"></div>
+
+      <div id="questionResult" class="result hidden">
+        <div class="result-row">
+          <label for="question-answer-out">Answer</label>
+          <button type="button" class="copy-btn" data-copy="question-answer-out">Copy</button>
+        </div>
+        <textarea id="question-answer-out" rows="12"></textarea>
+      </div>
+    </section>
+
+    <!-- ============ Track tab ============ -->
+    <section class="panel" data-panel="track">
+      <form id="trackForm" autocomplete="off">
+        <label for="track-company">Company</label>
+        <input
+          type="text"
+          id="track-company"
+          placeholder="Anthropic"
+          required
+          maxlength="200"
+        />
+
+        <label for="track-role">Job role</label>
+        <input
+          type="text"
+          id="track-role"
+          placeholder="Senior ML Engineer"
+          maxlength="200"
+        />
+
+        <label for="track-location">Location</label>
+        <input
+          type="text"
+          id="track-location"
+          placeholder="San Francisco, CA / Remote"
+          maxlength="200"
+        />
+
+        <label for="track-job-url">Job URL</label>
+        <input
+          type="url"
+          id="track-job-url"
+          placeholder="Auto-fills from page URL on detect"
+          maxlength="2000"
+        />
+
+        <div class="track-row">
+          <div class="track-cell">
+            <label for="track-status">Status</label>
+            <select id="track-status">
+              <option value="Applied" selected>Applied</option>
+              <option value="In-Progress">In-Progress</option>
+              <option value="Offer">Offer</option>
+              <option value="Rejected">Rejected</option>
+              <option value="Withdrawn">Withdrawn</option>
+              <option value="Ghosted">Ghosted</option>
+            </select>
+          </div>
+          <div class="track-cell">
+            <label for="track-applied-date">Applied date</label>
+            <input type="date" id="track-applied-date" />
+          </div>
+        </div>
+
+        <label for="track-interview">Interview status</label>
+        <select id="track-interview">
+          <option value="" selected>(none)</option>
+          <option value="Assessment">Assessment</option>
+          <option value="Interviewing">Interviewing</option>
+          <option value="Offer">Offer</option>
+          <option value="Rejected">Rejected</option>
+        </select>
+
+        <label for="track-notes">Notes</label>
+        <textarea
+          id="track-notes"
+          placeholder="Anything to remember about this one..."
+          rows="3"
+          maxlength="10000"
+        ></textarea>
+
+        <details class="track-jd-details">
+          <summary>Job description (auto-detected)</summary>
+          <textarea
+            id="track-jd"
+            placeholder="Auto-fills when you click 'Auto-detect from page'..."
+            rows="6"
+            maxlength="40000"
+          ></textarea>
+        </details>
+
+        <button type="submit" id="trackSubmit">Save to tracker</button>
+      </form>
+      <div id="trackStatus" class="status" role="status" aria-live="polite"></div>
     </section>
 
     <script src="popup.js"></script>
