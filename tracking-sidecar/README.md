@@ -43,12 +43,17 @@ Save both. You'll paste them into Render and `backend/.env` next.
 1. Push this repo to GitHub.
 2. Open <https://dashboard.render.com/select-repo?type=blueprint> → pick the repo.
 3. Render reads [`tracking-sidecar/render.yaml`](./render.yaml) and offers to create the service.
-4. Set the four secrets when prompted:
+4. Set the three secrets when prompted:
    - `DATABASE_URL` — Neon connection string from step 1
    - `TRACKING_FERNET_KEY` — value from step 2
    - `TRACKING_API_TOKEN` — value from step 2
-   - `PUBLIC_BASE_URL` — Render generates a `*.onrender.com` URL on first deploy; set this to that URL (e.g. `https://apply-tools-tracker.onrender.com`). You'll need to redeploy once after setting it.
-5. First deploy takes ~3 minutes (Docker build + cold start).
+5. First deploy takes ~3 minutes (Docker build + cold start). The sidecar
+   reads `RENDER_EXTERNAL_URL` automatically to build its own tracking
+   URLs, so there's nothing to set after the deploy finishes.
+
+If you later bind a custom domain, set `PUBLIC_BASE_URL` to that hostname
+(otherwise emails would still embed the `*.onrender.com` URL). Without a
+custom domain, leave it unset.
 
 The service auto-creates the `tracking_events` table on first boot via `_ensure_schema()` in [`main.py`](./main.py).
 

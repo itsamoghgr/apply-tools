@@ -40,17 +40,33 @@ logging.basicConfig(level=logging.INFO)
 # ---------------------------------------------------------------------------
 
 
+def _env(key: str) -> str | None:
+    v = os.getenv(key)
+    return v.strip() if v else None
+
+
 def _require_env(key: str) -> str:
-    value = os.getenv(key)
-    if not value:
+    v = _env(key)
+    if not v:
         raise RuntimeError(f"{key} env var is required")
-    return value
+    return v
 
 
 DATABASE_URL = _require_env("DATABASE_URL")
 TRACKING_FERNET_KEY = _require_env("TRACKING_FERNET_KEY").encode("utf-8")
 TRACKING_API_TOKEN = _require_env("TRACKING_API_TOKEN")
-PUBLIC_BASE_URL = _require_env("PUBLIC_BASE_URL").rstrip("/") + "/"
+
+# Render injects RENDER_EXTERNAL_URL automatically (e.g.
+# https://apply-tools-tracker.onrender.com) on every deploy, including the
+# first one. We prefer an explicit PUBLIC_BASE_URL when set so users can
+# point at a custom domain or run off-Render — otherwise we self-discover.
+_public_base = _env("PUBLIC_BASE_URL") or _env("RENDER_EXTERNAL_URL")
+if not _public_base:
+    raise RuntimeError(
+        "PUBLIC_BASE_URL env var is required (or RENDER_EXTERNAL_URL when "
+        "deployed on Render)"
+    )
+PUBLIC_BASE_URL = _public_base.rstrip("/") + "/"
 
 OPEN_PATH = "track/open/"
 CLICK_PATH = "track/click/"
