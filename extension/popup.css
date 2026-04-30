@@ -23,13 +23,20 @@ body {
   padding: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   font-size: 14px;
-  background: var(--bg);
   color: var(--text);
+}
+
+/* Make Chrome's underlying popup window invisible so our rounded body
+   appears as the actual popup outline. */
+html {
+  background: transparent;
 }
 
 body {
   width: 440px;
   padding: 14px;
+  background: var(--bg);
+  border-radius: 14px;
 }
 
 /* ---------- topbar ---------- */
@@ -139,50 +146,109 @@ body {
   font-size: 11px;
 }
 
-/* ---------- autodetect bar ---------- */
+/* ---------- shared JD context block ---------- */
 
-.autodetect-bar {
+.jd-context {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
   margin-bottom: 12px;
 }
 
-.autodetect-bar.hidden {
+.jd-context.hidden {
   display: none;
 }
 
-#autoDetectBtn {
+.jd-context-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.jd-company {
+  flex: 1;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.jd-company:focus {
+  border-color: var(--accent);
+}
+
+.jd-textarea {
+  width: 100%;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: inherit;
+  font-size: 13px;
+  line-height: 1.4;
+  outline: none;
+  /* Fixed-height paste area: scroll internally instead of growing the popup. */
+  resize: none;
+  height: 140px;
+  overflow-y: auto;
+  transition: border-color 0.15s;
+}
+
+.jd-textarea:focus {
+  border-color: var(--accent);
+}
+
+.jd-context-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 18px;
+}
+
+.btn-mini {
   background: var(--panel-2);
   color: var(--text);
   border: 1px solid var(--border-strong);
-  border-radius: 4px;
-  padding: 5px 12px;
+  border-radius: 6px;
+  padding: 6px 10px;
   font-size: 12px;
   font-weight: 500;
   font-family: inherit;
   cursor: pointer;
   transition: background 0.15s, border-color 0.15s, color 0.15s;
   flex-shrink: 0;
+  white-space: nowrap;
 }
 
-#autoDetectBtn:hover:not(:disabled) {
+.btn-mini:hover:not(:disabled) {
   background: var(--accent);
   border-color: var(--accent);
   color: white;
 }
 
-#autoDetectBtn:disabled {
+.btn-mini:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
 
 .autodetect-status {
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  flex: 1;
 }
 
 .autodetect-status.working {
@@ -197,12 +263,67 @@ body {
   color: var(--bad);
 }
 
+/* compact score badge in the shared header */
+.score-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-strong);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.score-pill.hidden {
+  display: none;
+}
+
+.score-pill.loading .score-pill-num {
+  opacity: 0.4;
+}
+
+.score-pill-num {
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.5px;
+  color: var(--text);
+}
+
+.score-pill-denom {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.score-pill-verdict {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: 4px;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.score-pill.band-poor .score-pill-num { color: var(--bad); }
+.score-pill.band-poor { border-color: rgba(248,113,113,0.4); }
+.score-pill.band-marginal .score-pill-num { color: var(--warn); }
+.score-pill.band-marginal { border-color: rgba(251,191,36,0.4); }
+.score-pill.band-solid .score-pill-num { color: var(--accent); }
+.score-pill.band-strong .score-pill-num { color: var(--ok); }
+.score-pill.band-strong { border-color: rgba(74,222,128,0.4); }
+
 /* ---------- tabs ---------- */
 
 .tabs {
   display: flex;
   gap: 2px;
-  border-bottom: 1px solid var(--border);
+  padding: 3px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
   margin-bottom: 12px;
 }
 
@@ -210,23 +331,27 @@ body {
   flex: 1;
   background: transparent;
   border: none;
-  border-bottom: 2px solid transparent;
-  padding: 8px 6px;
+  border-radius: 6px;
+  padding: 6px 4px;
   margin: 0;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--muted);
   cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
+  transition: color 0.15s, background 0.15s;
+  font-family: inherit;
 }
 
-.tab:hover {
+.tab:hover:not(.active) {
   color: var(--text);
+  background: var(--panel-2);
 }
 
 .tab.active {
   color: var(--text);
-  border-bottom-color: var(--accent);
+  background: var(--panel-2);
+  box-shadow: 0 0 0 1px var(--border-strong),
+    inset 0 0 0 1px color-mix(in oklab, var(--accent) 25%, transparent);
 }
 
 .panel {
@@ -235,6 +360,54 @@ body {
 
 .panel.active {
   display: block;
+}
+
+/* ---------- panel utilities ---------- */
+
+.panel-note {
+  font-size: 11.5px;
+  color: var(--muted);
+  padding: 8px 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin-bottom: 10px;
+  line-height: 1.4;
+}
+
+.panel-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.panel-actions .btn-primary,
+.panel-actions .btn-secondary {
+  flex: 1;
+  margin-top: 0;
+}
+
+.btn-primary {
+  padding: 9px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: white;
+  background: var(--accent);
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background 0.15s;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.btn-primary:disabled {
+  background: var(--border);
+  color: var(--muted);
+  cursor: not-allowed;
 }
 
 /* ---------- forms ---------- */
@@ -292,9 +465,9 @@ input[readonly] {
 }
 
 textarea {
-  resize: vertical;
+  resize: none;
   min-height: 60px;
-  max-height: 320px;
+  overflow: hidden;
   line-height: 1.4;
 }
 
@@ -337,17 +510,6 @@ button:disabled {
   background: var(--border);
   color: var(--muted);
   cursor: not-allowed;
-}
-
-.cover-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.cover-actions button[type="submit"] {
-  margin-top: 0;
-  flex: 1;
 }
 
 .btn-secondary {

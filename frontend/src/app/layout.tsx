@@ -49,8 +49,9 @@ export default function RootLayout({
       <body className="min-h-full bg-base-100 text-base-content">
         <Sidebar />
 
-        {/* Main column shifts right of the desktop sidebar; full-width on mobile. */}
-        <div className="min-h-screen flex flex-col lg:pl-[var(--sidebar-w,224px)] transition-[padding-left] duration-200 ease-out">
+        {/* Main column shifts right of the desktop sidebar; full-width on mobile.
+            pt-14 reserves space for the mobile sticky top bar (h-14). */}
+        <div className="min-h-screen flex flex-col pt-14 lg:pt-0 lg:pl-[var(--sidebar-w,224px)] transition-[padding-left] duration-200 ease-out">
           <main className="flex-1 w-full px-6 sm:px-8 py-8 sm:py-10 animate-fade-in">
             {children}
           </main>

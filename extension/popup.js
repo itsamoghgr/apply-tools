@@ -2,39 +2,27 @@ const BACKEND = "http://127.0.0.1:8000";
 const LINKEDIN_INVITE_LIMIT = 300;
 const LINKEDIN_INVITE_WARN = 280;
 
+// Storage keys. The shared company + JD live in one place; only the truly
+// tab-local fields (intent, outreach profile, question text, tracker
+// extras) are persisted per-tab.
 const STORAGE_KEYS = {
   activeTab: "activeTab",
   resumeId: "resume.id",
-  cover: { company: "cover.company", jd: "cover.jd" },
-  email: {
-    company: "email.company",
-    jd: "email.jd",
-    intent: "email.intent",
-  },
+  shared: { company: "shared.company", jd: "shared.jd" },
+  email: { intent: "email.intent" },
   outreach: {
     channel: "outreach.channel",
     profile: "outreach.profile",
     context: "outreach.context",
   },
-  score: {
-    company: "score.company",
-    jd: "score.jd",
-  },
-  question: {
-    company: "question.company",
-    jd: "question.jd",
-    text: "question.text",
-  },
+  question: { text: "question.text" },
   track: {
-    company: "track.company",
     role: "track.role",
     location: "track.location",
-    jd: "track.jd",
+    jobUrl: "track.jobUrl",
     status: "track.status",
     interview: "track.interview",
-    appliedDate: "track.appliedDate",
     notes: "track.notes",
-    jobUrl: "track.jobUrl",
   },
 };
 
@@ -105,6 +93,28 @@ async function storageSet(items) {
   }
 }
 
+// ---------- textarea autosize ----------
+// Popup has no scroll: textareas grow with content instead of using
+// internal scrollbars. Call autosize() any time a textarea's value
+// changes (typing, programmatic set, restore from storage).
+
+function autosize(el) {
+  if (!el) return;
+  // Reset height so shrinking works after deletes.
+  el.style.height = "auto";
+  el.style.height = el.scrollHeight + "px";
+}
+
+function wireAutosize() {
+  document.querySelectorAll("textarea").forEach((ta) => {
+    // The shared JD paste area is intentionally fixed-height + scrollable;
+    // skip it so it doesn't grow with content.
+    if (ta.classList.contains("jd-textarea")) return;
+    ta.addEventListener("input", () => autosize(ta));
+    autosize(ta);
+  });
+}
+
 // ---------- resume picker ----------
 
 const resumeSelect = $("resumeSelect");
@@ -117,7 +127,6 @@ function getResumeId() {
 }
 
 async function loadResumes() {
-  // Restore previously saved id while we wait on the network.
   const stored = await storageGet([STORAGE_KEYS.resumeId]);
   const savedId = stored[STORAGE_KEYS.resumeId];
   if (savedId) _resumeId = savedId;
@@ -135,7 +144,6 @@ async function loadResumes() {
 
   if (!resumes || resumes.length === 0) {
     if (resumes && resumes.length === 0) {
-      // Backend reachable but no resumes on disk.
       resumeSelect.innerHTML = "";
       resumeSelect.disabled = true;
       resumeBar.classList.add("empty");
@@ -166,12 +174,48 @@ async function loadResumes() {
 resumeSelect.addEventListener("change", () => {
   _resumeId = resumeSelect.value;
   storageSet({ [STORAGE_KEYS.resumeId]: _resumeId });
+  // Re-score with the new resume if a JD is present.
+  scheduleSharedScore();
+});
+
+// ---------- shared JD context ----------
+
+const sharedCompany = $("shared-company");
+const sharedJd = $("shared-jd");
+const sharedScore = $("sharedScore");
+const sharedScoreNum = sharedScore.querySelector(".score-pill-num");
+const sharedScoreVerdict = sharedScore.querySelector(".score-pill-verdict");
+
+function getSharedCompany() {
+  return sharedCompany.value.trim();
+}
+
+function getSharedJd() {
+  return sharedJd.value.trim();
+}
+
+function persistShared() {
+  storageSet({
+    [STORAGE_KEYS.shared.company]: sharedCompany.value,
+    [STORAGE_KEYS.shared.jd]: sharedJd.value,
+  });
+}
+
+sharedCompany.addEventListener("input", () => {
+  persistShared();
+});
+sharedJd.addEventListener("input", () => {
+  persistShared();
+  scheduleSharedScore();
 });
 
 // ---------- tabs ----------
 
 const tabs = document.querySelectorAll(".tab");
 const panels = document.querySelectorAll(".panel");
+// Tabs that don't use the shared JD context (just hide the JD block when active).
+const TABS_WITHOUT_JD = new Set(["outreach"]);
+const jdContext = $("jdContext");
 
 function activateTab(name) {
   tabs.forEach((t) => {
@@ -180,57 +224,103 @@ function activateTab(name) {
     t.setAttribute("aria-selected", active ? "true" : "false");
   });
   panels.forEach((p) => {
-    p.classList.toggle("active", p.dataset.panel === name);
+    const isActive = p.dataset.panel === name;
+    p.classList.toggle("active", isActive);
+    if (isActive) {
+      // Hidden textareas can't compute scrollHeight; rerun on reveal.
+      p.querySelectorAll("textarea").forEach((ta) => autosize(ta));
+    }
   });
   storageSet({ [STORAGE_KEYS.activeTab]: name });
-  syncAutodetectBarVisibility();
+  jdContext.classList.toggle("hidden", TABS_WITHOUT_JD.has(name));
 }
 
 tabs.forEach((tab) => {
   tab.addEventListener("click", () => activateTab(tab.dataset.tab));
 });
 
+// ---------- score helpers ----------
+
+function scoreBand(score) {
+  if (score <= 3) return "band-poor";
+  if (score <= 5) return "band-marginal";
+  if (score <= 7) return "band-solid";
+  return "band-strong";
+}
+
+function setSharedScoreLoading() {
+  sharedScore.classList.remove("hidden");
+  sharedScore.className = "score-pill loading";
+  sharedScoreNum.textContent = "-";
+  sharedScoreVerdict.textContent = "scoring...";
+}
+
+function setSharedScoreResult(score, verdict) {
+  sharedScore.classList.remove("hidden");
+  sharedScore.className = "score-pill " + scoreBand(score);
+  sharedScoreNum.textContent = String(score);
+  sharedScoreVerdict.textContent = verdict || "";
+}
+
+function hideSharedScore() {
+  sharedScore.classList.add("hidden");
+}
+
+let _scoreReqId = 0;
+let _scoreTimer = null;
+
+async function fetchScoreSilently(jd, company) {
+  try {
+    const res = await fetch(`${BACKEND}/score`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        job_description: jd,
+        company: company || null,
+        resume_id: getResumeId(),
+      }),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch (_e) {
+    return null;
+  }
+}
+
+// Auto-score the shared JD with a debounce. Only scores reasonably long JDs
+// to avoid burning API calls on a few keystrokes.
+function scheduleSharedScore() {
+  if (_scoreTimer) clearTimeout(_scoreTimer);
+  const jd = getSharedJd();
+  if (jd.length < 200) {
+    // Bump the request id so any in-flight score response is ignored.
+    _scoreReqId += 1;
+    hideSharedScore();
+    return;
+  }
+  _scoreTimer = setTimeout(runSharedScore, 700);
+}
+
+async function runSharedScore() {
+  const jd = getSharedJd();
+  const company = getSharedCompany();
+  if (jd.length < 200) {
+    hideSharedScore();
+    return;
+  }
+  const myReq = ++_scoreReqId;
+  setSharedScoreLoading();
+  const data = await fetchScoreSilently(jd, company);
+  if (myReq !== _scoreReqId) return; // a newer request superseded us
+  if (data && typeof data.score === "number") {
+    setSharedScoreResult(data.score, data.verdict || "");
+  } else {
+    hideSharedScore();
+  }
+}
+
 // ---------- auto-detect from page ----------
 
-const AUTODETECT_TARGETS = {
-  cover: {
-    company: "cover-company",
-    jd: "cover-jd",
-    storage: { company: STORAGE_KEYS.cover.company, jd: STORAGE_KEYS.cover.jd },
-  },
-  email: {
-    company: "email-company",
-    jd: "email-jd",
-    storage: { company: STORAGE_KEYS.email.company, jd: STORAGE_KEYS.email.jd },
-  },
-  score: {
-    company: "score-company",
-    jd: "score-jd",
-    storage: { company: STORAGE_KEYS.score.company, jd: STORAGE_KEYS.score.jd },
-  },
-  question: {
-    company: "question-company",
-    jd: "question-jd",
-    storage: { company: STORAGE_KEYS.question.company, jd: STORAGE_KEYS.question.jd },
-  },
-  // Track tab uses extra fields beyond company+jd; runAutoDetect handles
-  // these by name when the active tab is "track".
-  track: {
-    company: "track-company",
-    jd: "track-jd",
-    role: "track-role",
-    location: "track-location",
-    storage: {
-      company: STORAGE_KEYS.track.company,
-      jd: STORAGE_KEYS.track.jd,
-      role: STORAGE_KEYS.track.role,
-      location: STORAGE_KEYS.track.location,
-      jobUrl: STORAGE_KEYS.track.jobUrl,
-    },
-  },
-};
-
-const autodetectBar = $("autodetectBar");
 const autoDetectBtn = $("autoDetectBtn");
 const autoDetectStatus = $("autoDetectStatus");
 
@@ -239,33 +329,18 @@ function setAutodetectStatus(text, kind = "") {
   autoDetectStatus.className = "autodetect-status" + (kind ? " " + kind : "");
 }
 
-function getActiveTabName() {
-  const t = document.querySelector(".tab.active");
-  return t ? t.dataset.tab : "cover";
-}
-
-function syncAutodetectBarVisibility() {
-  const supported = Boolean(AUTODETECT_TARGETS[getActiveTabName()]);
-  autodetectBar.classList.toggle("hidden", !supported);
-}
-
 // Self-contained extractor; runs in the active tab's page context.
-// Must not reference any popup-scope variables.
 function extractJdFromPage() {
   const MIN_JD_LEN = 200;
   const MAX_TEXT = 40000;
 
   const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
-  // Some sites (CBRE, certain Workday tenants) emit JD content as already-
-  // serialised HTML inside JSON-LD or text nodes - so what looks like rendered
-  // text actually contains literal "<div>..." characters. Detect and strip.
   const looksLikeHtml = (s) =>
     typeof s === "string" && /<\/?[a-z][\s\S]*?>/i.test(s);
   const stripHtml = (s) => {
     if (!s) return "";
     const tmp = document.createElement("div");
     tmp.innerHTML = s;
-    // Two passes handle the double-encoded case (e.g. "&lt;div&gt;").
     let out = tmp.innerText || tmp.textContent || "";
     if (looksLikeHtml(out)) {
       tmp.innerHTML = out;
@@ -304,8 +379,6 @@ function extractJdFromPage() {
     const m = document.querySelector('meta[property="og:site_name"]');
     return norm(m && m.getAttribute("content"));
   };
-  // schema.org JobPosting JSON-LD: emitted by Ashby (and many other ATS)
-  // at server-render time, so it works before any client-side React renders.
   const jsonLdJobPosting = () => {
     const scripts = document.querySelectorAll('script[type="application/ld+json"]');
     for (const s of scripts) {
@@ -318,9 +391,7 @@ function extractJdFromPage() {
           const isJob = t === "JobPosting" || (Array.isArray(t) && t.includes("JobPosting"));
           if (isJob) return item;
         }
-      } catch (_e) {
-        // skip malformed JSON-LD blocks
-      }
+      } catch (_e) {}
     }
     return null;
   };
@@ -338,7 +409,6 @@ function extractJdFromPage() {
     const desc = blockText(tmp);
     const jdText = title ? `${title}\n\n${desc}`.trim() : desc;
 
-    // jobLocation is sometimes an object, sometimes an array. Take the first.
     let loc = "";
     const locField = job.jobLocation;
     const locItem = Array.isArray(locField) ? locField[0] : locField;
@@ -352,7 +422,6 @@ function extractJdFromPage() {
       loc = parts.join(", ");
     }
     if (!loc && job.jobLocationType) {
-      // e.g. "TELECOMMUTE" -> "Remote"
       const t = String(job.jobLocationType).toLowerCase();
       if (t.includes("telecommute")) loc = "Remote";
     }
@@ -448,9 +517,7 @@ function extractJdFromPage() {
               jd = title ? `${title}\n\n${desc}`.trim() : desc;
             }
           }
-        } catch (_e) {
-          // fall through to selector-based attempt
-        }
+        } catch (_e) {}
       }
       if (!jd) {
         jd = pickText([
@@ -477,9 +544,7 @@ function extractJdFromPage() {
       ]);
       jd = pickText(["#jobDescriptionText"]);
     }
-  } catch (_e) {
-    // best-effort; selector errors fall through to fallback
-  }
+  } catch (_e) {}
 
   if (!jd) {
     try {
@@ -490,25 +555,17 @@ function extractJdFromPage() {
       }
       if (!role && ld.role) role = ld.role;
       if (!job_location && ld.location) job_location = ld.location;
-    } catch (_e) {
-      // ignore
-    }
+    } catch (_e) {}
   }
 
-  // Fill role/location from JSON-LD even when site selectors gave us the JD,
-  // since the site-specific branches above don't always pick these up.
   if (!role || !job_location) {
     try {
       const ld = fromJsonLd();
       if (!role && ld.role) role = ld.role;
       if (!job_location && ld.location) job_location = ld.location;
-    } catch (_e) {
-      // ignore
-    }
+    } catch (_e) {}
   }
 
-  // Final safety net: if any extraction path leaked literal HTML into jd
-  // (e.g. double-encoded JSON-LD descriptions), strip it before returning.
   if (looksLikeHtml(jd)) jd = stripHtml(jd);
 
   const matched = Boolean(company && jd && jd.length >= MIN_JD_LEN);
@@ -532,9 +589,6 @@ function extractJdFromPage() {
   };
 }
 
-// When a company embeds an ATS in an iframe (e.g. voleon.com → Ashby),
-// the top frame is just marketing chrome. Prefer frames that look like
-// known ATS hosts so the extractor's site-specific selectors fire.
 function isAtsHost(host) {
   if (!host) return false;
   return (
@@ -569,10 +623,6 @@ function pickBestFrameResult(executeScriptOut) {
 }
 
 async function runAutoDetect() {
-  const active = getActiveTabName();
-  const targets = AUTODETECT_TARGETS[active];
-  if (!targets) return;
-
   let tab;
   try {
     [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -600,10 +650,7 @@ async function runAutoDetect() {
     });
     result = pickBestFrameResult(out);
   } catch (err) {
-    setAutodetectStatus(
-      `Failed to read page: ${err.message || err}`,
-      "err"
-    );
+    setAutodetectStatus(`Failed to read page: ${err.message || err}`, "err");
     autoDetectBtn.disabled = false;
     return;
   }
@@ -644,7 +691,6 @@ async function runAutoDetect() {
       const data = await res.json();
       company = data.company || "";
       jd = data.job_description || "";
-      // Groq returns these on newer backend; older deploys won't.
       if (data.job_role) role = data.job_role;
       if (data.location) job_location = data.location;
       source = "groq";
@@ -664,33 +710,21 @@ async function runAutoDetect() {
     return;
   }
 
-  const companyEl = $(targets.company);
-  const jdEl = $(targets.jd);
-  if (companyEl) companyEl.value = company;
-  if (jdEl) jdEl.value = jd;
+  // Always populate the shared fields. JD is fixed-height + scrollable,
+  // so no autosize call here.
+  sharedCompany.value = company;
+  sharedJd.value = jd;
+  persistShared();
 
-  const storageItems = {
-    [targets.storage.company]: company,
-    [targets.storage.jd]: jd,
-  };
-
-  // Track tab also gets role / location populated, plus the page URL shown
-  // in the visible jobUrl field and stashed in storage for save time.
-  if (active === "track") {
-    const roleEl = $(targets.role);
-    const locEl = $(targets.location);
-    const jobUrlEl = $("track-job-url");
-    if (roleEl) roleEl.value = role;
-    if (locEl) locEl.value = job_location;
-    if (jobUrlEl && tab && tab.url) jobUrlEl.value = tab.url;
-    storageItems[targets.storage.role] = role;
-    storageItems[targets.storage.location] = job_location;
-    if (tab && tab.url) {
-      storageItems[targets.storage.jobUrl] = tab.url;
-    }
-  }
-
-  await storageSet(storageItems);
+  // Track tab also gets role / location / jobUrl populated.
+  trackRole.value = role || trackRole.value;
+  trackLocation.value = job_location || trackLocation.value;
+  if (tab && tab.url) trackJobUrl.value = tab.url;
+  storageSet({
+    [STORAGE_KEYS.track.role]: trackRole.value,
+    [STORAGE_KEYS.track.location]: trackLocation.value,
+    [STORAGE_KEYS.track.jobUrl]: trackJobUrl.value,
+  });
 
   if (company && !jd) {
     setAutodetectStatus("Detected company but no job description on this page.", "err");
@@ -700,51 +734,12 @@ async function runAutoDetect() {
     setAutodetectStatus(`Filled from ${source}.`, "ok");
   }
   autoDetectBtn.disabled = false;
+
+  // Kick off a fresh score now that the JD changed.
+  scheduleSharedScore();
 }
 
 autoDetectBtn.addEventListener("click", runAutoDetect);
-
-// ---------- score display helper ----------
-
-function scoreBand(score) {
-  if (score <= 3) return "band-poor";
-  if (score <= 5) return "band-marginal";
-  if (score <= 7) return "band-solid";
-  return "band-strong";
-}
-
-function renderScore(displayEl, data, { compact = false } = {}) {
-  if (!displayEl) return;
-  const numEl = displayEl.querySelector(".score-number");
-  const verdictEl = displayEl.querySelector(".score-verdict");
-
-  const score = typeof data.score === "number" ? data.score : 0;
-  const verdict = (data.verdict || "").trim();
-
-  numEl.textContent = String(score);
-  verdictEl.textContent = verdict;
-
-  let cls = "score-display";
-  if (compact) cls += " compact";
-  cls += " " + scoreBand(score);
-  displayEl.className = cls;
-}
-
-function showScoreLoading(displayEl, { compact = false } = {}) {
-  if (!displayEl) return;
-  const numEl = displayEl.querySelector(".score-number");
-  const verdictEl = displayEl.querySelector(".score-verdict");
-  numEl.textContent = "-";
-  verdictEl.textContent = "Scoring...";
-  let cls = "score-display loading";
-  if (compact) cls += " compact";
-  displayEl.className = cls;
-}
-
-function hideScore(displayEl) {
-  if (!displayEl) return;
-  displayEl.classList.add("hidden");
-}
 
 // ---------- copy buttons ----------
 
@@ -765,7 +760,6 @@ document.querySelectorAll(".copy-btn").forEach((btn) => {
         btn.textContent = orig;
       }, 1500);
     } catch (_e) {
-      // Fallback: select text so user can hit Cmd+C.
       target.focus();
       target.select();
     }
@@ -776,33 +770,11 @@ document.querySelectorAll(".copy-btn").forEach((btn) => {
 // Cover Letter tab
 // ============================================================================
 
-const coverForm = $("coverForm");
-const coverCompany = $("cover-company");
-const coverJd = $("cover-jd");
 const coverSubmit = $("coverSubmit");
 const coverTextBtn = $("coverTextBtn");
 const coverStatus = $("coverStatus");
-const coverScore = $("coverScore");
 const coverTextResult = $("coverTextResult");
 const coverBodyOut = $("cover-body-out");
-
-async function fetchScoreSilently(jd, company) {
-  try {
-    const res = await fetch(`${BACKEND}/score`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        job_description: jd,
-        company: company || null,
-        resume_id: getResumeId(),
-      }),
-    });
-    if (!res.ok) return null;
-    return await res.json();
-  } catch (_e) {
-    return null;
-  }
-}
 
 async function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
@@ -825,37 +797,21 @@ async function downloadBlob(blob, filename) {
   }
 }
 
-coverForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const company = coverCompany.value.trim();
-  const jd = coverJd.value.trim();
+coverSubmit.addEventListener("click", async () => {
+  const company = getSharedCompany();
+  const jd = getSharedJd();
   if (!company || !jd) {
-    setStatus(coverStatus, "Fill in both fields.", "err");
+    setStatus(coverStatus, "Fill in company and job description above.", "err");
     return;
   }
 
-  await storageSet({
-    [STORAGE_KEYS.cover.company]: company,
-    [STORAGE_KEYS.cover.jd]: jd,
-  });
-
   coverSubmit.disabled = true;
+  coverTextBtn.disabled = true;
   setStatus(
     coverStatus,
-    "Generating... (first compile can take 30s+ while tectonic fetches packages)",
+    "Generating PDF... (first compile can take 30s+ while tectonic fetches packages)",
     "working"
   );
-
-  // Fire score in parallel; populate the inline score block when it returns.
-  coverScore.classList.remove("hidden");
-  showScoreLoading(coverScore, { compact: true });
-  fetchScoreSilently(jd, company).then((data) => {
-    if (data && typeof data.score === "number") {
-      renderScore(coverScore, data, { compact: true });
-    } else {
-      hideScore(coverScore);
-    }
-  });
 
   try {
     const res = await fetch(`${BACKEND}/generate`, {
@@ -882,37 +838,22 @@ coverForm.addEventListener("submit", async (e) => {
     setStatus(coverStatus, `Failed: ${err.message || err}`, "err");
   } finally {
     coverSubmit.disabled = false;
+    coverTextBtn.disabled = false;
   }
 });
 
 coverTextBtn.addEventListener("click", async () => {
-  const company = coverCompany.value.trim();
-  const jd = coverJd.value.trim();
+  const company = getSharedCompany();
+  const jd = getSharedJd();
   if (!company || !jd) {
-    setStatus(coverStatus, "Fill in both fields.", "err");
+    setStatus(coverStatus, "Fill in company and job description above.", "err");
     return;
   }
-
-  await storageSet({
-    [STORAGE_KEYS.cover.company]: company,
-    [STORAGE_KEYS.cover.jd]: jd,
-  });
 
   coverSubmit.disabled = true;
   coverTextBtn.disabled = true;
   setStatus(coverStatus, "Generating cover letter text...", "working");
   coverTextResult.classList.add("hidden");
-
-  // Fire score in parallel; same UX as the PDF flow.
-  coverScore.classList.remove("hidden");
-  showScoreLoading(coverScore, { compact: true });
-  fetchScoreSilently(jd, company).then((data) => {
-    if (data && typeof data.score === "number") {
-      renderScore(coverScore, data, { compact: true });
-    } else {
-      hideScore(coverScore);
-    }
-  });
 
   try {
     const res = await fetch(`${BACKEND}/cover-text`, {
@@ -933,6 +874,7 @@ coverTextBtn.addEventListener("click", async () => {
     const signoff = "Best regards,\nAmogh Ramagiri";
     coverBodyOut.value = `${greeting}\n\n${(data.body || "").trim()}\n\n${signoff}`;
     coverTextResult.classList.remove("hidden");
+    autosize(coverBodyOut);
     setStatus(coverStatus, "Done. Edit if you want, then copy.", "ok");
   } catch (err) {
     setStatus(coverStatus, `Failed: ${err.message || err}`, "err");
@@ -946,9 +888,6 @@ coverTextBtn.addEventListener("click", async () => {
 // Email tab
 // ============================================================================
 
-const emailForm = $("emailForm");
-const emailCompany = $("email-company");
-const emailJd = $("email-jd");
 const emailIntent = $("email-intent");
 const emailSubmit = $("emailSubmit");
 const emailStatus = $("emailStatus");
@@ -956,21 +895,18 @@ const emailResult = $("emailResult");
 const emailSubjectOut = $("email-subject-out");
 const emailBodyOut = $("email-body-out");
 
-emailForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const company = emailCompany.value.trim();
-  const jd = emailJd.value.trim();
+emailIntent.addEventListener("input", () => {
+  storageSet({ [STORAGE_KEYS.email.intent]: emailIntent.value });
+});
+
+emailSubmit.addEventListener("click", async () => {
+  const company = getSharedCompany();
+  const jd = getSharedJd();
   const intent = emailIntent.value.trim();
   if (!company || !jd) {
-    setStatus(emailStatus, "Fill in company and job description.", "err");
+    setStatus(emailStatus, "Fill in company and job description above.", "err");
     return;
   }
-
-  await storageSet({
-    [STORAGE_KEYS.email.company]: company,
-    [STORAGE_KEYS.email.jd]: jd,
-    [STORAGE_KEYS.email.intent]: intent,
-  });
 
   emailSubmit.disabled = true;
   setStatus(emailStatus, "Generating email...", "working");
@@ -995,6 +931,7 @@ emailForm.addEventListener("submit", async (e) => {
     emailSubjectOut.value = data.subject || "";
     emailBodyOut.value = data.body || "";
     emailResult.classList.remove("hidden");
+    autosize(emailBodyOut);
     setStatus(emailStatus, "Done. Edit if you want, then copy.", "ok");
   } catch (err) {
     setStatus(emailStatus, `Failed: ${err.message || err}`, "err");
@@ -1004,10 +941,9 @@ emailForm.addEventListener("submit", async (e) => {
 });
 
 // ============================================================================
-// Outreach tab
+// Outreach tab (uses its own profile + context, not the shared JD)
 // ============================================================================
 
-const outreachForm = $("outreachForm");
 const outreachChannel = $("outreach-channel");
 const outreachProfile = $("outreach-profile");
 const outreachContext = $("outreach-context");
@@ -1038,9 +974,14 @@ outreachChannel.addEventListener("change", () => {
   storageSet({ [STORAGE_KEYS.outreach.channel]: outreachChannel.value });
   updateCharCount();
 });
+outreachProfile.addEventListener("input", () => {
+  storageSet({ [STORAGE_KEYS.outreach.profile]: outreachProfile.value });
+});
+outreachContext.addEventListener("input", () => {
+  storageSet({ [STORAGE_KEYS.outreach.context]: outreachContext.value });
+});
 
-outreachForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
+outreachSubmit.addEventListener("click", async () => {
   const channel = outreachChannel.value;
   const profile = outreachProfile.value.trim();
   const context = outreachContext.value.trim();
@@ -1048,12 +989,6 @@ outreachForm.addEventListener("submit", async (e) => {
     setStatus(outreachStatus, "Paste the target person's profile.", "err");
     return;
   }
-
-  await storageSet({
-    [STORAGE_KEYS.outreach.channel]: channel,
-    [STORAGE_KEYS.outreach.profile]: profile,
-    [STORAGE_KEYS.outreach.context]: context,
-  });
 
   outreachSubmit.disabled = true;
   setStatus(outreachStatus, "Generating message...", "working");
@@ -1083,6 +1018,7 @@ outreachForm.addEventListener("submit", async (e) => {
 
     outreachMessageOut.value = data.message || "";
     outreachResult.classList.remove("hidden");
+    autosize(outreachMessageOut);
     updateCharCount();
 
     const cc = typeof data.char_count === "number" ? ` (${data.char_count} chars)` : "";
@@ -1095,12 +1031,9 @@ outreachForm.addEventListener("submit", async (e) => {
 });
 
 // ============================================================================
-// Score tab
+// Score tab (scores all resumes against shared JD)
 // ============================================================================
 
-const scoreForm = $("scoreForm");
-const scoreCompany = $("score-company");
-const scoreJd = $("score-jd");
 const scoreSubmit = $("scoreSubmit");
 const scoreStatus = $("scoreStatus");
 const scoreList = $("scoreList");
@@ -1108,10 +1041,7 @@ const scoreList = $("scoreList");
 function selectResumeGlobally(resumeId, label) {
   if (!resumeId) return;
   _resumeId = resumeId;
-  if (resumeSelect) {
-    resumeSelect.value = resumeId;
-    // Updating .value silently doesn't fire 'change'; persist manually.
-  }
+  if (resumeSelect) resumeSelect.value = resumeId;
   storageSet({ [STORAGE_KEYS.resumeId]: resumeId });
   highlightActiveScoreRow(resumeId);
   setStatus(
@@ -1119,6 +1049,8 @@ function selectResumeGlobally(resumeId, label) {
     `Set "${label || resumeId}" as the active resume for the other tabs.`,
     "ok"
   );
+  // Re-run the shared score with the new resume.
+  scheduleSharedScore();
 }
 
 function highlightActiveScoreRow(resumeId) {
@@ -1186,19 +1118,13 @@ function renderScoreList(results) {
   });
 }
 
-scoreForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const company = scoreCompany.value.trim();
-  const jd = scoreJd.value.trim();
+scoreSubmit.addEventListener("click", async () => {
+  const company = getSharedCompany();
+  const jd = getSharedJd();
   if (!jd) {
-    setStatus(scoreStatus, "Paste the job description.", "err");
+    setStatus(scoreStatus, "Paste a job description above.", "err");
     return;
   }
-
-  await storageSet({
-    [STORAGE_KEYS.score.company]: company,
-    [STORAGE_KEYS.score.jd]: jd,
-  });
 
   scoreSubmit.disabled = true;
   setStatus(scoreStatus, "Scoring against all resumes...", "working");
@@ -1250,19 +1176,19 @@ scoreForm.addEventListener("submit", async (e) => {
 // Question tab
 // ============================================================================
 
-const questionForm = $("questionForm");
-const questionCompany = $("question-company");
-const questionJd = $("question-jd");
 const questionText = $("question-text");
 const questionSubmit = $("questionSubmit");
 const questionStatus = $("questionStatus");
 const questionResult = $("questionResult");
 const questionAnswerOut = $("question-answer-out");
 
-questionForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const company = questionCompany.value.trim();
-  const jd = questionJd.value.trim();
+questionText.addEventListener("input", () => {
+  storageSet({ [STORAGE_KEYS.question.text]: questionText.value });
+});
+
+questionSubmit.addEventListener("click", async () => {
+  const company = getSharedCompany();
+  const jd = getSharedJd();
   const question = questionText.value.trim();
   if (!company || !jd || !question) {
     setStatus(
@@ -1272,12 +1198,6 @@ questionForm.addEventListener("submit", async (e) => {
     );
     return;
   }
-
-  await storageSet({
-    [STORAGE_KEYS.question.company]: company,
-    [STORAGE_KEYS.question.jd]: jd,
-    [STORAGE_KEYS.question.text]: question,
-  });
 
   questionSubmit.disabled = true;
   setStatus(questionStatus, "Generating answer...", "working");
@@ -1301,6 +1221,7 @@ questionForm.addEventListener("submit", async (e) => {
     const data = await res.json();
     questionAnswerOut.value = data.answer || "";
     questionResult.classList.remove("hidden");
+    autosize(questionAnswerOut);
     setStatus(questionStatus, "Done. Edit if you want, then copy.", "ok");
   } catch (err) {
     setStatus(questionStatus, `Failed: ${err.message || err}`, "err");
@@ -1313,12 +1234,9 @@ questionForm.addEventListener("submit", async (e) => {
 // Track tab
 // ============================================================================
 
-const trackForm = $("trackForm");
-const trackCompany = $("track-company");
 const trackRole = $("track-role");
 const trackLocation = $("track-location");
 const trackJobUrl = $("track-job-url");
-const trackJd = $("track-jd");
 const trackStatusSel = $("track-status");
 const trackInterview = $("track-interview");
 const trackAppliedDate = $("track-applied-date");
@@ -1334,15 +1252,33 @@ function todayIsoDate() {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-trackForm.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const company = trackCompany.value.trim();
+// Persist tracker-specific fields on input.
+trackRole.addEventListener("input", () => {
+  storageSet({ [STORAGE_KEYS.track.role]: trackRole.value });
+});
+trackLocation.addEventListener("input", () => {
+  storageSet({ [STORAGE_KEYS.track.location]: trackLocation.value });
+});
+trackJobUrl.addEventListener("input", () => {
+  storageSet({ [STORAGE_KEYS.track.jobUrl]: trackJobUrl.value });
+});
+trackStatusSel.addEventListener("change", () => {
+  storageSet({ [STORAGE_KEYS.track.status]: trackStatusSel.value });
+});
+trackInterview.addEventListener("change", () => {
+  storageSet({ [STORAGE_KEYS.track.interview]: trackInterview.value });
+});
+trackNotes.addEventListener("input", () => {
+  storageSet({ [STORAGE_KEYS.track.notes]: trackNotes.value });
+});
+
+trackSubmit.addEventListener("click", async () => {
+  const company = getSharedCompany();
   if (!company) {
-    setStatus(trackStatusEl, "Company is required.", "err");
+    setStatus(trackStatusEl, "Company is required (above).", "err");
     return;
   }
 
-  // Read jobUrl from the visible input; fall back to the active tab's URL.
   let jobUrl = trackJobUrl.value.trim();
   if (!jobUrl) {
     try {
@@ -1350,9 +1286,7 @@ trackForm.addEventListener("submit", async (e) => {
       if (tab && tab.url && !/^(chrome|edge|brave|about|chrome-extension):/.test(tab.url)) {
         jobUrl = tab.url;
       }
-    } catch (_e) {
-      // ignore
-    }
+    } catch (_e) {}
   }
 
   const payload = {
@@ -1365,21 +1299,8 @@ trackForm.addEventListener("submit", async (e) => {
     resumeId: getResumeId() || null,
     jobUrl: jobUrl || null,
     notes: trackNotes.value.trim() || null,
-    jobDescription: trackJd.value.trim() || null,
+    jobDescription: getSharedJd() || null,
   };
-
-  await storageSet({
-    [STORAGE_KEYS.track.company]: payload.companyName,
-    [STORAGE_KEYS.track.role]: payload.jobRole || "",
-    [STORAGE_KEYS.track.location]: payload.location || "",
-    [STORAGE_KEYS.track.jobUrl]: payload.jobUrl || "",
-    [STORAGE_KEYS.track.status]: payload.status,
-    [STORAGE_KEYS.track.interview]: payload.interviewStatus || "",
-    // Don't persist appliedDate — it should always default to "today" when
-    // the popup opens, not whatever was last saved.
-    [STORAGE_KEYS.track.notes]: payload.notes || "",
-    [STORAGE_KEYS.track.jd]: payload.jobDescription || "",
-  });
 
   trackSubmit.disabled = true;
   setStatus(trackStatusEl, "Saving...", "working");
@@ -1409,60 +1330,40 @@ trackForm.addEventListener("submit", async (e) => {
 async function restoreAll() {
   const data = await storageGet([
     STORAGE_KEYS.activeTab,
-    STORAGE_KEYS.cover.company,
-    STORAGE_KEYS.cover.jd,
-    STORAGE_KEYS.email.company,
-    STORAGE_KEYS.email.jd,
+    STORAGE_KEYS.shared.company,
+    STORAGE_KEYS.shared.jd,
     STORAGE_KEYS.email.intent,
     STORAGE_KEYS.outreach.channel,
     STORAGE_KEYS.outreach.profile,
     STORAGE_KEYS.outreach.context,
-    STORAGE_KEYS.score.company,
-    STORAGE_KEYS.score.jd,
-    STORAGE_KEYS.question.company,
-    STORAGE_KEYS.question.jd,
     STORAGE_KEYS.question.text,
-    STORAGE_KEYS.track.company,
     STORAGE_KEYS.track.role,
     STORAGE_KEYS.track.location,
     STORAGE_KEYS.track.jobUrl,
-    STORAGE_KEYS.track.jd,
     STORAGE_KEYS.track.status,
     STORAGE_KEYS.track.interview,
-    STORAGE_KEYS.track.appliedDate,
     STORAGE_KEYS.track.notes,
   ]);
 
-  if (data[STORAGE_KEYS.cover.company]) coverCompany.value = data[STORAGE_KEYS.cover.company];
-  if (data[STORAGE_KEYS.cover.jd]) coverJd.value = data[STORAGE_KEYS.cover.jd];
+  if (data[STORAGE_KEYS.shared.company]) sharedCompany.value = data[STORAGE_KEYS.shared.company];
+  if (data[STORAGE_KEYS.shared.jd]) sharedJd.value = data[STORAGE_KEYS.shared.jd];
 
-  if (data[STORAGE_KEYS.email.company]) emailCompany.value = data[STORAGE_KEYS.email.company];
-  if (data[STORAGE_KEYS.email.jd]) emailJd.value = data[STORAGE_KEYS.email.jd];
   if (data[STORAGE_KEYS.email.intent]) emailIntent.value = data[STORAGE_KEYS.email.intent];
 
   if (data[STORAGE_KEYS.outreach.channel]) outreachChannel.value = data[STORAGE_KEYS.outreach.channel];
   if (data[STORAGE_KEYS.outreach.profile]) outreachProfile.value = data[STORAGE_KEYS.outreach.profile];
   if (data[STORAGE_KEYS.outreach.context]) outreachContext.value = data[STORAGE_KEYS.outreach.context];
 
-  if (data[STORAGE_KEYS.score.company]) scoreCompany.value = data[STORAGE_KEYS.score.company];
-  if (data[STORAGE_KEYS.score.jd]) scoreJd.value = data[STORAGE_KEYS.score.jd];
-
-  if (data[STORAGE_KEYS.question.company]) questionCompany.value = data[STORAGE_KEYS.question.company];
-  if (data[STORAGE_KEYS.question.jd]) questionJd.value = data[STORAGE_KEYS.question.jd];
   if (data[STORAGE_KEYS.question.text]) questionText.value = data[STORAGE_KEYS.question.text];
 
-  if (data[STORAGE_KEYS.track.company]) trackCompany.value = data[STORAGE_KEYS.track.company];
   if (data[STORAGE_KEYS.track.role]) trackRole.value = data[STORAGE_KEYS.track.role];
   if (data[STORAGE_KEYS.track.location]) trackLocation.value = data[STORAGE_KEYS.track.location];
   if (data[STORAGE_KEYS.track.jobUrl]) trackJobUrl.value = data[STORAGE_KEYS.track.jobUrl];
-  if (data[STORAGE_KEYS.track.jd]) trackJd.value = data[STORAGE_KEYS.track.jd];
   if (data[STORAGE_KEYS.track.status]) trackStatusSel.value = data[STORAGE_KEYS.track.status];
   if (data[STORAGE_KEYS.track.interview]) trackInterview.value = data[STORAGE_KEYS.track.interview];
-  // Always default Applied date to today on popup load. The stored value is
-  // ignored on purpose: if you tracked a job yesterday, opening the popup
-  // today should show today, not "yesterday".
-  trackAppliedDate.value = todayIsoDate();
   if (data[STORAGE_KEYS.track.notes]) trackNotes.value = data[STORAGE_KEYS.track.notes];
+  // Always default Applied date to today on popup load.
+  trackAppliedDate.value = todayIsoDate();
 
   const activeTab = data[STORAGE_KEYS.activeTab];
   if (
@@ -1470,12 +1371,19 @@ async function restoreAll() {
     ["cover", "email", "outreach", "score", "question", "track"].includes(activeTab)
   ) {
     activateTab(activeTab);
+  } else {
+    // Make sure the default active tab also syncs JD-context visibility.
+    activateTab("cover");
   }
 
   updateCharCount();
+
+  // If there's already a JD in storage, kick off a score on open.
+  if (getSharedJd().length >= 200) scheduleSharedScore();
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+  wireAutosize();
   restoreAll();
   loadResumes();
   checkHealth();

@@ -8,16 +8,26 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
+import tracking
 from db import (
     delete_job_application,
+    delete_reach_out,
+    delete_setting,
+    get_reach_out,
+    get_setting,
     insert_job_application,
+    insert_reach_out,
     list_job_applications,
+    list_reach_outs,
+    set_setting,
     update_job_application,
+    update_reach_out,
 )
 from generate import (
     answer_application_question,
@@ -31,6 +41,7 @@ from generate import (
     score_jd_fit_all,
 )
 from latex_utils import LatexCompileError
+from mail import GmailAuthError, GmailSendError, send_gmail
 
 
 logger = logging.getLogger("coverletter")
@@ -41,7 +52,7 @@ app = FastAPI(title="Cover Letter Generator", version="1.1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -424,6 +435,348 @@ def track_delete(app_id: str) -> dict[str, bool]:
         raise _to_http_error(e)
     if not ok:
         raise HTTPException(status_code=404, detail=f"No application {app_id}")
+    return {"ok": True}
+
+
+# -----------------------------------------------------------------------------
+# Reach-out flow: draft an outreach email from a LinkedIn profile, edit it,
+# then send via Gmail SMTP using a stored app password.
+# -----------------------------------------------------------------------------
+
+
+GMAIL_ADDRESS_KEY = "gmail_address"
+GMAIL_APP_PASSWORD_KEY = "gmail_app_password"
+GMAIL_FROM_NAME_KEY = "gmail_from_name"
+
+
+class ReachOutGenerateRequest(BaseModel):
+    recipientName: str = Field(..., min_length=1, max_length=200)
+    recipientEmail: str = Field(..., min_length=3, max_length=200)
+    linkedinProfile: str = Field(..., min_length=1, max_length=30000)
+    contextNote: str | None = Field(default=None, max_length=2000)
+    resumeId: str | None = RESUME_ID_FIELD
+
+
+class ReachOutPatchRequest(BaseModel):
+    recipientName: str | None = Field(default=None, max_length=200)
+    recipientEmail: str | None = Field(default=None, max_length=200)
+    subject: str | None = Field(default=None, max_length=400)
+    body: str | None = Field(default=None, max_length=20000)
+    contextNote: str | None = Field(default=None, max_length=2000)
+
+
+class GmailSettingsRequest(BaseModel):
+    address: str = Field(..., min_length=3, max_length=200)
+    appPassword: str = Field(default="", max_length=200)
+    fromName: str | None = Field(default=None, max_length=200)
+
+
+def _serialize_reach_out(row: dict) -> dict:
+    """Strip secrets and normalize for the wire.
+
+    Note: tracking aggregates (openCount, clickCount, lastOpenedAt,
+    lastClickedAt) are NOT in the local DB anymore — they live in the
+    sidecar's Postgres and are fetched separately by the dashboard via
+    `/reach-out/aggregates`.
+    """
+    if not row:
+        return row
+    return {
+        "id": row.get("id"),
+        "recipientName": row.get("recipientName"),
+        "recipientEmail": row.get("recipientEmail"),
+        "linkedinProfile": row.get("linkedinProfile"),
+        "contextNote": row.get("contextNote"),
+        "resumeId": row.get("resumeId"),
+        "subject": row.get("subject"),
+        "body": row.get("body"),
+        "status": row.get("status"),
+        "sentAt": row.get("sentAt"),
+        "errorMessage": row.get("errorMessage"),
+        "createdAt": row.get("createdAt"),
+        "updatedAt": row.get("updatedAt"),
+    }
+
+
+@app.post("/reach-out/generate")
+def reach_out_generate(req: ReachOutGenerateRequest) -> dict[str, Any]:
+    # Fold the recipient's name into the context so the model addresses them
+    # by name without us having to teach a separate prompt template.
+    context_parts: list[str] = [f"Recipient name: {req.recipientName.strip()}"]
+    if req.contextNote and req.contextNote.strip():
+        context_parts.append(req.contextNote.strip())
+    context = "\n".join(context_parts)
+
+    try:
+        result = generate_outreach_message(
+            req.linkedinProfile,
+            "email",
+            context,
+            resume_id=req.resumeId,
+        )
+    except Exception as e:
+        raise _to_http_error(e)
+
+    subject = (result.get("subject") or "").strip()
+    body = (result.get("message") or "").strip()
+    if not subject or not body:
+        raise HTTPException(
+            status_code=500, detail="Generator did not return subject and body"
+        )
+
+    try:
+        new_id = insert_reach_out(
+            {
+                "recipientName": req.recipientName,
+                "recipientEmail": req.recipientEmail,
+                "linkedinProfile": req.linkedinProfile,
+                "contextNote": req.contextNote,
+                "resumeId": req.resumeId,
+                "subject": subject,
+                "body": body,
+            }
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise _to_http_error(e)
+
+    return _serialize_reach_out(get_reach_out(new_id) or {})
+
+
+@app.get("/reach-out")
+def reach_out_list() -> dict[str, Any]:
+    try:
+        return {"reachOuts": [_serialize_reach_out(r) for r in list_reach_outs()]}
+    except Exception as e:
+        raise _to_http_error(e)
+
+
+@app.get("/reach-out/{row_id}")
+def reach_out_get(row_id: str) -> dict[str, Any]:
+    row = get_reach_out(row_id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"No reach-out {row_id}")
+    return _serialize_reach_out(row)
+
+
+@app.patch("/reach-out/{row_id}")
+def reach_out_patch(row_id: str, req: ReachOutPatchRequest) -> dict[str, Any]:
+    existing = get_reach_out(row_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"No reach-out {row_id}")
+    if existing.get("status") == "sent":
+        raise HTTPException(
+            status_code=400, detail="This reach-out has already been sent."
+        )
+    fields = req.model_dump(exclude_unset=True)
+    if not fields:
+        return _serialize_reach_out(existing)
+    try:
+        update_reach_out(row_id, fields)
+    except Exception as e:
+        raise _to_http_error(e)
+    return _serialize_reach_out(get_reach_out(row_id) or {})
+
+
+@app.post("/reach-out/{row_id}/send")
+def reach_out_send(row_id: str) -> dict[str, Any]:
+    row = get_reach_out(row_id)
+    if not row:
+        raise HTTPException(status_code=404, detail=f"No reach-out {row_id}")
+    if row.get("status") == "sent":
+        raise HTTPException(status_code=400, detail="Already sent.")
+
+    address = get_setting(GMAIL_ADDRESS_KEY)
+    app_password = get_setting(GMAIL_APP_PASSWORD_KEY)
+    from_name = get_setting(GMAIL_FROM_NAME_KEY)
+    if not address or not app_password:
+        raise HTTPException(
+            status_code=400,
+            detail="Gmail isn't connected. Add your address + app password first.",
+        )
+
+    # Build a tracking-enabled HTML alternative. We refuse to send when the
+    # sidecar isn't configured — tracking is the whole point of this flow,
+    # and a silent fallback to untracked email would mislead the UI's
+    # open/click counters.
+    try:
+        plain_body, html_body = tracking.prepare_html(row["body"], row_id)
+    except tracking.TrackingNotConfigured as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception as exc:
+        logger.exception("Failed to build tracked HTML body")
+        raise HTTPException(status_code=500, detail=f"Tracking failure: {exc}")
+
+    try:
+        send_gmail(
+            from_addr=address,
+            app_password=app_password,
+            to_addr=row["recipientEmail"],
+            subject=row["subject"],
+            body=plain_body,
+            from_name=from_name,
+            html_body=html_body,
+        )
+    except (GmailAuthError, GmailSendError) as exc:
+        update_reach_out(row_id, {"status": "failed", "errorMessage": str(exc)})
+        status_code = 401 if isinstance(exc, GmailAuthError) else 502
+        raise HTTPException(status_code=status_code, detail=str(exc))
+    except Exception as exc:
+        update_reach_out(row_id, {"status": "failed", "errorMessage": str(exc)})
+        raise _to_http_error(exc)
+
+    sent_at_iso = datetime.now(timezone.utc).isoformat()
+    update_reach_out(
+        row_id,
+        {
+            "status": "sent",
+            "sentAt": sent_at_iso,
+            "errorMessage": None,
+            "htmlBody": html_body,
+        },
+    )
+    return _serialize_reach_out(get_reach_out(row_id) or {})
+
+
+@app.delete("/reach-out/{row_id}")
+def reach_out_delete(row_id: str) -> dict[str, bool]:
+    try:
+        ok = delete_reach_out(row_id)
+    except Exception as e:
+        raise _to_http_error(e)
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"No reach-out {row_id}")
+    return {"ok": True}
+
+
+# -----------------------------------------------------------------------------
+# Sidecar proxies. The local backend doesn't track events directly anymore —
+# /track/open and /track/click run on the deployed sidecar (see
+# tracking-sidecar/) which is reachable from mail clients on the public
+# internet. The dashboard reads back through these proxy routes so it can
+# stay on localhost:8000 and not need the sidecar's bearer token in the
+# browser.
+# -----------------------------------------------------------------------------
+
+
+def _sidecar_request(
+    method: str,
+    path: str,
+    *,
+    json: Any = None,
+    timeout: float = 10.0,
+) -> httpx.Response:
+    base = tracking.get_base_url()
+    token = tracking.get_api_token()
+    if not base or not token:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Tracking sidecar is not configured. Set TRACKING_BASE_URL and "
+                "TRACKING_API_TOKEN in backend/.env after deploying the sidecar "
+                "(see tracking-sidecar/README.md)."
+            ),
+        )
+    url = base.rstrip("/") + path
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            return client.request(method, url, headers=headers, json=json)
+    except httpx.HTTPError as exc:
+        # Render's free tier puts the service to sleep; first request after
+        # idle takes ~30-60s. Surface a clean 502 instead of a stack trace.
+        raise HTTPException(
+            status_code=502,
+            detail=f"Tracking sidecar unreachable at {base}: {exc}",
+        )
+
+
+@app.get("/reach-out/{row_id}/events")
+def reach_out_events(row_id: str) -> dict[str, Any]:
+    if not get_reach_out(row_id):
+        raise HTTPException(status_code=404, detail=f"No reach-out {row_id}")
+    res = _sidecar_request("GET", f"/events/{row_id}")
+    if res.status_code >= 400:
+        raise HTTPException(status_code=res.status_code, detail=res.text)
+    return res.json()
+
+
+class AggregatesRequest(BaseModel):
+    ids: list[str] = Field(..., max_length=500)
+
+
+@app.post("/reach-out/aggregates")
+def reach_out_aggregates(req: AggregatesRequest) -> dict[str, Any]:
+    """Batched open/click counts for the list view.
+
+    The frontend calls this once per page render with up to 500 reach-out
+    ids and merges the result client-side. We tolerate a sidecar failure
+    here gracefully (return empty aggregates) so a sleeping Render
+    instance doesn't break the dashboard — it just shows zero counters
+    until the sidecar wakes up.
+    """
+    if not req.ids:
+        return {"aggregates": {}}
+    try:
+        res = _sidecar_request("POST", "/aggregates", json={"ids": req.ids})
+    except HTTPException as exc:
+        logger.info("Aggregates fetch failed: %s", exc.detail)
+        return {"aggregates": {}, "warning": exc.detail}
+    if res.status_code >= 400:
+        logger.warning("Sidecar returned %s for /aggregates", res.status_code)
+        return {"aggregates": {}, "warning": res.text}
+    return res.json()
+
+
+@app.get("/settings/tracking")
+def settings_tracking() -> dict[str, Any]:
+    """Status endpoint the UI uses to show whether tracking is wired up."""
+    base = tracking.get_base_url()
+    return {
+        "publicUrl": base,
+        "ready": tracking.is_ready(),
+    }
+
+
+@app.get("/settings/gmail")
+def settings_gmail_get() -> dict[str, Any]:
+    address = get_setting(GMAIL_ADDRESS_KEY)
+    app_password = get_setting(GMAIL_APP_PASSWORD_KEY)
+    from_name = get_setting(GMAIL_FROM_NAME_KEY)
+    return {
+        "address": address,
+        "fromName": from_name,
+        "hasPassword": bool(app_password),
+    }
+
+
+@app.put("/settings/gmail")
+def settings_gmail_put(req: GmailSettingsRequest) -> dict[str, Any]:
+    address = req.address.strip()
+    if "@" not in address:
+        raise HTTPException(
+            status_code=400, detail="address must look like an email."
+        )
+    set_setting(GMAIL_ADDRESS_KEY, address)
+    if req.appPassword:
+        # Gmail app passwords are 16 chars, optionally space-separated when
+        # Google shows them. Strip whitespace before storing.
+        cleaned = re.sub(r"\s+", "", req.appPassword)
+        set_setting(GMAIL_APP_PASSWORD_KEY, cleaned)
+    if req.fromName is not None:
+        if req.fromName.strip():
+            set_setting(GMAIL_FROM_NAME_KEY, req.fromName.strip())
+        else:
+            delete_setting(GMAIL_FROM_NAME_KEY)
+    return settings_gmail_get()
+
+
+@app.delete("/settings/gmail")
+def settings_gmail_delete() -> dict[str, bool]:
+    delete_setting(GMAIL_ADDRESS_KEY)
+    delete_setting(GMAIL_APP_PASSWORD_KEY)
+    delete_setting(GMAIL_FROM_NAME_KEY)
     return {"ok": True}
 
 

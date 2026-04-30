@@ -12,8 +12,23 @@ import {
   ChevronRight,
   Menu,
   X,
+  Send,
 } from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
+import { LOGO_LOCKUP_INNER } from "./logoLockupInner";
+
+function LogoLockup({ className }: { className?: string }) {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="290 118 360 124"
+      role="img"
+      aria-label="apply-tools"
+      className={className}
+      dangerouslySetInnerHTML={{ __html: LOGO_LOCKUP_INNER }}
+    />
+  );
+}
 
 type NavItem = {
   href: string;
@@ -25,6 +40,7 @@ type NavItem = {
 const NAV: NavItem[] = [
   { href: "/", label: "Home", icon: Home, exact: true },
   { href: "/applications", label: "Applications", icon: Briefcase },
+  { href: "/reach-out", label: "Reach Out", icon: Send },
   { href: "/resumes", label: "Resumes", icon: FileText },
   { href: "/history", label: "History", icon: Clock },
 ];
@@ -39,25 +55,28 @@ function isActive(pathname: string, item: NavItem): boolean {
 
 export function Sidebar() {
   const pathname = usePathname();
-  // Start collapsed=true so SSR matches the inline script's pre-paint state
-  // for users who chose collapsed; the effect below corrects on mount.
-  const [collapsed, setCollapsed] = useState(false);
+  // Visual state (label visibility, width) is driven by CSS keyed to
+  // `data-sidebar` on <html>, which the inline pre-paint script in layout.tsx
+  // sets from localStorage before first paint. React state is just for the
+  // chevron icon and click handler; it syncs in the effect below.
+  const [collapsed, setCollapsed] = useState<boolean>(false);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [mounted, setMounted] = useState(false);
+  const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
-    const stored = window.localStorage.getItem(STORAGE_KEY);
-    setCollapsed(stored === "1");
-    setMounted(true);
-  }, []);
-
-  useEffect(() => {
-    if (!mounted) return;
+    // First effect: read the persisted choice into React state so the
+    // chevron icon matches the user's actual setting.
+    if (!hydrated) {
+      setCollapsed(window.localStorage.getItem(STORAGE_KEY) === "1");
+      setHydrated(true);
+      return;
+    }
+    // Subsequent state changes (user toggles): persist and update DOM attr.
     window.localStorage.setItem(STORAGE_KEY, collapsed ? "1" : "0");
     document.documentElement.dataset.sidebar = collapsed
       ? "collapsed"
       : "expanded";
-  }, [collapsed, mounted]);
+  }, [collapsed, hydrated]);
 
   // Close mobile drawer when route changes.
   useEffect(() => {
@@ -76,12 +95,8 @@ export function Sidebar() {
         >
           {mobileOpen ? <X className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </button>
-        <Link
-          href="/"
-          className="font-semibold tracking-tight flex items-center gap-2"
-        >
-          <span className="inline-block h-2.5 w-2.5 rounded-full bg-primary animate-pulse-glow" />
-          <span className="gradient-text">apply-tools</span>
+        <Link href="/" aria-label="apply-tools home" className="flex items-center">
+          <LogoLockup className="h-9 w-auto text-base-content" />
         </Link>
         <ThemeToggle />
       </div>
@@ -97,15 +112,14 @@ export function Sidebar() {
       )}
 
       <aside
-        data-collapsed={collapsed ? "true" : "false"}
         data-mobile-open={mobileOpen ? "true" : "false"}
         className={[
-          "sidebar group/sidebar",
-          // Desktop: fixed rail on the left, width changes via data attr.
+          "sidebar sidebar-aside group/sidebar",
+          // Desktop: fixed rail on the left. Width follows --sidebar-w
+          // which is set by the data-sidebar attribute on <html>.
           "hidden lg:flex flex-col fixed inset-y-0 left-0 z-30",
           "border-r border-base-300/40 bg-base-100/80 backdrop-blur",
           "transition-[width] duration-200 ease-out",
-          collapsed ? "w-[68px]" : "w-[224px]",
         ].join(" ")}
       >
         <SidebarContents
@@ -152,15 +166,19 @@ function SidebarContents({
   return (
     <>
       {/* Brand */}
-      <div className="h-16 flex items-center px-4 border-b border-base-300/40">
+      <div className="sidebar-brand h-24 flex items-center justify-center px-4 border-b border-base-300/40">
         <Link
           href="/"
-          className="font-semibold tracking-tight flex items-center gap-2.5 min-w-0"
+          aria-label="apply-tools home"
+          className="flex items-center justify-center min-w-0 w-full"
         >
-          <span className="inline-block h-2.5 w-2.5 rounded-full bg-primary animate-pulse-glow shrink-0" />
-          {!collapsed && (
-            <span className="gradient-text truncate">apply-tools</span>
-          )}
+          <LogoLockup className="sidebar-label w-full max-w-[200px] h-auto text-base-content" />
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/apply-tools-logo-only.svg"
+            alt="apply-tools"
+            className="sidebar-icon-only h-12 w-12"
+          />
         </Link>
         {mobile && onClose && (
           <button
@@ -184,20 +202,20 @@ function SidebarContents({
               <li key={item.href}>
                 <Link
                   href={item.href}
-                  title={collapsed ? item.label : undefined}
+                  title={item.label}
                   className={[
+                    "sidebar-link",
                     "group flex items-center rounded-lg transition-colors",
                     "h-9 px-2.5 gap-3",
                     active
                       ? "bg-primary/15 text-primary font-medium"
                       : "opacity-75 hover:opacity-100 hover:bg-base-300/40",
-                    collapsed ? "justify-center" : "",
                   ].join(" ")}
                 >
                   <Icon className="h-[18px] w-[18px] shrink-0" />
-                  {!collapsed && (
-                    <span className="text-sm truncate">{item.label}</span>
-                  )}
+                  <span className="sidebar-label text-sm truncate">
+                    {item.label}
+                  </span>
                 </Link>
               </li>
             );
