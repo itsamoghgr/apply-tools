@@ -23,5 +23,6 @@ services:
         sync: false        # copy from backend/.env after the local backend generates one
       - key: TRACKING_API_TOKEN
         sync: false        # any random secret; must match backend/.env
-      - key: PUBLIC_BASE_URL
-        sync: false        # set to your Render service URL once it's deployed (e.g. https://apply-tools-tracker.onrender.com)
+      # PUBLIC_BASE_URL is auto-derived from Render's RENDER_EXTERNAL_URL on
+      # the *.onrender.com hostname. Set it explicitly only if you bind a
+      # custom domain.
