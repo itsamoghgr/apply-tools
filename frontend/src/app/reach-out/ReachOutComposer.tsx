@@ -3,7 +3,14 @@
 import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
-import { Sparkles, Send, RotateCcw, Save, Link as LinkIcon } from "lucide-react";
+import {
+  Sparkles,
+  Send,
+  RotateCcw,
+  Save,
+  Link as LinkIcon,
+  Pencil,
+} from "lucide-react";
 
 type ReachOut = {
   id: string;
@@ -184,6 +191,45 @@ export default function ReachOutComposer({
         setBody(json.body);
         setStep("preview");
         toast.success("Draft ready — review and edit before sending.");
+        router.refresh();
+      } catch (err) {
+        toast.error((err as Error).message);
+      }
+    });
+  }
+
+  function handleComposeManually() {
+    if (!recipientName.trim() || !recipientEmail.trim()) {
+      toast.error("Recipient name and email are required.");
+      return;
+    }
+    if (!recipientEmail.includes("@")) {
+      toast.error("Enter a valid email address.");
+      return;
+    }
+
+    startTransition(async () => {
+      try {
+        const res = await fetch("/api/proxy/reach-out/blank", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            recipientName: recipientName.trim(),
+            recipientEmail: recipientEmail.trim(),
+            linkedinProfile: linkedinProfile.trim() || null,
+            contextNote: contextNote.trim() || null,
+            resumeId: resumeId || null,
+          }),
+        });
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(payload.detail ?? `Could not create draft (${res.status})`);
+        }
+        const json = (await res.json()) as ReachOut;
+        setDraft(json);
+        setSubject(json.subject);
+        setBody(json.body);
+        setStep("preview");
         router.refresh();
       } catch (err) {
         toast.error((err as Error).message);
@@ -409,13 +455,23 @@ export default function ReachOutComposer({
             type="button"
             onClick={handleSend}
             className="btn btn-gradient"
-            disabled={isPending || !gmailConnected || !trackingReady}
+            disabled={
+              isPending ||
+              !gmailConnected ||
+              !trackingReady ||
+              !subject.trim() ||
+              !body.trim()
+            }
             title={
               !gmailConnected
                 ? "Connect Gmail above first"
                 : !trackingReady
                   ? "Tracking sidecar offline — deploy tracking-sidecar/"
-                  : "Send via Gmail"
+                  : !subject.trim()
+                    ? "Subject is empty"
+                    : !body.trim()
+                      ? "Body is empty"
+                      : "Send via Gmail"
             }
           >
             {isPending ? (
@@ -510,7 +566,10 @@ export default function ReachOutComposer({
           htmlFor="reach-profile"
           className="label-text uppercase tracking-widest text-xs opacity-50 font-medium block mb-1"
         >
-          LinkedIn profile text
+          LinkedIn profile text{" "}
+          <span className="opacity-60 normal-case tracking-normal">
+            (required for AI draft, optional for manual)
+          </span>
         </label>
         <textarea
           id="reach-profile"
@@ -519,7 +578,6 @@ export default function ReachOutComposer({
           placeholder="Paste their About section, experience, education…"
           value={linkedinProfile}
           onChange={(e) => setLinkedinProfile(e.target.value)}
-          required
         />
       </div>
 
@@ -563,7 +621,7 @@ export default function ReachOutComposer({
         </div>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         <button
           type="submit"
           disabled={isPending}
@@ -575,6 +633,16 @@ export default function ReachOutComposer({
             <Sparkles className="h-4 w-4" />
           )}
           Generate email
+        </button>
+        <button
+          type="button"
+          onClick={handleComposeManually}
+          disabled={isPending}
+          className="btn btn-ghost btn-sm"
+          title="Skip the AI draft and write subject + body yourself"
+        >
+          <Pencil className="h-4 w-4" />
+          Compose manually
         </button>
         {!gmailConnected && (
           <span className="text-xs opacity-60">

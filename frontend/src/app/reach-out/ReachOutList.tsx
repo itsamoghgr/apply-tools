@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
@@ -72,6 +72,20 @@ export default function ReachOutList({ initial }: Props) {
   const [isPending, startTransition] = useTransition();
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [eventsById, setEventsById] = useState<Record<string, ReachOutEvent[] | "loading" | "error">>({});
+  // Inline two-step delete: first click arms the row's delete button (it
+  // flips from a ghost icon to a filled red "Confirm?" button) and a
+  // second click within 3s actually deletes. Avoids native `confirm()`
+  // popups while still preventing accidental clicks.
+  const [confirmingDeleteId, setConfirmingDeleteId] = useState<string | null>(
+    null,
+  );
+  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+    };
+  }, []);
 
   function toggle(id: string) {
     setExpanded((prev) => ({ ...prev, [id]: !prev[id] }));
@@ -99,7 +113,24 @@ export default function ReachOutList({ initial }: Props) {
   }, [expanded, eventsById, initial]);
 
   function handleDelete(id: string) {
-    if (!confirm("Delete this reach-out?")) return;
+    if (confirmingDeleteId !== id) {
+      // First click: arm the row. Auto-disarm after 3s if the user walks
+      // away without confirming.
+      if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current);
+      setConfirmingDeleteId(id);
+      confirmTimerRef.current = setTimeout(() => {
+        setConfirmingDeleteId((current) => (current === id ? null : current));
+        confirmTimerRef.current = null;
+      }, 3000);
+      return;
+    }
+
+    // Second click within the 3s window — actually delete.
+    if (confirmTimerRef.current) {
+      clearTimeout(confirmTimerRef.current);
+      confirmTimerRef.current = null;
+    }
+    setConfirmingDeleteId(null);
     startTransition(async () => {
       try {
         const res = await fetch(`/api/proxy/reach-out/${id}`, {
@@ -255,15 +286,30 @@ export default function ReachOutList({ initial }: Props) {
                       Retry
                     </button>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => handleDelete(r.id)}
-                    className="btn btn-ghost btn-xs btn-circle text-error"
-                    disabled={isPending}
-                    aria-label="Delete"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
+                  {confirmingDeleteId === r.id ? (
+                    <button
+                      type="button"
+                      onClick={() => handleDelete(r.id)}
+                      className="btn btn-error btn-xs"
+                      disabled={isPending}
+                      aria-label="Confirm delete"
+                      title="Click again to confirm — auto-cancels in 3s"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      Confirm?
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => handleDelete(r.id)}
+                      className="btn btn-ghost btn-xs btn-circle text-error"
+                      disabled={isPending}
+                      aria-label="Delete"
+                      title="Delete this reach-out"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  )}
                 </div>
               </div>
 

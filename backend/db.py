@@ -228,10 +228,20 @@ def _clean_reach_out_value(col: str, value):
     return value
 
 
-def insert_reach_out(fields: dict) -> str:
-    """Insert a ReachOut row in 'draft' status. Returns the new id."""
-    required = ("recipientName", "recipientEmail", "linkedinProfile", "subject", "body")
-    for col in required:
+def insert_reach_out(fields: dict, *, require_content: bool = True) -> str:
+    """Insert a ReachOut row in 'draft' status. Returns the new id.
+
+    When `require_content` is True (default, used by the AI-generated path),
+    `linkedinProfile`, `subject`, and `body` must each be non-empty strings.
+    Set False for blank manual drafts where the user will fill in subject
+    and body inside the editor before sending — we still write empty
+    strings into those NOT NULL columns to keep the schema simple.
+    """
+    base_required = ("recipientName", "recipientEmail")
+    content_required = (
+        ("linkedinProfile", "subject", "body") if require_content else ()
+    )
+    for col in base_required + content_required:
         v = fields.get(col)
         if not (isinstance(v, str) and v.strip()):
             raise ValueError(f"{col} is required")
@@ -241,6 +251,10 @@ def insert_reach_out(fields: dict) -> str:
     for col in REACH_OUT_INSERT_COLUMNS:
         if col in fields:
             cleaned[col] = _clean_reach_out_value(col, fields[col])
+    # Backfill the NOT NULL content columns with empty strings when the
+    # caller is creating a blank manual draft.
+    for col in ("linkedinProfile", "subject", "body"):
+        cleaned.setdefault(col, "")
 
     cols = list(cleaned.keys())
     placeholders = ", ".join("?" for _ in cols)
