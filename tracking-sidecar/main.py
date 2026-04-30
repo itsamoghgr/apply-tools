@@ -154,8 +154,8 @@ def require_token(authorization: str = Header(default="")) -> None:
 app = FastAPI(title="Apply Tools tracking sidecar", lifespan=lifespan)
 
 
-@app.get("/")
-@app.get("/healthz")
+@app.api_route("/", methods=["GET", "HEAD"])
+@app.api_route("/healthz", methods=["GET", "HEAD"])
 def health() -> dict:
     """Cheap liveness probe for keep-alive pings.
 
@@ -164,6 +164,11 @@ def health() -> dict:
     cron-job.org, etc.) can keep the Render free-tier instance warm without
     hammering Neon's connection budget. See tracking-sidecar/README.md for
     setup instructions.
+
+    Both GET and HEAD are accepted — UptimeRobot defaults to HEAD to skip
+    body transfer, and other monitors prefer GET. Returning the same JSON
+    dict for both is fine: FastAPI strips the response body for HEAD
+    automatically.
     """
     return {"ok": True, "service": "tracking-sidecar"}
 
