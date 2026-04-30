@@ -10,6 +10,7 @@ import {
   Send,
   Eye,
   MousePointerClick,
+  Pencil,
 } from "lucide-react";
 
 type Item = {
@@ -42,10 +43,14 @@ type Props = {
   initial: Item[];
 };
 
-const STATUS_BADGE: Record<string, string> = {
-  draft: "badge-ghost",
-  sent: "badge-success",
-  failed: "badge-error",
+// Subtle inline status pill. We avoid DaisyUI's `.badge` class because at
+// small sizes it renders with chunky vertical padding that visually
+// dominates the row. Using a thin border + tinted background reads as
+// status without competing with the subject line for attention.
+const STATUS_PILL: Record<string, string> = {
+  draft: "border-base-content/20 bg-base-content/5 text-base-content/70",
+  sent: "border-success/30 bg-success/10 text-success",
+  failed: "border-error/30 bg-error/10 text-error",
 };
 
 function formatTime(iso: string): string {
@@ -109,6 +114,16 @@ export default function ReachOutList({ initial }: Props) {
     });
   }
 
+  function handleEdit(id: string) {
+    router.push(`/reach-out?edit=${encodeURIComponent(id)}`, { scroll: false });
+    // Smooth-scroll to the composer so the user immediately sees their draft
+    // load in. Falls back to instant scroll on browsers without smooth-scroll.
+    requestAnimationFrame(() => {
+      const el = document.getElementById("reach-out-composer");
+      if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+  }
+
   function handleResend(id: string) {
     startTransition(async () => {
       try {
@@ -148,15 +163,17 @@ export default function ReachOutList({ initial }: Props) {
       <div className="glass-card overflow-hidden divide-y divide-base-300/40">
         {initial.map((r) => {
           const isOpen = expanded[r.id] ?? false;
-          const badge = STATUS_BADGE[r.status] ?? "badge-ghost";
+          const pill =
+            STATUS_PILL[r.status] ??
+            "border-base-content/20 bg-base-content/5 text-base-content/70";
           const events = eventsById[r.id];
           return (
-            <div key={r.id} className="px-5 py-3">
-              <div className="flex items-center gap-3 flex-wrap">
+            <div key={r.id} className="px-5 py-4">
+              <div className="flex items-center gap-x-3 gap-y-2 flex-wrap">
                 <button
                   type="button"
                   onClick={() => toggle(r.id)}
-                  className="btn btn-ghost btn-xs btn-circle"
+                  className="btn btn-ghost btn-xs btn-circle shrink-0"
                   aria-label={isOpen ? "Collapse" : "Expand"}
                 >
                   {isOpen ? (
@@ -165,70 +182,89 @@ export default function ReachOutList({ initial }: Props) {
                     <ChevronDown className="h-4 w-4" />
                   )}
                 </button>
-                <span className={`badge ${badge} badge-sm uppercase tracking-wider`}>
+                <span
+                  className={`inline-flex items-center px-2 py-px rounded-full border text-[10px] font-bold uppercase tracking-wide whitespace-nowrap shrink-0 leading-tight ${pill}`}
+                >
                   {r.status}
                 </span>
-                <div className="min-w-0 flex-1">
+                <div className="min-w-0 flex-1 basis-40">
                   <div className="font-medium truncate">{r.subject}</div>
                   <div className="text-xs opacity-60 truncate">
                     {r.recipientName} &lt;{r.recipientEmail}&gt;
                   </div>
                 </div>
-                {r.status === "sent" && (
-                  <div className="flex items-center gap-3 text-xs tabular-nums">
-                    <span
-                      className="inline-flex items-center gap-1 opacity-70"
-                      title={
-                        r.lastOpenedAt
-                          ? `Last opened ${formatTime(r.lastOpenedAt)}`
-                          : "Not opened yet"
-                      }
+                {/* Right-cluster: stats + timestamp + actions wrap as one unit
+                    so on narrow viewports they drop to a tidy second line
+                    instead of fragmenting across three. */}
+                <div className="flex items-center gap-x-3 gap-y-2 flex-wrap ml-auto">
+                  {r.status === "sent" && (
+                    <div className="flex items-center gap-3 text-xs tabular-nums">
+                      <span
+                        className="inline-flex items-center gap-1 opacity-70"
+                        title={
+                          r.lastOpenedAt
+                            ? `Last opened ${formatTime(r.lastOpenedAt)}`
+                            : "Not opened yet"
+                        }
+                      >
+                        <Eye className="h-3.5 w-3.5" />
+                        {r.openCount}
+                      </span>
+                      <span
+                        className="inline-flex items-center gap-1 opacity-70"
+                        title={
+                          r.lastClickedAt
+                            ? `Last clicked ${formatTime(r.lastClickedAt)}`
+                            : "No link clicks yet"
+                        }
+                      >
+                        <MousePointerClick className="h-3.5 w-3.5" />
+                        {r.clickCount}
+                      </span>
+                    </div>
+                  )}
+                  <span
+                    className="opacity-40 text-xs tabular-nums whitespace-nowrap"
+                    title={formatTime(r.createdAt)}
+                  >
+                    {r.sentAt
+                      ? `sent ${formatTime(r.sentAt)}`
+                      : formatTime(r.createdAt)}
+                  </span>
+                  {r.status === "draft" && (
+                    <button
+                      type="button"
+                      onClick={() => handleEdit(r.id)}
+                      className="btn btn-primary btn-xs"
+                      disabled={isPending}
+                      title="Open this draft in the composer to edit and send"
                     >
-                      <Eye className="h-3.5 w-3.5" />
-                      {r.openCount}
-                    </span>
-                    <span
-                      className="inline-flex items-center gap-1 opacity-70"
-                      title={
-                        r.lastClickedAt
-                          ? `Last clicked ${formatTime(r.lastClickedAt)}`
-                          : "No link clicks yet"
-                      }
+                      <Pencil className="h-3.5 w-3.5" />
+                      Edit & send
+                    </button>
+                  )}
+                  {r.status === "failed" && (
+                    <button
+                      type="button"
+                      onClick={() => handleResend(r.id)}
+                      className="btn btn-ghost btn-xs"
+                      disabled={isPending}
+                      title="Retry sending"
                     >
-                      <MousePointerClick className="h-3.5 w-3.5" />
-                      {r.clickCount}
-                    </span>
-                  </div>
-                )}
-                <span
-                  className="opacity-40 text-xs tabular-nums whitespace-nowrap"
-                  title={formatTime(r.createdAt)}
-                >
-                  {r.sentAt
-                    ? `sent ${formatTime(r.sentAt)}`
-                    : formatTime(r.createdAt)}
-                </span>
-                {r.status === "failed" && (
+                      <Send className="h-3.5 w-3.5" />
+                      Retry
+                    </button>
+                  )}
                   <button
                     type="button"
-                    onClick={() => handleResend(r.id)}
-                    className="btn btn-ghost btn-xs"
+                    onClick={() => handleDelete(r.id)}
+                    className="btn btn-ghost btn-xs btn-circle text-error"
                     disabled={isPending}
-                    title="Retry sending"
+                    aria-label="Delete"
                   >
-                    <Send className="h-3.5 w-3.5" />
-                    Retry
+                    <Trash2 className="h-3.5 w-3.5" />
                   </button>
-                )}
-                <button
-                  type="button"
-                  onClick={() => handleDelete(r.id)}
-                  className="btn btn-ghost btn-xs btn-circle text-error"
-                  disabled={isPending}
-                  aria-label="Delete"
-                >
-                  <Trash2 className="h-3.5 w-3.5" />
-                </button>
+                </div>
               </div>
 
               {isOpen && (

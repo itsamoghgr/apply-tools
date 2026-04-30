@@ -69,6 +69,35 @@ TRACKING_API_TOKEN=<same value as Render>
 
 Restart `./start.sh`. The Reach Out page header should flip to "Tracking active via apply-tools-tracker.onrender.com".
 
+## Keeping the sidecar awake (free tier)
+
+Render free instances sleep after **15 min of inactivity** and take **30–60 sec** to cold-boot. That breaks tracking in two ways:
+
+- **Open tracking is silently dropped.** Gmail's image proxy times out before the sidecar boots, so the open is never recorded. The first email opened after a quiet period — the one you most want to know about — is the one most likely to be missed.
+- **Click tracking still works but stalls.** The recipient's browser waits for the redirect, but they stare at a blank "Connecting…" tab for ~60 sec. Some will close it before the redirect lands.
+
+Fix it with a free uptime monitor that pings `/healthz` every few minutes:
+
+### Option A — UptimeRobot (recommended)
+
+1. Sign up at <https://uptimerobot.com> (free, no card).
+2. **+ New monitor** → type `HTTP(s)` → URL: `https://<your-sidecar>.onrender.com/healthz` → interval: 5 min.
+3. Save. UptimeRobot's free plan allows 50 monitors at 5-min intervals — well under any limit.
+
+This keeps the sidecar warm 24/7. With 5-min checks against a 15-min sleep timer, the service never gets a chance to hibernate.
+
+### Option B — cron-job.org
+
+Same idea, slightly simpler UI. Create an account, add a job at the same `/healthz` URL with a 5–10 min interval.
+
+### What `/healthz` does
+
+It's a stripped-down health probe that returns `{"ok": true}` without touching Postgres, so keep-alive pings don't burn through Neon's connection budget. The endpoint also exists at `/` for monitors that probe the root.
+
+### Should I just upgrade?
+
+If you'll send more than a handful of emails per week, Render's **Starter** plan ($7/mo) eliminates hibernation entirely and removes any need for an external pinger. For occasional use, UptimeRobot is genuinely fine — I've run it this way for months without missing an open.
+
 ## Local dev (run the sidecar against a local Postgres)
 
 ```bash
@@ -87,6 +116,6 @@ You can pair this with a tunnel for end-to-end testing without re-deploying — 
 ## Troubleshooting
 
 - **Render service stays at "deploying" forever** — check the service logs. Most common cause is `DATABASE_URL` missing the `?sslmode=require` suffix; psycopg refuses to connect to Neon over plain TCP.
-- **Open events stop after Render service sleeps** — by design on the free plan. Upgrade to Starter ($7/mo) for an always-on instance, or accept the ~5% miss rate on first opens after long quiet periods.
+- **Open events stop after Render service sleeps** — Gmail's image proxy times out before the sidecar cold-boots. See [Keeping the sidecar awake](#keeping-the-sidecar-awake-free-tier) above; setting up UptimeRobot against `/healthz` fixes this in ~2 minutes.
 - **`/events` returns 401** — bearer token mismatch. Confirm `TRACKING_API_TOKEN` is identical in `backend/.env` and Render's env settings.
 - **Clicks redirect to `/` instead of the original URL** — token decode failed. Almost always means `TRACKING_FERNET_KEY` differs between the local backend that encoded the URL and the sidecar that's decoding it.

@@ -155,7 +155,16 @@ app = FastAPI(title="Apply Tools tracking sidecar", lifespan=lifespan)
 
 
 @app.get("/")
+@app.get("/healthz")
 def health() -> dict:
+    """Cheap liveness probe for keep-alive pings.
+
+    No DB hit on purpose — we want this endpoint to respond in < 50 ms even
+    when Postgres is asleep, so an external uptime monitor (UptimeRobot,
+    cron-job.org, etc.) can keep the Render free-tier instance warm without
+    hammering Neon's connection budget. See tracking-sidecar/README.md for
+    setup instructions.
+    """
     return {"ok": True, "service": "tracking-sidecar"}
 
 

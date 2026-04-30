@@ -86,26 +86,66 @@ def _build_configuration() -> Configuration:
 
 
 # ---------------------------------------------------------------------------
-# Plain text -> minimal HTML, with autolinking. Email clients are
-# conservative renderers; we keep the structure simple: escape entities,
-# autolink URLs, and turn newlines into <br>. The surrounding <html><body>
-# skeleton is what lxml needs so we can append the tracking pixel to <body>.
+# Plain text -> minimal HTML, with markdown links + bare-URL autolinking.
+# Email clients are conservative renderers; we keep the structure simple:
+# stash links as placeholders, escape the rest, and turn newlines into <br>.
+# The surrounding <html><body> skeleton is what lxml needs so we can append
+# the tracking pixel to <body>.
+#
+# Two link forms are recognised in the user's body text:
+#   1. Bare URL:        "see https://x.com"
+#                       → <a href="https://x.com">https://x.com</a>
+#   2. Markdown link:   "see [my portfolio](https://x.com)"
+#                       → <a href="https://x.com">my portfolio</a>
+# Markdown form runs first so a `[text](url)` block is treated as one link
+# rather than the inner URL being autolinked separately.
 # ---------------------------------------------------------------------------
 
 
-# Matches bare URLs (http/https). Trailing punctuation is excluded so a
-# sentence like "see https://x.com." doesn't include the period.
+# Markdown link: [display text](https://url). Display text may contain any
+# char except `]` or a newline; the URL must be http(s) and contain no
+# whitespace or closing paren.
+_MD_LINK_RE = re.compile(r"\[([^\]\n]+)\]\((https?://[^)\s]+)\)")
+
+# Bare URL. Trailing punctuation is excluded so a sentence like
+# "see https://x.com." doesn't include the period.
 _URL_RE = re.compile(r"https?://[^\s<>\"']+[^\s<>\"'.,;:!?)\]]")
+
+# Marker used to stash already-rendered <a> tags before bulk HTML-escaping
+# the surrounding text. Chosen for being impossible to type from a keyboard
+# so user input can't collide with it.
+_LINK_PLACEHOLDER_RE = re.compile(r"\x00LINK(\d+)\x00")
 
 
 def _plain_to_html(text: str) -> str:
-    def _replace(match: re.Match[str]) -> str:
-        url = match.group(0)
-        return f'<a href="{_html.escape(url, quote=True)}">{_html.escape(url)}</a>'
+    rendered_links: list[str] = []
 
-    escaped = _html.escape(text)
-    linked_lines = [_URL_RE.sub(_replace, line) for line in escaped.split("\n")]
-    body_html = "<br>\n".join(linked_lines)
+    def _stash(html_fragment: str) -> str:
+        token = f"\x00LINK{len(rendered_links)}\x00"
+        rendered_links.append(html_fragment)
+        return token
+
+    def _on_md(match: re.Match[str]) -> str:
+        label, url = match.group(1), match.group(2)
+        return _stash(
+            f'<a href="{_html.escape(url, quote=True)}">'
+            f"{_html.escape(label)}</a>"
+        )
+
+    def _on_bare(match: re.Match[str]) -> str:
+        url = match.group(0)
+        return _stash(
+            f'<a href="{_html.escape(url, quote=True)}">'
+            f"{_html.escape(url)}</a>"
+        )
+
+    after_md = _MD_LINK_RE.sub(_on_md, text)
+    after_urls = _URL_RE.sub(_on_bare, after_md)
+    escaped = _html.escape(after_urls)
+    restored = _LINK_PLACEHOLDER_RE.sub(
+        lambda m: rendered_links[int(m.group(1))], escaped
+    )
+    body_html = "<br>\n".join(restored.split("\n"))
     return (
         "<!DOCTYPE html>"
         '<html><body style="font-family: -apple-system, BlinkMacSystemFont, '
@@ -113,6 +153,16 @@ def _plain_to_html(text: str) -> str:
         f"{body_html}"
         "</body></html>"
     )
+
+
+def _plain_to_plain_text(text: str) -> str:
+    """Flatten markdown links to `label (url)` for the text/plain MIME part.
+
+    Plain-text mail clients can't render `[label](url)` as a link, so we
+    spell out both pieces. Bare URLs are left as-is — they're already
+    readable and most plain-text clients linkify them.
+    """
+    return _MD_LINK_RE.sub(r"\1 (\2)", text)
 
 
 # Pixel: invisible by construction so a failed load never reveals a broken-
@@ -132,13 +182,14 @@ _PIXEL_ATTRIBUTES: dict[str, str] = {
 def prepare_html(body_text: str, reach_out_id: str) -> Tuple[str, str]:
     """Build (plain_text, tracking_html) bodies for a multipart email.
 
-    The plain part is unchanged so non-HTML clients see exactly what the
-    user composed. The HTML part has every link rewritten through the
-    sidecar's click-tracking proxy and a 1x1 invisible open pixel
-    appended.
+    The plain part flattens markdown links to `label (url)` so non-HTML
+    clients see something readable. The HTML part has every link rewritten
+    through the sidecar's click-tracking proxy and a 1x1 invisible open
+    pixel appended.
     """
     cfg = _build_configuration()
     raw_html = _plain_to_html(body_text)
+    plain_text = _plain_to_plain_text(body_text)
     extra_metadata = {"reach_out_id": reach_out_id}
 
     tree = lxml_html.fromstring(raw_html)
@@ -159,4 +210,4 @@ def prepare_html(body_text: str, reach_out_id: str) -> Tuple[str, str]:
     body_el = tree.body if tree.body is not None else tree
     body_el.append(lxml_html.Element("img", pixel_attrs))
 
-    return body_text, lxml_html.tostring(tree, encoding="unicode")
+    return plain_text, lxml_html.tostring(tree, encoding="unicode")

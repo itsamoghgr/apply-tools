@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useTransition } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState, useTransition } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { toast } from "sonner";
-import { Sparkles, Send, RotateCcw, Save } from "lucide-react";
+import { Sparkles, Send, RotateCcw, Save, Link as LinkIcon } from "lucide-react";
 
 type ReachOut = {
   id: string;
@@ -27,8 +27,11 @@ export default function ReachOutComposer({
   trackingReady,
 }: Props) {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const editId = searchParams.get("edit");
   const [isPending, startTransition] = useTransition();
   const [step, setStep] = useState<"form" | "preview">("form");
+  const [loadingEdit, setLoadingEdit] = useState(false);
 
   const [recipientName, setRecipientName] = useState("");
   const [recipientEmail, setRecipientEmail] = useState("");
@@ -40,6 +43,15 @@ export default function ReachOutComposer({
   const [subject, setSubject] = useState("");
   const [body, setBody] = useState("");
 
+  const bodyRef = useRef<HTMLTextAreaElement | null>(null);
+  const [linkPopoverOpen, setLinkPopoverOpen] = useState(false);
+  const [linkText, setLinkText] = useState("");
+  const [linkUrl, setLinkUrl] = useState("");
+  const [pendingSelection, setPendingSelection] = useState<{
+    start: number;
+    end: number;
+  } | null>(null);
+
   function reset() {
     setStep("form");
     setRecipientName("");
@@ -50,6 +62,92 @@ export default function ReachOutComposer({
     setDraft(null);
     setSubject("");
     setBody("");
+    setLinkPopoverOpen(false);
+    setLinkText("");
+    setLinkUrl("");
+    setPendingSelection(null);
+    if (editId) {
+      // Strip the ?edit= param so a refresh doesn't reload the same draft.
+      router.replace("/reach-out", { scroll: false });
+    }
+  }
+
+  // Load an existing draft into the preview step when the page is opened
+  // with `?edit=<id>` (the "Edit" button on the past-reach-outs list).
+  useEffect(() => {
+    if (!editId) return;
+    if (draft?.id === editId) return;
+
+    let cancelled = false;
+    setLoadingEdit(true);
+    fetch(`/api/proxy/reach-out/${editId}`)
+      .then(async (res) => {
+        if (!res.ok) {
+          const payload = await res.json().catch(() => ({}));
+          throw new Error(payload.detail ?? `Load failed (${res.status})`);
+        }
+        const json = (await res.json()) as ReachOut;
+        if (cancelled) return;
+        setDraft(json);
+        setSubject(json.subject);
+        setBody(json.body);
+        setStep("preview");
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        toast.error((err as Error).message);
+        router.replace("/reach-out", { scroll: false });
+      })
+      .finally(() => {
+        if (!cancelled) setLoadingEdit(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [editId, draft?.id, router]);
+
+  function openLinkPopover() {
+    const ta = bodyRef.current;
+    if (!ta) {
+      setLinkPopoverOpen(true);
+      return;
+    }
+    const start = ta.selectionStart ?? body.length;
+    const end = ta.selectionEnd ?? body.length;
+    const selected = body.slice(start, end);
+    setPendingSelection({ start, end });
+    setLinkText(selected);
+    setLinkUrl("");
+    setLinkPopoverOpen(true);
+  }
+
+  function insertLink(e: React.FormEvent) {
+    e.preventDefault();
+    const text = linkText.trim();
+    let url = linkUrl.trim();
+    if (!text || !url) {
+      toast.error("Both the display text and URL are required.");
+      return;
+    }
+    if (!/^https?:\/\//i.test(url)) {
+      url = `https://${url}`;
+    }
+    const sel = pendingSelection ?? { start: body.length, end: body.length };
+    const md = `[${text}](${url})`;
+    const next = body.slice(0, sel.start) + md + body.slice(sel.end);
+    setBody(next);
+    setLinkPopoverOpen(false);
+    setLinkText("");
+    setLinkUrl("");
+    setPendingSelection(null);
+    requestAnimationFrame(() => {
+      const ta = bodyRef.current;
+      if (!ta) return;
+      const cursor = sel.start + md.length;
+      ta.focus();
+      ta.setSelectionRange(cursor, cursor);
+    });
   }
 
   function handleGenerate(e: React.FormEvent) {
@@ -156,12 +254,27 @@ export default function ReachOutComposer({
     });
   }
 
-  if (step === "preview" && draft) {
+  if (loadingEdit && !draft) {
     return (
-      <div className="glass-card p-5 space-y-4">
+      <div
+        id="reach-out-composer"
+        className="glass-card p-5 flex items-center gap-3 text-sm opacity-70"
+      >
+        <span className="loading loading-spinner loading-sm" />
+        Loading draft…
+      </div>
+    );
+  }
+
+  if (step === "preview" && draft) {
+    const isExistingDraft = draft.status === "draft" && !!editId;
+    return (
+      <div id="reach-out-composer" className="glass-card p-5 space-y-4">
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div>
-            <h2 className="text-base font-semibold">Preview &amp; approve</h2>
+            <h2 className="text-base font-semibold">
+              {isExistingDraft ? "Edit draft" : "Preview & approve"}
+            </h2>
             <p className="text-xs opacity-60">
               To: {draft.recipientName} &lt;{draft.recipientEmail}&gt;
             </p>
@@ -171,9 +284,14 @@ export default function ReachOutComposer({
             onClick={reset}
             className="btn btn-ghost btn-sm"
             disabled={isPending}
+            title={
+              isExistingDraft
+                ? "Close without sending — your edits won't be saved unless you hit Save edits first."
+                : "Throw away this draft and start a new one."
+            }
           >
             <RotateCcw className="h-4 w-4" />
-            Discard &amp; start over
+            {isExistingDraft ? "Close" : "Discard & start over"}
           </button>
         </div>
 
@@ -194,19 +312,96 @@ export default function ReachOutComposer({
         </div>
 
         <div>
-          <label
-            htmlFor="reach-out-body"
-            className="label-text uppercase tracking-widest text-xs opacity-50 font-medium block mb-1"
-          >
-            Body
-          </label>
+          <div className="flex items-center justify-between gap-2 mb-1">
+            <label
+              htmlFor="reach-out-body"
+              className="label-text uppercase tracking-widest text-xs opacity-50 font-medium"
+            >
+              Body
+            </label>
+            <div className="relative">
+              <button
+                type="button"
+                onClick={openLinkPopover}
+                className="btn btn-ghost btn-xs gap-1.5"
+                title="Insert a hyperlink. Tracked clicks are recorded by the sidecar."
+              >
+                <LinkIcon className="h-3.5 w-3.5" />
+                Insert link
+              </button>
+              {linkPopoverOpen && (
+                <form
+                  onSubmit={insertLink}
+                  className="absolute right-0 top-full mt-1 z-10 w-72 glass-card p-3 space-y-2 shadow-lg"
+                >
+                  <div>
+                    <label
+                      htmlFor="link-text"
+                      className="label-text uppercase tracking-widest text-[10px] opacity-50 font-medium block mb-0.5"
+                    >
+                      Display text
+                    </label>
+                    <input
+                      id="link-text"
+                      type="text"
+                      autoFocus
+                      className="input input-bordered input-sm w-full"
+                      placeholder="my portfolio"
+                      value={linkText}
+                      onChange={(e) => setLinkText(e.target.value)}
+                    />
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="link-url"
+                      className="label-text uppercase tracking-widest text-[10px] opacity-50 font-medium block mb-0.5"
+                    >
+                      URL
+                    </label>
+                    <input
+                      id="link-url"
+                      type="url"
+                      className="input input-bordered input-sm w-full"
+                      placeholder="https://example.com"
+                      value={linkUrl}
+                      onChange={(e) => setLinkUrl(e.target.value)}
+                    />
+                  </div>
+                  <div className="flex items-center gap-2 justify-end">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setLinkPopoverOpen(false);
+                        setLinkText("");
+                        setLinkUrl("");
+                        setPendingSelection(null);
+                      }}
+                      className="btn btn-ghost btn-xs"
+                    >
+                      Cancel
+                    </button>
+                    <button type="submit" className="btn btn-primary btn-xs">
+                      Insert
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
+          </div>
           <textarea
             id="reach-out-body"
+            ref={bodyRef}
             className="textarea textarea-bordered w-full font-mono text-sm leading-relaxed"
             rows={14}
             value={body}
             onChange={(e) => setBody(e.target.value)}
           />
+          <p className="text-[11px] opacity-50 mt-1">
+            Hyperlinks: type{" "}
+            <code className="font-mono">[label](https://url)</code> or use{" "}
+            <span className="font-medium">Insert link</span>. Bare URLs are
+            auto-linked. All clicks are tracked.
+          </p>
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
@@ -255,7 +450,11 @@ export default function ReachOutComposer({
   }
 
   return (
-    <form onSubmit={handleGenerate} className="glass-card p-5 space-y-4">
+    <form
+      id="reach-out-composer"
+      onSubmit={handleGenerate}
+      className="glass-card p-5 space-y-4"
+    >
       <div className="flex items-center gap-3">
         <div className="p-2 rounded-lg bg-primary/10 text-primary">
           <Sparkles className="h-5 w-5" />
