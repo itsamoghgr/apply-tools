@@ -731,6 +731,58 @@ def _cover_body_to_plain_text(body: str) -> str:
     return out.strip()
 
 
+# Sentinel placeholders unlikely to appear in any cover letter body. We
+# stash whitelisted markup behind these tokens, escape every other
+# LaTeX-special char, then restore the markup. This way a stray `%`,
+# `$`, `&`, `_`, etc. from the model can't crash tectonic.
+_TOK_EMPH_OPEN = "\x01\x02\x03"
+_TOK_EMPH_CLOSE = "\x01\x02\x04"
+_TOK_BF_OPEN = "\x01\x02\x05"
+_TOK_BF_CLOSE = "\x01\x02\x06"
+_TOK_BREAK = "\x01\x02\x07"
+
+
+def _sanitize_cover_body(body: str) -> str:
+    """Escape stray LaTeX specials in the body while preserving the whitelisted
+    commands the prompt is allowed to emit (\\emph{}, \\textbf{}, \\\\).
+
+    Models occasionally slip through a `%`, `$`, `&`, etc. despite prompt
+    instructions; without sanitisation tectonic aborts the compile. Sanitising
+    after generation is cheaper than re-prompting.
+    """
+    # 1) Stash whitelisted markup behind sentinels.
+    s = _LATEX_EMPH_RE.sub(
+        lambda m: f"{_TOK_EMPH_OPEN}{m.group(1)}{_TOK_EMPH_CLOSE}", body
+    )
+    s = _LATEX_TEXTBF_RE.sub(
+        lambda m: f"{_TOK_BF_OPEN}{m.group(1)}{_TOK_BF_CLOSE}", s
+    )
+    s = s.replace("\\\\", _TOK_BREAK)
+
+    # 2) Escape every remaining LaTeX-special character. (Don't reuse
+    # escape_latex on the whole body because the sentinels themselves
+    # contain bytes we want to preserve verbatim, and we want braces
+    # *outside* sentinels escaped too if present.)
+    s = (
+        s.replace("\\", r"\textbackslash{}")
+        .replace("&", r"\&")
+        .replace("%", r"\%")
+        .replace("$", r"\$")
+        .replace("#", r"\#")
+        .replace("_", r"\_")
+        .replace("{", r"\{")
+        .replace("}", r"\}")
+        .replace("~", r"\textasciitilde{}")
+        .replace("^", r"\textasciicircum{}")
+    )
+
+    # 3) Restore whitelisted markup.
+    s = s.replace(_TOK_EMPH_OPEN, r"\emph{").replace(_TOK_EMPH_CLOSE, "}")
+    s = s.replace(_TOK_BF_OPEN, r"\textbf{").replace(_TOK_BF_CLOSE, "}")
+    s = s.replace(_TOK_BREAK, r"\\")
+    return s
+
+
 def generate_cover_letter(
     company: str, jd: str, resume_id: str | None = None
 ) -> bytes:
@@ -746,9 +798,10 @@ def generate_cover_letter(
         "COMPANY_NAME": escape_latex(company.strip()),
         "ROLE_TITLE": escape_latex(payload["role_title"].strip()),
         "HIRING_MANAGER_OR_TEAM": escape_latex(payload["hiring_manager"].strip()),
-        # Body is intentionally NOT escaped - Claude is instructed to only emit
-        # the whitelist of \emph, \textbf, \\ and blank-line paragraph breaks.
-        "BODY_PARAGRAPHS": payload["body_paragraphs"].strip(),
+        # Body keeps the whitelisted \emph / \textbf / \\ commands. All other
+        # LaTeX-special characters get escaped so a stray % or & from the
+        # model can't break tectonic.
+        "BODY_PARAGRAPHS": _sanitize_cover_body(payload["body_paragraphs"].strip()),
     }
     tex_source = _substitute(template, substitutions)
     pdf_bytes = compile_latex(tex_source, jobname="cover_letter")

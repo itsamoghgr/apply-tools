@@ -128,6 +128,20 @@ body {
 :root { --sidebar-w: 224px; }
 [data-sidebar="collapsed"] { --sidebar-w: 68px; }
 
+/* Sidebar label visibility is driven entirely by the data-sidebar attribute
+   on <html> so the SSR markup and client hydration stay identical (we only
+   toggle CSS). Width follows --sidebar-w. */
+.sidebar-label { display: inline-block; }
+[data-sidebar="collapsed"] .sidebar-aside .sidebar-label { display: none; }
+.sidebar-icon-only { display: none; }
+[data-sidebar="collapsed"] .sidebar-aside .sidebar-icon-only { display: inline-block; }
+[data-sidebar="collapsed"] .sidebar-aside .sidebar-brand {
+  padding-left: 0.25rem;
+  padding-right: 0.25rem;
+}
+[data-sidebar="collapsed"] .sidebar-aside .sidebar-link { justify-content: center; }
+.sidebar-aside { width: var(--sidebar-w); }
+
 /* ─── Animations ─── */
 @keyframes fade-in {
   from { opacity: 0; }

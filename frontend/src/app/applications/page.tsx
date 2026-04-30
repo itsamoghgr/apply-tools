@@ -75,25 +75,32 @@ export default async function ApplicationsPage({
             {total}
           </span>
         </div>
-        <div role="tablist" className="tabs tabs-bordered flex-wrap">
-          {STATUSES.map((s) => (
-            <Link
-              key={s}
-              role="tab"
-              href={
-                s === "all"
-                  ? "/applications"
-                  : `/applications?status=${encodeURIComponent(s)}`
-              }
-              className={`tab text-xs transition-colors ${
-                s === status
-                  ? "tab-active text-primary font-medium"
-                  : "opacity-70 hover:opacity-100"
-              }`}
-            >
-              {s === "all" ? "All" : s}
-            </Link>
-          ))}
+        <div
+          role="tablist"
+          className="inline-flex items-center gap-0.5 p-1 rounded-lg bg-base-200/60 border border-base-300/60 flex-wrap"
+        >
+          {STATUSES.map((s) => {
+            const active = s === status;
+            return (
+              <Link
+                key={s}
+                role="tab"
+                aria-selected={active}
+                href={
+                  s === "all"
+                    ? "/applications"
+                    : `/applications?status=${encodeURIComponent(s)}`
+                }
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  active
+                    ? "bg-base-100 text-base-content shadow-sm ring-1 ring-base-300/80"
+                    : "text-base-content/60 hover:text-base-content hover:bg-base-300/40"
+                }`}
+              >
+                {s === "all" ? "All" : s}
+              </Link>
+            );
+          })}
         </div>
       </div>
 

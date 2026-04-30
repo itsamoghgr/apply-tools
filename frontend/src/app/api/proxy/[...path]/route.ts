@@ -44,6 +44,10 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
   const { path } = await ctx.params;
   return forward(req, path);
 }
+export async function PUT(req: NextRequest, ctx: Ctx) {
+  const { path } = await ctx.params;
+  return forward(req, path);
+}
 export async function DELETE(req: NextRequest, ctx: Ctx) {
   const { path } = await ctx.params;
   return forward(req, path);

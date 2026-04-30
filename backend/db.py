@@ -182,6 +182,164 @@ def list_job_applications() -> list[dict]:
         return [dict(r) for r in rows]
 
 
+# -----------------------------------------------------------------------------
+# ReachOut CRUD (LinkedIn-driven outreach emails: draft, edit, send).
+# -----------------------------------------------------------------------------
+
+REACH_OUT_INSERT_COLUMNS = (
+    "recipientName",
+    "recipientEmail",
+    "linkedinProfile",
+    "contextNote",
+    "resumeId",
+    "subject",
+    "body",
+)
+
+REACH_OUT_PATCH_COLUMNS = (
+    "recipientName",
+    "recipientEmail",
+    "linkedinProfile",
+    "contextNote",
+    "resumeId",
+    "subject",
+    "body",
+    "htmlBody",
+    "status",
+    "sentAt",
+    "errorMessage",
+)
+
+
+def _clean_reach_out_value(col: str, value):
+    if isinstance(value, str):
+        v = value.strip()
+        # recipientName / recipientEmail / linkedinProfile / subject / body
+        # are NOT NULL — keep empty strings out of UPDATEs by callers.
+        if v == "" and col in {
+            "contextNote",
+            "resumeId",
+            "errorMessage",
+            "sentAt",
+            "htmlBody",
+        }:
+            return None
+        return v
+    return value
+
+
+def insert_reach_out(fields: dict) -> str:
+    """Insert a ReachOut row in 'draft' status. Returns the new id."""
+    required = ("recipientName", "recipientEmail", "linkedinProfile", "subject", "body")
+    for col in required:
+        v = fields.get(col)
+        if not (isinstance(v, str) and v.strip()):
+            raise ValueError(f"{col} is required")
+
+    row_id = secrets.token_urlsafe(12)
+    cleaned: dict = {"id": row_id}
+    for col in REACH_OUT_INSERT_COLUMNS:
+        if col in fields:
+            cleaned[col] = _clean_reach_out_value(col, fields[col])
+
+    cols = list(cleaned.keys())
+    placeholders = ", ".join("?" for _ in cols)
+    col_sql = ", ".join(f'"{c}"' for c in cols)
+    values = [cleaned[c] for c in cols]
+    with get_conn() as conn:
+        conn.execute(
+            f'INSERT INTO "ReachOut" ({col_sql}, "status", "updatedAt") '
+            f"VALUES ({placeholders}, 'draft', CURRENT_TIMESTAMP)",
+            values,
+        )
+        conn.commit()
+    return row_id
+
+
+def get_reach_out(row_id: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            'SELECT * FROM "ReachOut" WHERE "id" = ?', (row_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def update_reach_out(row_id: str, fields: dict) -> bool:
+    """Patch a ReachOut row. Only known columns are written. Returns True on hit."""
+    updates: dict = {}
+    for col in REACH_OUT_PATCH_COLUMNS:
+        if col in fields:
+            updates[col] = _clean_reach_out_value(col, fields[col])
+    if not updates:
+        return False
+
+    set_sql = ", ".join(f'"{c}" = ?' for c in updates) + ', "updatedAt" = CURRENT_TIMESTAMP'
+    values = list(updates.values()) + [row_id]
+    with get_conn() as conn:
+        cur = conn.execute(
+            f'UPDATE "ReachOut" SET {set_sql} WHERE "id" = ?', values
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def delete_reach_out(row_id: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute('DELETE FROM "ReachOut" WHERE "id" = ?', (row_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def list_reach_outs() -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            'SELECT * FROM "ReachOut" ORDER BY "createdAt" DESC'
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+# Event recording moved off-box: see tracking-sidecar/main.py. The local
+# backend no longer holds a per-event row or aggregate counters; both are
+# fetched on demand from the sidecar via `/reach-out/{id}/events` and
+# `/reach-out/aggregates`.
+
+
+# -----------------------------------------------------------------------------
+# Setting key/value store (used for Gmail credentials).
+# -----------------------------------------------------------------------------
+
+
+def get_setting(key: str) -> str | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            'SELECT "value" FROM "Setting" WHERE "key" = ?', (key,)
+        ).fetchone()
+        return row["value"] if row else None
+
+
+def set_setting(key: str, value: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            'INSERT INTO "Setting" ("key", "value", "updatedAt") '
+            "VALUES (?, ?, CURRENT_TIMESTAMP) "
+            'ON CONFLICT("key") DO UPDATE SET "value" = excluded."value", '
+            '"updatedAt" = CURRENT_TIMESTAMP',
+            (key, value),
+        )
+        conn.commit()
+
+
+def delete_setting(key: str) -> None:
+    with get_conn() as conn:
+        conn.execute('DELETE FROM "Setting" WHERE "key" = ?', (key,))
+        conn.commit()
+
+
+# -----------------------------------------------------------------------------
+# Application audit-log insert (covers cover letters, emails, scoring, etc).
+# -----------------------------------------------------------------------------
+
+
 def insert_application(
     *,
     mode: str,
