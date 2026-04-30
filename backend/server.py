@@ -457,6 +457,20 @@ class ReachOutGenerateRequest(BaseModel):
     resumeId: str | None = RESUME_ID_FIELD
 
 
+class ReachOutBlankRequest(BaseModel):
+    """Create a draft without calling the AI — for users writing from scratch.
+
+    LinkedIn profile + context are optional here (unlike `/generate`), since
+    the user is providing the content themselves. We still persist whatever
+    they did fill in so they can convert this draft to AI-assisted later.
+    """
+    recipientName: str = Field(..., min_length=1, max_length=200)
+    recipientEmail: str = Field(..., min_length=3, max_length=200)
+    linkedinProfile: str | None = Field(default=None, max_length=30000)
+    contextNote: str | None = Field(default=None, max_length=2000)
+    resumeId: str | None = RESUME_ID_FIELD
+
+
 class ReachOutPatchRequest(BaseModel):
     recipientName: str | None = Field(default=None, max_length=200)
     recipientEmail: str | None = Field(default=None, max_length=200)
@@ -544,6 +558,35 @@ def reach_out_generate(req: ReachOutGenerateRequest) -> dict[str, Any]:
     return _serialize_reach_out(get_reach_out(new_id) or {})
 
 
+@app.post("/reach-out/blank")
+def reach_out_blank(req: ReachOutBlankRequest) -> dict[str, Any]:
+    """Create an empty draft so the user can compose subject + body manually.
+
+    Mirrors `/reach-out/generate` but skips the AI call. The frontend uses
+    this when the user clicks "Compose manually" — they then land in the
+    preview/edit step with empty subject and body fields ready to type into.
+    """
+    try:
+        new_id = insert_reach_out(
+            {
+                "recipientName": req.recipientName,
+                "recipientEmail": req.recipientEmail,
+                "linkedinProfile": req.linkedinProfile or "",
+                "contextNote": req.contextNote,
+                "resumeId": req.resumeId,
+                "subject": "",
+                "body": "",
+            },
+            require_content=False,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise _to_http_error(e)
+
+    return _serialize_reach_out(get_reach_out(new_id) or {})
+
+
 @app.get("/reach-out")
 def reach_out_list() -> dict[str, Any]:
     try:
@@ -586,6 +629,17 @@ def reach_out_send(row_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"No reach-out {row_id}")
     if row.get("status") == "sent":
         raise HTTPException(status_code=400, detail="Already sent.")
+    # Manual drafts can have empty subject/body until the user fills them
+    # in. Reject the send before it hits Gmail rather than letting Gmail
+    # bounce it back with a less actionable error.
+    if not (row.get("subject") or "").strip():
+        raise HTTPException(
+            status_code=400, detail="Subject is empty. Add one before sending."
+        )
+    if not (row.get("body") or "").strip():
+        raise HTTPException(
+            status_code=400, detail="Body is empty. Write your message before sending."
+        )
 
     address = get_setting(GMAIL_ADDRESS_KEY)
     app_password = get_setting(GMAIL_APP_PASSWORD_KEY)
