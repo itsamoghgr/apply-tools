@@ -1,5 +1,10 @@
 """Import job tracker data from the Google-Sheets-exported HTML file (USA.html).
 
+DEPRECATED (SQLite era): opens its own sqlite3 connection to
+data/apply-tools.db and will NOT work now that the app runs on Postgres. The
+data it produced has already been migrated. Kept for reference; port to
+SQLAlchemy + Postgres before any reuse.
+
 Usage:
     python import_html.py <path-to-html> [--dry-run]
 

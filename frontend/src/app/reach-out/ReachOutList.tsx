@@ -11,12 +11,18 @@ import {
   Eye,
   MousePointerClick,
   Pencil,
+  Mail,
+  UserPlus,
+  MessageSquare,
 } from "lucide-react";
+
+type Channel = "email" | "linkedin_invitation" | "linkedin_message";
 
 type Item = {
   id: string;
   recipientName: string;
   recipientEmail: string;
+  channel?: Channel;
   subject: string;
   body: string;
   status: string;
@@ -27,6 +33,27 @@ type Item = {
   lastOpenedAt: string | null;
   lastClickedAt: string | null;
   createdAt: string;
+};
+
+const CHANNEL_PILL: Record<
+  Channel,
+  { label: string; Icon: typeof Mail; cls: string }
+> = {
+  email: {
+    label: "Email",
+    Icon: Mail,
+    cls: "border-base-content/15 bg-base-content/5 text-base-content/70",
+  },
+  linkedin_invitation: {
+    label: "Invite",
+    Icon: UserPlus,
+    cls: "border-info/30 bg-info/10 text-info",
+  },
+  linkedin_message: {
+    label: "InMail",
+    Icon: MessageSquare,
+    cls: "border-info/30 bg-info/10 text-info",
+  },
 };
 
 type ReachOutEvent = {
@@ -197,6 +224,9 @@ export default function ReachOutList({ initial }: Props) {
           const pill =
             STATUS_PILL[r.status] ??
             "border-base-content/20 bg-base-content/5 text-base-content/70";
+          const ch = (r.channel ?? "email") as Channel;
+          const chPill = CHANNEL_PILL[ch] ?? CHANNEL_PILL.email;
+          const ChIcon = chPill.Icon;
           const events = eventsById[r.id];
           return (
             <div key={r.id} className="px-5 py-4">
@@ -218,17 +248,35 @@ export default function ReachOutList({ initial }: Props) {
                 >
                   {r.status}
                 </span>
+                <span
+                  className={`inline-flex items-center gap-1 px-1.5 py-px rounded-full border text-[10px] font-medium uppercase tracking-wide whitespace-nowrap shrink-0 leading-tight ${chPill.cls}`}
+                  title={chPill.label}
+                >
+                  <ChIcon className="h-3 w-3" />
+                  {chPill.label}
+                </span>
                 <div className="min-w-0 flex-1 basis-40">
-                  <div className="font-medium truncate">{r.subject}</div>
+                  <div className="font-medium truncate">
+                    {r.subject || (
+                      <span className="opacity-50 italic font-normal">
+                        {ch === "linkedin_invitation"
+                          ? "(connection note)"
+                          : "(no subject)"}
+                      </span>
+                    )}
+                  </div>
                   <div className="text-xs opacity-60 truncate">
-                    {r.recipientName} &lt;{r.recipientEmail}&gt;
+                    {r.recipientName}
+                    {ch === "email" && r.recipientEmail
+                      ? ` <${r.recipientEmail}>`
+                      : ""}
                   </div>
                 </div>
                 {/* Right-cluster: stats + timestamp + actions wrap as one unit
                     so on narrow viewports they drop to a tidy second line
                     instead of fragmenting across three. */}
                 <div className="flex items-center gap-x-3 gap-y-2 flex-wrap ml-auto">
-                  {r.status === "sent" && (
+                  {r.status === "sent" && ch === "email" && (
                     <div className="flex items-center gap-3 text-xs tabular-nums">
                       <span
                         className="inline-flex items-center gap-1 opacity-70"
@@ -274,7 +322,7 @@ export default function ReachOutList({ initial }: Props) {
                       Edit & send
                     </button>
                   )}
-                  {r.status === "failed" && (
+                  {r.status === "failed" && ch === "email" && (
                     <button
                       type="button"
                       onClick={() => handleResend(r.id)}
@@ -324,7 +372,7 @@ export default function ReachOutList({ initial }: Props) {
                     {r.body}
                   </pre>
 
-                  {r.status === "sent" && (
+                  {r.status === "sent" && ch === "email" && (
                     <div className="rounded border border-base-300/40 bg-base-200/20 p-3 space-y-2">
                       <div className="text-xs uppercase tracking-widest opacity-50 font-medium">
                         Tracking timeline

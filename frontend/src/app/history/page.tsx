@@ -30,7 +30,7 @@ export default async function HistoryPage({
       <RefreshOnFocus />
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3">
-          <h1 className="text-3xl font-bold tracking-tight">History</h1>
+          <h1 className="text-3xl font-semibold tracking-tight font-[family-name:var(--font-display)]">History</h1>
           <span className="badge badge-primary font-mono tabular-nums px-3 py-1 text-sm">
             {apps.length}
           </span>

@@ -24,7 +24,7 @@ export default async function EditResumePage({
     <div className="space-y-6 max-w-4xl animate-slide-up">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">
+          <h1 className="text-3xl font-semibold tracking-tight font-[family-name:var(--font-display)]">
             {resume.label}
           </h1>
           <p className="text-xs opacity-40 mt-1 font-mono">{resume.id}</p>

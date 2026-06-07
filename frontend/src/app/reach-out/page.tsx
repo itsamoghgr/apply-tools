@@ -94,6 +94,7 @@ export default async function ReachOutPage() {
       linkedinProfile: r.linkedinProfile,
       contextNote: r.contextNote,
       resumeId: r.resumeId,
+      channel: (r.channel ?? "email") as "email" | "linkedin_invitation" | "linkedin_message",
       subject: r.subject,
       body: r.body,
       status: r.status,
@@ -119,7 +120,7 @@ export default async function ReachOutPage() {
 
       <div className="flex items-end justify-between gap-3 flex-wrap">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Reach Out</h1>
+          <h1 className="text-3xl font-semibold tracking-tight font-[family-name:var(--font-display)]">Reach Out</h1>
           <p className="text-sm opacity-60 mt-1">
             Draft a personalized email from a LinkedIn profile, preview, then
             send from your Gmail.

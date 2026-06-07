@@ -1,41 +1,141 @@
-"""SQLite access for the resumes + applications tables managed by Prisma.
+"""Postgres access for the resumes + applications tables managed by Prisma.
 
 Prisma (in the Next.js frontend) owns the schema and migrations. This module
-only reads resume content and inserts Application rows; it never issues DDL.
+only reads/writes rows; it never issues DDL.
+
+Connection comes from DATABASE_URL (the same variable the frontend uses), e.g.
+    postgresql://apply:apply@localhost:5432/apply_tools
+We normalise that to the psycopg (v3) driver and pool connections via a single
+module-level SQLAlchemy engine.
+
+Datetime contract: Prisma stores DateTime as native Postgres timestamp(3).
+psycopg returns those as Python ``datetime`` objects and accepts ``datetime``
+(or ISO strings) on the way in. Callers in server.py pass timezone-aware
+datetimes; on read we serialise datetimes to ISO-8601 strings so the API
+responses stay JSON-friendly and stable for the extension/UI.
 """
 
 from __future__ import annotations
 
 import logging
+import os
+import re
 import secrets
-import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
+
+from dotenv import load_dotenv
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Connection, Engine, Row
+from sqlalchemy.exc import IntegrityError
+
+# Load backend/.env so DATABASE_URL is visible even when db is imported before
+# any other module calls load_dotenv() (server.py imports db first).
+load_dotenv()
 
 logger = logging.getLogger("coverletter")
 
 BACKEND_DIR = Path(__file__).resolve().parent
 DATA_DIR = (BACKEND_DIR / ".." / "data").resolve()
-DB_PATH = DATA_DIR / "apply-tools.db"
+# PDFs still live on disk next to the (now retired) data dir.
 PDF_DIR = DATA_DIR / "pdfs"
 
 
-@contextmanager
-def get_conn() -> Iterator[sqlite3.Connection]:
-    """Open a SQLite connection in WAL mode with Row factory."""
-    if not DB_PATH.exists():
-        raise FileNotFoundError(
-            f"SQLite DB not found at {DB_PATH}. Run `cd frontend && npx prisma migrate dev`."
+class UniqueViolation(Exception):
+    """Raised when an INSERT/UPDATE violates a unique constraint.
+
+    server.py catches this to turn a duplicate Lead.email into a clean 409.
+    Carries the offending column name when we can parse it from the driver
+    error, so callers can craft a precise message.
+    """
+
+    def __init__(self, message: str, column: str | None = None):
+        super().__init__(message)
+        self.column = column
+
+
+def _database_url() -> str:
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        raise RuntimeError(
+            "DATABASE_URL is not set. Point it at Postgres, e.g. "
+            "postgresql://apply:apply@localhost:5432/apply_tools"
         )
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
+    # Prisma-style URLs use the bare postgres:// scheme. Pin the psycopg v3
+    # driver so SQLAlchemy doesn't reach for psycopg2.
+    if url.startswith("postgres://"):
+        url = "postgresql+psycopg://" + url[len("postgres://") :]
+    elif url.startswith("postgresql://"):
+        url = "postgresql+psycopg://" + url[len("postgresql://") :]
+    # Strip Prisma-only query params (e.g. ?schema=public, connection_limit)
+    # that the psycopg driver doesn't understand. We keep the default search
+    # path, which resolves the public schema Prisma created.
+    url = re.sub(r"\?.*$", "", url)
+    return url
+
+
+# Single pooled engine for the process, created lazily on first use so that
+# importing this module never fails just because DATABASE_URL isn't set yet.
+# pool_pre_ping recycles connections dropped by the server so a long-idle
+# backend doesn't 500 on the first query.
+_engine_singleton: Engine | None = None
+
+
+def get_engine() -> Engine:
+    global _engine_singleton
+    if _engine_singleton is None:
+        _engine_singleton = create_engine(
+            _database_url(),
+            pool_pre_ping=True,
+            pool_size=5,
+            max_overflow=5,
+            future=True,
+        )
+    return _engine_singleton
+
+
+@contextmanager
+def get_conn() -> Iterator[Connection]:
+    """Yield a transactional SQLAlchemy connection.
+
+    The block commits on success and rolls back on exception, mirroring the
+    explicit conn.commit()/close() the old sqlite3 code did by hand. Callers
+    no longer call .commit() themselves.
+    """
+    with get_engine().begin() as conn:
         yield conn
-    finally:
-        conn.close()
+
+
+# Datetime columns across all tables — used to coerce psycopg datetime objects
+# back into ISO-8601 strings on read, preserving the wire format the UI and
+# extension already consume.
+_DATETIME_COLUMNS = frozenset(
+    {
+        "appliedDate",
+        "decisionDate",
+        "createdAt",
+        "updatedAt",
+        "repliedAt",
+        "sentAt",
+        "linkedAt",
+        "lastSentAt",
+    }
+)
+
+
+def _row_to_dict(row: Row) -> dict[str, Any]:
+    """Convert a SQLAlchemy Row to a plain dict, ISO-stringifying datetimes."""
+    d = dict(row._mapping)
+    for key, value in d.items():
+        if isinstance(value, datetime) and key in _DATETIME_COLUMNS:
+            d[key] = value.isoformat()
+    return d
+
+
+def _rows_to_dicts(rows) -> list[dict[str, Any]]:
+    return [_row_to_dict(r) for r in rows]
 
 
 def fetch_resume(resume_id: str | None) -> tuple[str, str] | None:
@@ -45,28 +145,32 @@ def fetch_resume(resume_id: str | None) -> tuple[str, str] | None:
     with get_conn() as conn:
         if resume_id:
             row = conn.execute(
-                "SELECT id, content FROM Resume WHERE id = ?", (resume_id,)
+                text('SELECT id, content FROM "Resume" WHERE id = :id'),
+                {"id": resume_id},
             ).fetchone()
         else:
             row = conn.execute(
-                "SELECT id, content FROM Resume WHERE isActive = 1 ORDER BY id LIMIT 1"
+                text(
+                    'SELECT id, content FROM "Resume" '
+                    'WHERE "isActive" = true ORDER BY id LIMIT 1'
+                )
             ).fetchone()
-        return (row["id"], row["content"]) if row else None
+        return (row.id, row.content) if row else None
 
 
 def list_resume_rows() -> list[dict[str, str]]:
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT id, label FROM Resume WHERE isActive = 1 ORDER BY id"
+            text(
+                'SELECT id, label FROM "Resume" '
+                'WHERE "isActive" = true ORDER BY id'
+            )
         ).fetchall()
-        return [{"id": r["id"], "label": r["label"]} for r in rows]
+        return [{"id": r.id, "label": r.label} for r in rows]
 
 
 def save_pdf(company: str, pdf_bytes: bytes) -> str:
     """Persist generated PDF and return its absolute path."""
-    import re
-    from datetime import datetime, timezone
-
     PDF_DIR.mkdir(parents=True, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9._-]+", "_", company.strip()).strip("._-") or "Company"
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -106,13 +210,13 @@ def insert_job_application(fields: dict) -> str:
     """Insert a JobApplication row. `fields` must contain at minimum companyName.
 
     Returns the new row's id. Unknown keys are ignored. Empty strings on
-    nullable columns are converted to NULL so SQLite stores them consistently.
+    nullable columns are converted to NULL so storage stays consistent.
     """
     if not fields.get("companyName"):
         raise ValueError("companyName is required")
 
     app_id = secrets.token_urlsafe(12)
-    cleaned = {"id": app_id}
+    cleaned: dict[str, Any] = {"id": app_id}
     for col in JOB_APP_COLUMNS:
         if col not in fields:
             continue
@@ -124,17 +228,17 @@ def insert_job_application(fields: dict) -> str:
         cleaned[col] = v
 
     cols = list(cleaned.keys())
-    placeholders = ", ".join("?" for _ in cols)
     col_sql = ", ".join(f'"{c}"' for c in cols)
-    values = [cleaned[c] for c in cols]
+    bind_sql = ", ".join(f":{c}" for c in cols)
 
     with get_conn() as conn:
         conn.execute(
-            f'INSERT INTO "JobApplication" ({col_sql}, "updatedAt") '
-            f"VALUES ({placeholders}, CURRENT_TIMESTAMP)",
-            values,
+            text(
+                f'INSERT INTO "JobApplication" ({col_sql}, "updatedAt") '
+                f"VALUES ({bind_sql}, CURRENT_TIMESTAMP)"
+            ),
+            cleaned,
         )
-        conn.commit()
     return app_id
 
 
@@ -143,7 +247,7 @@ def update_job_application(app_id: str, fields: dict) -> bool:
 
     Returns True if a row was updated, False if no such id (or no fields).
     """
-    updates = {}
+    updates: dict[str, Any] = {}
     for col in JOB_APP_COLUMNS:
         if col not in fields:
             continue
@@ -156,20 +260,24 @@ def update_job_application(app_id: str, fields: dict) -> bool:
     if not updates:
         return False
 
-    set_sql = ", ".join(f'"{c}" = ?' for c in updates) + ', "updatedAt" = CURRENT_TIMESTAMP'
-    values = list(updates.values()) + [app_id]
+    set_sql = (
+        ", ".join(f'"{c}" = :{c}' for c in updates)
+        + ', "updatedAt" = CURRENT_TIMESTAMP'
+    )
+    params = dict(updates, _id=app_id)
     with get_conn() as conn:
         cur = conn.execute(
-            f'UPDATE "JobApplication" SET {set_sql} WHERE "id" = ?', values
+            text(f'UPDATE "JobApplication" SET {set_sql} WHERE "id" = :_id'),
+            params,
         )
-        conn.commit()
         return cur.rowcount > 0
 
 
 def delete_job_application(app_id: str) -> bool:
     with get_conn() as conn:
-        cur = conn.execute('DELETE FROM "JobApplication" WHERE "id" = ?', (app_id,))
-        conn.commit()
+        cur = conn.execute(
+            text('DELETE FROM "JobApplication" WHERE "id" = :id'), {"id": app_id}
+        )
         return cur.rowcount > 0
 
 
@@ -177,9 +285,73 @@ def list_job_applications() -> list[dict]:
     """Return every JobApplication row as plain dicts, newest first."""
     with get_conn() as conn:
         rows = conn.execute(
-            'SELECT * FROM "JobApplication" ORDER BY "createdAt" DESC'
+            text('SELECT * FROM "JobApplication" ORDER BY "createdAt" DESC')
         ).fetchall()
-        return [dict(r) for r in rows]
+        return _rows_to_dicts(rows)
+
+
+# -----------------------------------------------------------------------------
+# JobApplication ↔ Lead links (many-to-many via JobApplicationLead).
+# -----------------------------------------------------------------------------
+
+
+def add_job_application_lead(
+    app_id: str, lead_id: str, role: str | None = None
+) -> bool:
+    """Link a Lead to a JobApplication. Idempotent on the (app, lead) pair."""
+    role_v = role.strip() if isinstance(role, str) and role.strip() else None
+    with get_conn() as conn:
+        cur = conn.execute(
+            text(
+                'INSERT INTO "JobApplicationLead" '
+                '("jobApplicationId", "leadId", "role") '
+                "VALUES (:app, :lead, :role) "
+                'ON CONFLICT ("jobApplicationId", "leadId") DO NOTHING'
+            ),
+            {"app": app_id, "lead": lead_id, "role": role_v},
+        )
+        return cur.rowcount > 0
+
+
+def remove_job_application_lead(app_id: str, lead_id: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute(
+            text(
+                'DELETE FROM "JobApplicationLead" '
+                'WHERE "jobApplicationId" = :app AND "leadId" = :lead'
+            ),
+            {"app": app_id, "lead": lead_id},
+        )
+        return cur.rowcount > 0
+
+
+def list_leads_for_application(app_id: str) -> list[dict]:
+    """Return all leads linked to an application, with the join's `role` tag."""
+    with get_conn() as conn:
+        rows = conn.execute(
+            text(
+                'SELECT l.*, jal."role" AS "linkRole", '
+                'jal."createdAt" AS "linkedAt" '
+                'FROM "JobApplicationLead" jal '
+                'JOIN "Lead" l ON l."id" = jal."leadId" '
+                'WHERE jal."jobApplicationId" = :app '
+                'ORDER BY jal."createdAt" ASC'
+            ),
+            {"app": app_id},
+        ).fetchall()
+        return _rows_to_dicts(rows)
+
+
+def list_reach_outs_for_application(app_id: str) -> list[dict]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            text(
+                'SELECT * FROM "ReachOut" WHERE "jobApplicationId" = :app '
+                'ORDER BY "createdAt" DESC'
+            ),
+            {"app": app_id},
+        ).fetchall()
+        return _rows_to_dicts(rows)
 
 
 # -----------------------------------------------------------------------------
@@ -192,6 +364,9 @@ REACH_OUT_INSERT_COLUMNS = (
     "linkedinProfile",
     "contextNote",
     "resumeId",
+    "leadId",
+    "jobApplicationId",
+    "channel",
     "subject",
     "body",
 )
@@ -202,6 +377,7 @@ REACH_OUT_PATCH_COLUMNS = (
     "linkedinProfile",
     "contextNote",
     "resumeId",
+    "channel",
     "subject",
     "body",
     "htmlBody",
@@ -219,6 +395,8 @@ def _clean_reach_out_value(col: str, value):
         if v == "" and col in {
             "contextNote",
             "resumeId",
+            "leadId",
+            "jobApplicationId",
             "errorMessage",
             "sentAt",
             "htmlBody",
@@ -237,10 +415,20 @@ def insert_reach_out(fields: dict, *, require_content: bool = True) -> str:
     and body inside the editor before sending — we still write empty
     strings into those NOT NULL columns to keep the schema simple.
     """
-    base_required = ("recipientName", "recipientEmail")
-    content_required = (
-        ("linkedinProfile", "subject", "body") if require_content else ()
+    channel = (fields.get("channel") or "email").strip() or "email"
+    # Email channel needs an address; LinkedIn channels don't (the user
+    # pastes the message into LinkedIn manually).
+    base_required = (
+        ("recipientName", "recipientEmail") if channel == "email" else ("recipientName",)
     )
+    # LinkedIn invitations have no subject (just a 300-char note).
+    if require_content:
+        if channel == "linkedin_invitation":
+            content_required = ("linkedinProfile", "body")
+        else:
+            content_required = ("linkedinProfile", "subject", "body")
+    else:
+        content_required = ()
     for col in base_required + content_required:
         v = fields.get(col)
         if not (isinstance(v, str) and v.strip()):
@@ -252,30 +440,31 @@ def insert_reach_out(fields: dict, *, require_content: bool = True) -> str:
         if col in fields:
             cleaned[col] = _clean_reach_out_value(col, fields[col])
     # Backfill the NOT NULL content columns with empty strings when the
-    # caller is creating a blank manual draft.
-    for col in ("linkedinProfile", "subject", "body"):
+    # caller skipped them (blank manual draft, or LinkedIn channels where
+    # subject/recipientEmail don't apply).
+    for col in ("recipientEmail", "linkedinProfile", "subject", "body"):
         cleaned.setdefault(col, "")
 
     cols = list(cleaned.keys())
-    placeholders = ", ".join("?" for _ in cols)
     col_sql = ", ".join(f'"{c}"' for c in cols)
-    values = [cleaned[c] for c in cols]
+    bind_sql = ", ".join(f":{c}" for c in cols)
     with get_conn() as conn:
         conn.execute(
-            f'INSERT INTO "ReachOut" ({col_sql}, "status", "updatedAt") '
-            f"VALUES ({placeholders}, 'draft', CURRENT_TIMESTAMP)",
-            values,
+            text(
+                f'INSERT INTO "ReachOut" ({col_sql}, "status", "updatedAt") '
+                f"VALUES ({bind_sql}, 'draft', CURRENT_TIMESTAMP)"
+            ),
+            cleaned,
         )
-        conn.commit()
     return row_id
 
 
 def get_reach_out(row_id: str) -> dict | None:
     with get_conn() as conn:
         row = conn.execute(
-            'SELECT * FROM "ReachOut" WHERE "id" = ?', (row_id,)
+            text('SELECT * FROM "ReachOut" WHERE "id" = :id'), {"id": row_id}
         ).fetchone()
-        return dict(row) if row else None
+        return _row_to_dict(row) if row else None
 
 
 def update_reach_out(row_id: str, fields: dict) -> bool:
@@ -287,35 +476,262 @@ def update_reach_out(row_id: str, fields: dict) -> bool:
     if not updates:
         return False
 
-    set_sql = ", ".join(f'"{c}" = ?' for c in updates) + ', "updatedAt" = CURRENT_TIMESTAMP'
-    values = list(updates.values()) + [row_id]
+    set_sql = (
+        ", ".join(f'"{c}" = :{c}' for c in updates)
+        + ', "updatedAt" = CURRENT_TIMESTAMP'
+    )
+    params = dict(updates, _id=row_id)
     with get_conn() as conn:
         cur = conn.execute(
-            f'UPDATE "ReachOut" SET {set_sql} WHERE "id" = ?', values
+            text(f'UPDATE "ReachOut" SET {set_sql} WHERE "id" = :_id'), params
         )
-        conn.commit()
         return cur.rowcount > 0
 
 
 def delete_reach_out(row_id: str) -> bool:
     with get_conn() as conn:
-        cur = conn.execute('DELETE FROM "ReachOut" WHERE "id" = ?', (row_id,))
-        conn.commit()
+        cur = conn.execute(
+            text('DELETE FROM "ReachOut" WHERE "id" = :id'), {"id": row_id}
+        )
         return cur.rowcount > 0
 
 
 def list_reach_outs() -> list[dict]:
     with get_conn() as conn:
         rows = conn.execute(
-            'SELECT * FROM "ReachOut" ORDER BY "createdAt" DESC'
+            text('SELECT * FROM "ReachOut" ORDER BY "createdAt" DESC')
         ).fetchall()
-        return [dict(r) for r in rows]
+        return _rows_to_dicts(rows)
 
 
 # Event recording moved off-box: see tracking-sidecar/main.py. The local
 # backend no longer holds a per-event row or aggregate counters; both are
 # fetched on demand from the sidecar via `/reach-out/{id}/events` and
 # `/reach-out/aggregates`.
+
+
+# -----------------------------------------------------------------------------
+# Lead CRUD (the people you might reach out to). A Lead is the master
+# record; ReachOut rows can reference one via ReachOut.leadId so each
+# Lead's profile shows how many emails were sent to them.
+# -----------------------------------------------------------------------------
+
+LEAD_INSERT_COLUMNS = (
+    "name",
+    "email",
+    "linkedinUrl",
+    "linkedinProfile",
+    "currentCompany",
+    "role",
+    "replied",
+    "repliedAt",
+    "notes",
+)
+
+LEAD_PATCH_COLUMNS = LEAD_INSERT_COLUMNS
+
+
+def _clean_lead_value(col: str, value):
+    """Empty strings on nullable columns become NULL. `name` is NOT NULL."""
+    if isinstance(value, str):
+        v = value.strip()
+        if v == "" and col != "name":
+            return None
+        return v
+    return value
+
+
+def insert_lead(fields: dict) -> str:
+    """Insert a Lead row. `name` is required.
+
+    Returns the new id. Raises ValueError if name is missing or empty,
+    or UniqueViolation if `email` collides with an existing Lead.email
+    (the column is UNIQUE).
+    """
+    name = fields.get("name")
+    if not (isinstance(name, str) and name.strip()):
+        raise ValueError("name is required")
+
+    lead_id = secrets.token_urlsafe(12)
+    cleaned: dict = {"id": lead_id}
+    for col in LEAD_INSERT_COLUMNS:
+        if col not in fields:
+            continue
+        cleaned[col] = _clean_lead_value(col, fields[col])
+
+    # Auto-stamp repliedAt when the caller flips replied=true without
+    # supplying their own timestamp, mirroring the UI's expectation.
+    if cleaned.get("replied") and not cleaned.get("repliedAt"):
+        cleaned["repliedAt"] = datetime.now(timezone.utc)
+
+    cols = list(cleaned.keys())
+    col_sql = ", ".join(f'"{c}"' for c in cols)
+    bind_sql = ", ".join(f":{c}" for c in cols)
+    with get_conn() as conn:
+        try:
+            conn.execute(
+                text(
+                    f'INSERT INTO "Lead" ({col_sql}, "updatedAt") '
+                    f"VALUES ({bind_sql}, CURRENT_TIMESTAMP)"
+                ),
+                cleaned,
+            )
+        except IntegrityError as exc:
+            raise _as_unique_violation(exc) from exc
+    return lead_id
+
+
+def update_lead(lead_id: str, fields: dict) -> bool:
+    """Patch a Lead row. Returns True on hit, False if no such id or no
+    known fields were sent.
+
+    Side effect: setting `replied` true without `repliedAt` stamps the
+    timestamp; setting `replied` false clears `repliedAt` unless the
+    caller also passed an explicit value.
+    """
+    updates: dict = {}
+    for col in LEAD_PATCH_COLUMNS:
+        if col in fields:
+            updates[col] = _clean_lead_value(col, fields[col])
+    if not updates:
+        return False
+
+    if "replied" in updates:
+        if updates["replied"] and "repliedAt" not in updates:
+            updates["repliedAt"] = datetime.now(timezone.utc)
+        elif not updates["replied"] and "repliedAt" not in updates:
+            updates["repliedAt"] = None
+
+    set_sql = (
+        ", ".join(f'"{c}" = :{c}' for c in updates)
+        + ', "updatedAt" = CURRENT_TIMESTAMP'
+    )
+    params = dict(updates, _id=lead_id)
+    with get_conn() as conn:
+        try:
+            cur = conn.execute(
+                text(f'UPDATE "Lead" SET {set_sql} WHERE "id" = :_id'), params
+            )
+        except IntegrityError as exc:
+            raise _as_unique_violation(exc) from exc
+        return cur.rowcount > 0
+
+
+def delete_lead(lead_id: str) -> bool:
+    with get_conn() as conn:
+        cur = conn.execute(
+            text('DELETE FROM "Lead" WHERE "id" = :id'), {"id": lead_id}
+        )
+        return cur.rowcount > 0
+
+
+def get_lead(lead_id: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            text('SELECT * FROM "Lead" WHERE "id" = :id'), {"id": lead_id}
+        ).fetchone()
+        return _row_to_dict(row) if row else None
+
+
+def list_leads() -> list[dict]:
+    """Return every Lead with reach-out aggregates joined in.
+
+    A single LEFT JOIN keeps this O(N) instead of N+1; we surface
+    `reachOutCount`, `lastSentAt`, and `lastStatus` so the dashboard can
+    show "3 emails, last sent 2d ago" without a follow-up query.
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT
+                    l.*,
+                    COALESCE(agg."reachOutCount", 0) AS "reachOutCount",
+                    agg."lastSentAt" AS "lastSentAt",
+                    agg."lastStatus" AS "lastStatus"
+                FROM "Lead" l
+                LEFT JOIN (
+                    SELECT
+                        ro."leadId" AS "leadId",
+                        COUNT(*) AS "reachOutCount",
+                        MAX(ro."sentAt") AS "lastSentAt",
+                        -- pick the status of the most recent reach-out
+                        (SELECT r2."status"
+                           FROM "ReachOut" r2
+                          WHERE r2."leadId" = ro."leadId"
+                          ORDER BY r2."createdAt" DESC, r2."id" DESC
+                          LIMIT 1) AS "lastStatus"
+                    FROM "ReachOut" ro
+                    WHERE ro."leadId" IS NOT NULL
+                    GROUP BY ro."leadId"
+                ) agg ON agg."leadId" = l."id"
+                ORDER BY l."createdAt" DESC
+                """
+            )
+        ).fetchall()
+        return _rows_to_dicts(rows)
+
+
+def find_or_create_lead_by_email(
+    name: str,
+    email: str | None,
+    *,
+    linkedin_profile: str | None = None,
+    linkedin_url: str | None = None,
+    current_company: str | None = None,
+    role: str | None = None,
+) -> str | None:
+    """Look up a Lead by email; create one if missing. Returns the lead id,
+    or None when no email was provided (so we don't accidentally create
+    nameless duplicate rows for every blank email).
+
+    Used by the ReachOut create paths to keep the Lead → ReachOut graph
+    populated automatically. Existing Lead rows are NOT mutated here —
+    callers can edit them on the Leads page if their data drifted.
+    """
+    if not (isinstance(email, str) and email.strip()):
+        return None
+    email_clean = email.strip()
+    with get_conn() as conn:
+        row = conn.execute(
+            text('SELECT "id" FROM "Lead" WHERE "email" = :email'),
+            {"email": email_clean},
+        ).fetchone()
+        if row:
+            return row.id
+    fields = {
+        "name": name.strip() if isinstance(name, str) and name.strip() else email_clean,
+        "email": email_clean,
+        "linkedinProfile": linkedin_profile,
+        "linkedinUrl": linkedin_url,
+        "currentCompany": current_company,
+        "role": role,
+    }
+    return insert_lead(fields)
+
+
+def _as_unique_violation(exc: IntegrityError) -> Exception:
+    """Map a SQLAlchemy IntegrityError to UniqueViolation when it's a unique
+    constraint breach, else return the original error unchanged.
+
+    Postgres reports unique breaches with SQLSTATE 23505. We try to pull the
+    column name out of the constraint/detail text (e.g. "Lead_email_key" or
+    "Key (email)=(...) already exists") for a precise caller message.
+    """
+    orig = getattr(exc, "orig", None)
+    sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+    if sqlstate != "23505":
+        return exc
+    msg = str(orig) if orig else str(exc)
+    col = None
+    m = re.search(r"Key \((?P<col>[^)]+)\)=", msg)
+    if m:
+        col = m.group("col")
+    else:
+        m = re.search(r'"\w+_(?P<col>\w+)_key"', msg)
+        if m:
+            col = m.group("col")
+    return UniqueViolation(msg, column=col)
 
 
 # -----------------------------------------------------------------------------
@@ -326,27 +742,30 @@ def list_reach_outs() -> list[dict]:
 def get_setting(key: str) -> str | None:
     with get_conn() as conn:
         row = conn.execute(
-            'SELECT "value" FROM "Setting" WHERE "key" = ?', (key,)
+            text('SELECT "value" FROM "Setting" WHERE "key" = :key'),
+            {"key": key},
         ).fetchone()
-        return row["value"] if row else None
+        return row.value if row else None
 
 
 def set_setting(key: str, value: str) -> None:
     with get_conn() as conn:
         conn.execute(
-            'INSERT INTO "Setting" ("key", "value", "updatedAt") '
-            "VALUES (?, ?, CURRENT_TIMESTAMP) "
-            'ON CONFLICT("key") DO UPDATE SET "value" = excluded."value", '
-            '"updatedAt" = CURRENT_TIMESTAMP',
-            (key, value),
+            text(
+                'INSERT INTO "Setting" ("key", "value", "updatedAt") '
+                "VALUES (:key, :value, CURRENT_TIMESTAMP) "
+                'ON CONFLICT ("key") DO UPDATE SET "value" = EXCLUDED."value", '
+                '"updatedAt" = CURRENT_TIMESTAMP'
+            ),
+            {"key": key, "value": value},
         )
-        conn.commit()
 
 
 def delete_setting(key: str) -> None:
     with get_conn() as conn:
-        conn.execute('DELETE FROM "Setting" WHERE "key" = ?', (key,))
-        conn.commit()
+        conn.execute(
+            text('DELETE FROM "Setting" WHERE "key" = :key'), {"key": key}
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -369,25 +788,29 @@ def insert_application(
     try:
         with get_conn() as conn:
             conn.execute(
-                """
-                INSERT INTO Application (
-                    id, mode, company, jobDescription, resumeId,
-                    output, scoreData, pdfPath, createdAt
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-                """,
-                (
-                    app_id,
-                    mode,
-                    company,
-                    job_description,
-                    resume_id,
-                    output,
-                    score_data,
-                    pdf_path,
+                text(
+                    """
+                    INSERT INTO "Application" (
+                        id, mode, company, "jobDescription", "resumeId",
+                        output, "scoreData", "pdfPath", "createdAt"
+                    ) VALUES (
+                        :id, :mode, :company, :job_description, :resume_id,
+                        :output, :score_data, :pdf_path, CURRENT_TIMESTAMP
+                    )
+                    """
                 ),
+                {
+                    "id": app_id,
+                    "mode": mode,
+                    "company": company,
+                    "job_description": job_description,
+                    "resume_id": resume_id,
+                    "output": output,
+                    "score_data": score_data,
+                    "pdf_path": pdf_path,
+                },
             )
-            conn.commit()
-    except sqlite3.Error as exc:
+    except Exception as exc:
         # Logging-only failure — generations should not fail because the audit
         # log is unavailable.
         logger.warning("Failed to log application (%s): %s", mode, exc)
