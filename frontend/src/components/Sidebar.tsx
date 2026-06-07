@@ -13,6 +13,9 @@ import {
   Menu,
   X,
   Send,
+  Users,
+  Mail,
+  FilePlus2,
 } from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
 import { LOGO_LOCKUP_INNER } from "./logoLockupInner";
@@ -41,7 +44,10 @@ const NAV: NavItem[] = [
   { href: "/", label: "Home", icon: Home, exact: true },
   { href: "/applications", label: "Applications", icon: Briefcase },
   { href: "/reach-out", label: "Reach Out", icon: Send },
+  { href: "/mail", label: "Mail", icon: Mail },
+  { href: "/leads", label: "Leads", icon: Users },
   { href: "/resumes", label: "Resumes", icon: FileText },
+  { href: "/resume-builder", label: "Resume Builder", icon: FilePlus2 },
   { href: "/history", label: "History", icon: Clock },
 ];
 
@@ -86,7 +92,7 @@ export function Sidebar() {
   return (
     <>
       {/* Mobile top bar (only visible below lg). */}
-      <div className="lg:hidden sticky top-0 z-30 flex items-center justify-between px-4 h-14 border-b border-base-300/40 bg-base-100/80 backdrop-blur">
+      <div className="lg:hidden sticky top-0 z-30 flex items-center justify-between px-4 h-14 border-b border-base-300 bg-base-100">
         <button
           type="button"
           onClick={() => setMobileOpen((v) => !v)}
@@ -118,7 +124,7 @@ export function Sidebar() {
           // Desktop: fixed rail on the left. Width follows --sidebar-w
           // which is set by the data-sidebar attribute on <html>.
           "hidden lg:flex flex-col fixed inset-y-0 left-0 z-30",
-          "border-r border-base-300/40 bg-base-100/80 backdrop-blur",
+          "border-r border-base-300 bg-base-100",
           "transition-[width] duration-200 ease-out",
         ].join(" ")}
       >
@@ -133,7 +139,7 @@ export function Sidebar() {
       <aside
         className={[
           "lg:hidden fixed inset-y-0 left-0 z-50 w-[260px]",
-          "border-r border-base-300/40 bg-base-100",
+          "border-r border-base-300 bg-base-100",
           "transition-transform duration-200 ease-out",
           mobileOpen ? "translate-x-0" : "-translate-x-full",
           "flex flex-col",
@@ -166,7 +172,7 @@ function SidebarContents({
   return (
     <>
       {/* Brand */}
-      <div className="sidebar-brand h-24 flex items-center justify-center px-4 border-b border-base-300/40">
+      <div className="sidebar-brand h-24 flex items-center justify-center px-4 border-b border-base-300">
         <Link
           href="/"
           aria-label="apply-tools home"
@@ -209,7 +215,7 @@ function SidebarContents({
                     "h-9 px-2.5 gap-3",
                     active
                       ? "bg-primary/15 text-primary font-medium"
-                      : "opacity-75 hover:opacity-100 hover:bg-base-300/40",
+                      : "opacity-75 hover:opacity-100 hover:bg-base-200",
                   ].join(" ")}
                 >
                   <Icon className="h-[18px] w-[18px] shrink-0" />
@@ -226,7 +232,7 @@ function SidebarContents({
       {/* Footer: theme toggle + collapse button */}
       <div
         className={[
-          "border-t border-base-300/40 px-2 py-2 flex items-center gap-1",
+          "border-t border-base-300 px-2 py-2 flex items-center gap-1",
           collapsed ? "flex-col" : "",
         ].join(" ")}
       >

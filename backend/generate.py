@@ -46,6 +46,15 @@ DEFAULT_RESUME_ID = "default"
 # ---------------------------------------------------------------------------
 AI_PROVIDER = os.environ.get("AI_PROVIDER", "anthropic").lower()
 SCORE_PROVIDER = os.environ.get("SCORE_PROVIDER", AI_PROVIDER).lower()
+# EXTRACT_PROVIDER overrides just the JD auto-detect path. Defaults to Groq
+# (fast/consistent Llama) regardless of where generation runs; the extract path
+# then falls back NVIDIA -> Bedrock -> Anthropic (see EXTRACT_FALLBACK_CHAIN).
+# Override via env if you want auto-detect on a different primary.
+EXTRACT_PROVIDER = os.environ.get("EXTRACT_PROVIDER", "groq").lower()
+
+# Hard ceiling on a single LLM call. Without this, a slow upstream stalls
+# the popup forever (no client-side timeout in popup.js for /score, /extract-jd).
+LLM_TIMEOUT_SECS = float(os.environ.get("LLM_TIMEOUT_SECS", "45"))
 
 # Anthropic (Claude)
 DEFAULT_MODEL = os.environ.get("MODEL", "claude-opus-4-5")
@@ -60,6 +69,23 @@ SCORE_GROQ_MODEL = os.environ.get("SCORE_GROQ_MODEL", "llama-3.3-70b-versatile")
 NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NIM_MODEL = os.environ.get("NIM_MODEL", "meta/llama-3.3-70b-instruct")
 NIM_MAX_TOKENS = 4096
+
+# AWS Bedrock (boto3, Converse API). Auth via the standard AWS credential
+# chain (env vars / ~/.aws/credentials / IAM role); region from BEDROCK_REGION
+# or AWS_REGION (default us-east-1). Generation/score/answer use Claude Sonnet;
+# the JD extractor uses Llama 3.3 to match the groq/nvidia extract path.
+BEDROCK_REGION = os.environ.get("BEDROCK_REGION") or os.environ.get(
+    "AWS_REGION", "us-east-1"
+)
+BEDROCK_MODEL = os.environ.get(
+    # Claude Sonnet 4.5 on Bedrock requires a region-prefixed inference profile
+    # (the bare anthropic.claude-sonnet-4-5-... id raises ValidationException).
+    "BEDROCK_MODEL", "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+)
+BEDROCK_EXTRACT_MODEL = os.environ.get(
+    "BEDROCK_EXTRACT_MODEL", "meta.llama3-3-70b-instruct-v1:0"
+)
+BEDROCK_MAX_TOKENS = 4096
 
 # Extract JD (kept separate for backward compat; honours AI_PROVIDER)
 EXTRACT_MODEL = os.environ.get("EXTRACT_MODEL", "llama-3.3-70b-versatile")
@@ -143,8 +169,8 @@ Output schema (all fields required):
 
 - Plain text with blank lines between paragraphs. No markdown.
 - The ONLY LaTeX commands you may emit are: \\emph{{...}}, \\textbf{{...}}, and \\\\ (forced line break, used sparingly). Use them rarely - the Faire letter above uses none.
-- Do NOT emit: $, &, %, #, _, {{, }}, ~, ^, or backslashes outside the whitelist.
-- Percent signs are forbidden but the NUMBER MUST STILL CARRY ITS UNIT. Always rewrite "43%" as "43 percent" - never just "43" with no unit. Same for ampersands ("and") and dollar signs ("USD" or spell the amount). A bare number where a percentage was meant is a bug; the sentence must read correctly aloud.
+- Do NOT emit: $, &, #, _, {{, }}, ~, ^, or backslashes outside the whitelist.
+- Percent signs ARE allowed: write "43%" with the symbol, not "43 percent". (The renderer escapes it safely.) Ampersands and dollar signs are still banned - spell them out ("and", "USD" or the written amount). A bare number where a percentage was meant is a bug; always keep the % on the number.
 - Do NOT include the salutation ("Dear ...") or sign-off ("Best Regards,") - those are in the template.
 """
 
@@ -183,27 +209,40 @@ OUTREACH_INVITATION_SYSTEM = f"""You are ghostwriting a LinkedIn connection requ
 
 You will receive: his resume (ground truth about him), the target person's LinkedIn profile (pasted text), and an optional context note describing the angle ("looking for referral at their company", "wanted to chat about their work in X", etc.).
 
-LinkedIn caps these notes at 300 characters. Target 240-280 characters to leave a buffer.
+LinkedIn caps these notes at 300 characters. Target 260-290 characters — use the budget.
 
 Return STRICT JSON only - no markdown fences, no commentary before or after.
 
 Output schema (all fields required):
 {{
-  "message": "<the connection request note, plain text, NO greeting like 'Hi X,' and NO signoff. Just the note itself. 240-280 characters.>"
+  "message": "<the connection request note, plain text. Includes greeting, brief intro of Amogh, and a soft ask. 260-290 characters.>"
 }}
 
 {VOICE_RULES}
 
 # LinkedIn invitation rules
 
-- HARD MAXIMUM: 290 characters. If you're at 300, you've failed.
-- Target 240-280 characters.
-- No greeting ("Hi X,") and no signoff. The recipient sees this inline; greetings waste characters.
-- Anchor on ONE specific thing from their profile (a project, a company, a post topic). Generic flattery is wasted.
-- One sentence connecting their work to his (a relevant experience or skill from the resume).
-- One short closing sentence with the ask, soft. e.g. "Would love to connect." / "Open to chatting if you have a moment."
-- Use first-name only if their first name appears in the profile.
-- Use contractions. No buzzwords.
+## Structure (in this order)
+
+1. **Greeting** — "Hi {{first name}}," using their actual first name from the profile. If the profile has no first name, use "Hi,".
+2. **Who Amogh is** — one short clause introducing him: role + program. e.g. "I'm a Data Scientist finishing my MS at GW" or "DS student at GW wrapping up my MS in May".
+3. **Specific anchor** — name ONE concrete thing from their profile: a current role, a company, a project, a domain they work in. Not vague adjectives.
+4. **Soft ask** — short, specific. "Would love to connect to hear how you got into <X>." / "Open to chatting about <Y> if you have a moment." Use the context note to pick the angle when one is given.
+
+## Hard rules
+
+- HARD MAXIMUM: 295 characters. If you're at or above 300, you've failed.
+- Target 260-290 characters — don't leave 50+ characters on the table; use them to make the message specific.
+- DO include the greeting. DO NOT include a signoff like "Thanks, Amogh" — connection requests show the sender's name automatically and a signoff wastes the budget.
+- Lead with THEIR work, not Amogh's accomplishments. The intro of Amogh is a one-clause identifier ("I'm a DS finishing my MS at GW"), not a brag. No metrics, no "reduced X by Y%". Save numbers for follow-up messages.
+- Banned filler words: "interesting", "impressive", "complex", "fascinating", "amazing", "great work". They add no information and burn characters.
+- Anchor must be SPECIFIC: name the company, the team, the product, the topic. "your work in revenue management at Holland America Line" is acceptable; "your work in revenue management" alone is weaker; "your interesting work" is forbidden.
+- One thought per sentence. Three sentences max after the greeting.
+- Use contractions. No buzzwords. No em-dashes that look ChatGPT-generated.
+
+## Example shape (for structure only — do not copy phrasing)
+
+"Hi Abbie, I'm a Data Scientist finishing my MS at GW. Saw you're leading revenue management at Holland America Line — I've been working on forecasting and pricing problems and would love to hear how you got into RM."
 """
 
 
@@ -500,7 +539,7 @@ def _call_claude(
 ) -> tuple[dict[str, Any], str]:
     """Single Claude messages.create call, JSON-parsed and key-validated."""
     api_key = _require_api_key()
-    client = Anthropic(api_key=api_key)
+    client = Anthropic(api_key=api_key, timeout=LLM_TIMEOUT_SECS)
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
     if extra_messages:
@@ -534,7 +573,7 @@ def _call_groq(
 ) -> tuple[dict[str, Any], str]:
     """Groq chat completion, JSON-parsed and key-validated."""
     api_key = _require_groq_key()
-    client = Groq(api_key=api_key)
+    client = Groq(api_key=api_key, timeout=LLM_TIMEOUT_SECS)
 
     msgs: list[dict[str, str]] = [
         {"role": "system", "content": system_prompt},
@@ -570,7 +609,7 @@ def _call_nim(
 ) -> tuple[dict[str, Any], str]:
     """NVIDIA NIM chat completion (OpenAI-compatible), JSON-parsed and key-validated."""
     api_key = _require_nim_key()
-    client = OpenAI(base_url=NIM_BASE_URL, api_key=api_key)
+    client = OpenAI(base_url=NIM_BASE_URL, api_key=api_key, timeout=LLM_TIMEOUT_SECS)
 
     msgs: list[dict[str, str]] = [
         {"role": "system", "content": system_prompt},
@@ -595,6 +634,139 @@ def _call_nim(
     return payload, raw_text
 
 
+def _call_bedrock(
+    system_prompt: str,
+    user_message: str,
+    required_keys: set[str],
+    *,
+    extra_messages: list[dict[str, str]] | None = None,
+    model: str | None = None,
+    max_tokens: int | None = None,
+) -> tuple[dict[str, Any], str]:
+    """AWS Bedrock Converse API call, JSON-parsed and key-validated.
+
+    The Converse API is model-agnostic, so the same code path serves both the
+    Claude default (generation/score) and the Llama extract model. The system
+    prompt already instructs "STRICT JSON only", which both model families
+    honour; Bedrock has no OpenAI-style response_format toggle.
+    """
+    import boto3  # local import so a missing optional dep doesn't break others
+    from botocore.config import Config
+
+    # botocore reads creds from the standard chain (env / ~/.aws / IAM role).
+    # Cap the read timeout at the shared ceiling so a slow Bedrock call falls
+    # through to the next provider instead of stalling the popup.
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name=BEDROCK_REGION,
+        config=Config(
+            read_timeout=LLM_TIMEOUT_SECS,
+            connect_timeout=min(10.0, LLM_TIMEOUT_SECS),
+            retries={"max_attempts": 1},
+        ),
+    )
+
+    # Converse splits the system prompt out; user/assistant turns go in messages.
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": [{"text": user_message}]}
+    ]
+    for m in extra_messages or []:
+        messages.append({"role": m["role"], "content": [{"text": m["content"]}]})
+
+    try:
+        response = client.converse(
+            modelId=model or BEDROCK_MODEL,
+            system=[{"text": system_prompt}],
+            messages=messages,
+            inferenceConfig={"maxTokens": max_tokens or BEDROCK_MAX_TOKENS},
+        )
+    except Exception as exc:
+        raise RuntimeError(f"AWS Bedrock request failed: {exc}") from exc
+
+    blocks = response.get("output", {}).get("message", {}).get("content", [])
+    raw_text = "".join(b.get("text", "") for b in blocks)
+    payload = _parse_claude_json(raw_text)
+    _validate_keys(payload, required_keys)
+    return payload, raw_text
+
+
+def _dispatch_provider(
+    provider: str,
+    system_prompt: str,
+    user_message: str,
+    required_keys: set[str],
+    *,
+    extra_messages: list[dict[str, str]] | None,
+    model: str | None,
+    max_tokens: int | None,
+) -> tuple[dict[str, Any], str]:
+    kwargs = dict(extra_messages=extra_messages, model=model, max_tokens=max_tokens)
+    if provider == "nvidia":
+        return _call_nim(system_prompt, user_message, required_keys, **kwargs)
+    if provider == "groq":
+        return _call_groq(system_prompt, user_message, required_keys, **kwargs)
+    if provider == "bedrock":
+        return _call_bedrock(system_prompt, user_message, required_keys, **kwargs)
+    return _call_claude(system_prompt, user_message, required_keys, **kwargs)
+
+
+# When the primary provider hits a recoverable error (rate-limit / quota /
+# timeout) we walk down this chain, trying each subsequent provider until one
+# succeeds. Ordered fastest-and-most-reliable-first: Bedrock (Claude Sonnet) and
+# Groq (free, 3-15s) lead; Anthropic is the reliable paid backstop; NVIDIA NIM is
+# LAST because its public endpoint frequently times out (>45s, sometimes >90s),
+# so it should only ever be reached when everything else is unavailable. The
+# primary is removed from the chain before walking (no point retrying the one
+# that just failed), and we keep going even if an intermediate fallback also
+# fails recoverably — that's the bug this replaces, where groq quota-out +
+# nvidia timeout dead-ended with no further hop.
+FALLBACK_CHAIN = ("bedrock", "groq", "anthropic", "nvidia")
+
+# JD auto-detect (extract) prefers the cheap/fast Llama providers, in order:
+# Groq (Llama 3.3 70b) first — fast and consistent (~2-3s) — then NVIDIA NIM,
+# then Bedrock, with Anthropic as the final backstop. (NVIDIA's public NIM
+# endpoint swings 3-15s+, so it's the secondary, not the primary.) Used only by
+# extract_jd_from_page, not generation/scoring.
+EXTRACT_FALLBACK_CHAIN = ("groq", "nvidia", "bedrock", "anthropic")
+
+# Substrings that mark an exception as "provider is unusable right now"
+# rather than "the request itself is malformed". Lowercased before match.
+_FALLBACK_TRIGGERS = (
+    "rate limit",
+    "rate_limit",
+    "rate-limit",
+    "429",
+    "quota",
+    "tokens per day",
+    "tpd",
+    "tpm",
+    "timed out",
+    "timeout",
+    "service unavailable",
+    "503",
+)
+
+
+def _should_fallback(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(t in msg for t in _FALLBACK_TRIGGERS)
+
+
+def _provider_unconfigured(exc: BaseException) -> bool:
+    """True when the error is a missing API key / credentials for a provider.
+
+    A fallback provider that isn't configured should be skipped (try the next
+    one), not treated as a hard failure that aborts the whole chain.
+    """
+    msg = str(exc).lower()
+    return (
+        "not set" in msg  # _require_*_key messages
+        or "no credentials" in msg  # botocore NoCredentialsError
+        or "unable to locate credentials" in msg
+        or "could not connect to the endpoint" in msg
+    )
+
+
 def _call_llm(
     system_prompt: str,
     user_message: str,
@@ -604,21 +776,63 @@ def _call_llm(
     provider: str | None = None,
     model: str | None = None,
     max_tokens: int | None = None,
+    fallback_chain: tuple[str, ...] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """Unified dispatcher: routes to the configured AI provider.
 
     `provider` defaults to AI_PROVIDER.  Pass explicitly for score/extract
-    overrides.
+    overrides. On a recoverable failure (rate limit, timeout) we walk down the
+    fallback chain, trying each remaining provider until one succeeds — Groq's
+    free tier caps at 100k tokens/day (easy to hit) and NIM can time out, so a
+    single fallback hop isn't enough; we keep going and finally Anthropic, which
+    is the reliable backstop.
+
+    `fallback_chain` overrides the global FALLBACK_CHAIN for this call only
+    (e.g. JD auto-detect wants NVIDIA -> Groq -> Bedrock -> Anthropic). The
+    primary is always tried first and de-duped out of the chain regardless.
     """
-    p = (provider or AI_PROVIDER).lower()
-    kwargs = dict(
-        extra_messages=extra_messages, model=model, max_tokens=max_tokens,
-    )
-    if p == "nvidia":
-        return _call_nim(system_prompt, user_message, required_keys, **kwargs)
-    if p == "groq":
-        return _call_groq(system_prompt, user_message, required_keys, **kwargs)
-    return _call_claude(system_prompt, user_message, required_keys, **kwargs)
+    primary = (provider or AI_PROVIDER).lower()
+
+    # Try the primary first (honouring its provider-specific `model`), then walk
+    # the rest of the chain. De-dupe so the primary isn't retried mid-chain.
+    walk = fallback_chain or FALLBACK_CHAIN
+    chain = [primary] + [p for p in walk if p != primary]
+
+    last_exc: Exception | None = None
+    for i, prov in enumerate(chain):
+        try:
+            return _dispatch_provider(
+                prov,
+                system_prompt,
+                user_message,
+                required_keys,
+                extra_messages=extra_messages,
+                # `model` is provider-specific; only the primary gets the
+                # caller's model. Every fallback uses its own default.
+                model=model if i == 0 else None,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            last_exc = exc
+            is_last = i == len(chain) - 1
+            # Walk to the next provider on a recoverable error (rate limit /
+            # quota / timeout) OR when this fallback simply isn't configured
+            # (missing key/creds) — an unconfigured backstop shouldn't abort
+            # the chain. Anything else (e.g. malformed request) surfaces as-is.
+            recoverable = _should_fallback(exc) or (
+                i > 0 and _provider_unconfigured(exc)
+            )
+            if not recoverable or is_last:
+                raise
+            logger.warning(
+                "Provider %s failed (%s); falling back to %s",
+                prov,
+                exc,
+                chain[i + 1],
+            )
+
+    # Unreachable (loop either returns or raises), but keeps type-checkers happy.
+    raise last_exc if last_exc else RuntimeError("no provider available")
 
 
 def _substitute(template: str, mapping: dict[str, str]) -> str:
@@ -1190,31 +1404,27 @@ def _compose_score(
     return {"score": score_10, "score_100": int(score_100), "breakdown": breakdown}
 
 
-def score_jd_fit(
+def score_resume_text(
     job_description: str,
+    resume_text: str,
     company: str | None = None,
-    resume_id: str | None = None,
-    *,
-    _log: bool = True,
 ) -> dict[str, Any]:
-    """Score how well the resume fits the JD using rubric-based grading.
+    """Score a raw resume-text string against a JD (rubric-based grading).
 
-    Single Claude call extracts the JD's requirements, grades the resume on
-    each one with evidence, and returns a one-line verdict summary. The
-    composite score is computed deterministically from those grades.
-
-    Returns {"score": int 0-10, "score_100": int 0-100, "verdict": str,
-    "breakdown": dict}. The frontend uses score+verdict; score_100 is for
-    finer ranking; breakdown is for debug/CLI.
+    The scoring core, decoupled from where the resume comes from. `score_jd_fit`
+    reads a stored resume by id then calls this; the Resume Builder renders its
+    in-memory profile to text and calls this directly. Returns the same shape:
+    {"score": int 0-10, "score_100": int 0-100, "verdict": str, "breakdown": dict}.
     """
     if not job_description or not job_description.strip():
         raise ValueError("job_description must not be empty")
+    if not resume_text or not resume_text.strip():
+        raise ValueError("resume_text must not be empty")
 
-    resume = _read_resume(resume_id)
     user_message = _user_msg_score(
         job_description.strip(),
         company.strip() if company and company.strip() else None,
-        resume,
+        resume_text,
     )
 
     score_model = SCORE_GROQ_MODEL if SCORE_PROVIDER == "groq" else None
@@ -1241,19 +1451,36 @@ def score_jd_fit(
         summary = summary[:157].rstrip() + "..."
     verdict = f"{score}/10 - {summary}" if summary else f"{score}/10"
 
-    out = {
+    return {
         "score": score,
         "score_100": composite["score_100"],
         "verdict": verdict,
         "breakdown": composite["breakdown"],
     }
+
+
+def score_jd_fit(
+    job_description: str,
+    company: str | None = None,
+    resume_id: str | None = None,
+    *,
+    _log: bool = True,
+) -> dict[str, Any]:
+    """Score how well a stored resume fits the JD using rubric-based grading.
+
+    Reads the resume by id (or the active one) and delegates to
+    `score_resume_text`. Returns {"score", "score_100", "verdict", "breakdown"}.
+    The frontend uses score+verdict; score_100 is for finer ranking.
+    """
+    resume = _read_resume(resume_id)
+    out = score_resume_text(job_description, resume, company)
     if _log:
         insert_application(
             mode="score",
             company=company.strip() if company and company.strip() else None,
             job_description=job_description.strip(),
             resume_id=resume_id,
-            output=verdict,
+            output=out["verdict"],
             score_data=json.dumps(out),
         )
     return out
@@ -1340,16 +1567,30 @@ def extract_jd_from_page(
         "Return JSON only."
     )
 
-    # Extract uses a lighter model when on Groq; otherwise use provider default.
-    extract_model = EXTRACT_MODEL if AI_PROVIDER == "groq" else None
+    # Auto-detect routes through EXTRACT_PROVIDER (default NVIDIA NIM) and uses
+    # the extract-specific fallback order NVIDIA -> Groq -> Bedrock -> Anthropic
+    # (EXTRACT_FALLBACK_CHAIN), keeping extraction on cheap/fast Llama providers
+    # before the Anthropic backstop. It uses a lighter Llama model where the
+    # provider offers one (Groq and Bedrock); nvidia uses NIM_MODEL by default.
+    # Note: this only sets the *primary* model — each fallback uses its own
+    # default (so a fail-over to Bedrock lands on BEDROCK_MODEL/Claude, not
+    # Llama). Acceptable for the rare fallback path.
+    if EXTRACT_PROVIDER == "groq":
+        extract_model: str | None = EXTRACT_MODEL
+    elif EXTRACT_PROVIDER == "bedrock":
+        extract_model = BEDROCK_EXTRACT_MODEL
+    else:
+        extract_model = None
     # _validate_keys would reject empty strings which are valid for extract,
     # so pass an empty required_keys set and validate manually below.
     payload, _ = _call_llm(
         EXTRACT_JD_SYSTEM,
         user_msg,
         required_keys=set(),
+        provider=EXTRACT_PROVIDER,
         model=extract_model,
         max_tokens=EXTRACT_MAX_TOKENS,
+        fallback_chain=EXTRACT_FALLBACK_CHAIN,
     )
 
     missing = {"company", "job_description"} - payload.keys()

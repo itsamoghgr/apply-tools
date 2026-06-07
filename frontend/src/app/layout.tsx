@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import { Geist_Mono } from "next/font/google";
+import { Fraunces } from "next/font/google";
 import { Toaster } from "sonner";
 import "./globals.css";
 import { Sidebar } from "../components/Sidebar";
@@ -12,6 +13,11 @@ const inter = Inter({
 
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
+  subsets: ["latin"],
+});
+
+const fraunces = Fraunces({
+  variable: "--font-fraunces",
   subsets: ["latin"],
 });
 
@@ -40,7 +46,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${inter.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${inter.variable} ${geistMono.variable} ${fraunces.variable} h-full antialiased`}
       suppressHydrationWarning
     >
       <head>
@@ -64,7 +70,15 @@ export default function RootLayout({
           </footer>
         </div>
 
-        <Toaster position="top-right" theme="system" richColors />
+        <Toaster
+          position="top-right"
+          theme="system"
+          richColors
+          expand={true}
+          gap={12}
+          visibleToasts={5}
+          duration={4000}
+        />
       </body>
     </html>
   );

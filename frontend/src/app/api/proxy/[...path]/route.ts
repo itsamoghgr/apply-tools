@@ -27,6 +27,9 @@ async function forward(req: NextRequest, segments: string[]) {
   if (ct) headers.set("content-type", ct);
   const cd = res.headers.get("content-disposition");
   if (cd) headers.set("content-disposition", cd);
+  // Forward the resume page count so the builder can warn / block export.
+  const pc = res.headers.get("x-page-count");
+  if (pc) headers.set("x-page-count", pc);
   return new NextResponse(res.body, { status: res.status, headers });
 }
 

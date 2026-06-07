@@ -16,10 +16,15 @@ const STATUSES = [
 ] as const;
 type StatusFilter = (typeof STATUSES)[number];
 
+// Newest-first window we render by default. With ~800 apps in the DB
+// pulling everything every navigation made the page sluggish; this caps
+// the initial payload to a usable chunk. `?all=1` opts back into full mode.
+const PAGE_SIZE = 200;
+
 export default async function ApplicationsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ status?: string }>;
+  searchParams: Promise<{ status?: string; all?: string }>;
 }) {
   const sp = await searchParams;
   const status: StatusFilter = (STATUSES as readonly string[]).includes(
@@ -27,21 +32,65 @@ export default async function ApplicationsPage({
   )
     ? (sp.status as StatusFilter)
     : "all";
+  const showAll = sp.all === "1";
 
-  const [apps, resumes] = await Promise.all([
+  const where = status === "all" ? {} : { status };
+
+  const [apps, resumes, total] = await Promise.all([
     prisma.jobApplication.findMany({
-      where: status === "all" ? {} : { status },
-      orderBy: { createdAt: "desc" },
-      include: { resume: { select: { id: true, label: true } } },
+      where,
+      // Sort by appliedDate so the user-controlled date drives the row's
+      // position. createdAt is a tie-breaker for rows applied on the same
+      // day (newest-saved first).
+      orderBy: [{ appliedDate: "desc" }, { createdAt: "desc" }],
+      take: showAll ? undefined : PAGE_SIZE,
+      include: {
+        resume: { select: { id: true, label: true } },
+        leads: {
+          include: {
+            lead: {
+              select: {
+                id: true,
+                name: true,
+                email: true,
+                linkedinUrl: true,
+                // linkedinProfile intentionally omitted: it's a raw scraped
+                // profile blob (often tens of KB) that the table never
+                // renders. Pulling it for every linked lead on every page
+                // load was a hidden tax.
+                currentCompany: true,
+                role: true,
+              },
+            },
+          },
+          orderBy: { createdAt: "asc" },
+        },
+        reachOuts: {
+          orderBy: { createdAt: "desc" },
+          // Cap the reach-out preview list per app — we only surface the
+          // most recent few in the row; the rest live on the Reach-out page.
+          take: 5,
+          select: {
+            id: true,
+            subject: true,
+            status: true,
+            sentAt: true,
+            recipientName: true,
+            recipientEmail: true,
+            createdAt: true,
+          },
+        },
+      },
     }),
     prisma.resume.findMany({
       where: { isActive: true },
       orderBy: { id: "asc" },
       select: { id: true, label: true },
     }),
+    prisma.jobApplication.count({ where }),
   ]);
 
-  const total = apps.length;
+  const truncated = !showAll && total > apps.length;
 
   const serialised = apps.map((a) => ({
     id: a.id,
@@ -63,6 +112,28 @@ export default async function ApplicationsPage({
     hrEmail: a.hrEmail,
     referral: a.referral,
     referralLinkedin: a.referralLinkedin,
+    jobDescription: a.jobDescription,
+    linkedLeads: a.leads.map((jl) => ({
+      id: jl.lead.id,
+      name: jl.lead.name,
+      email: jl.lead.email,
+      linkedinUrl: jl.lead.linkedinUrl,
+      // Field kept on the row type for compatibility with downstream
+      // consumers, but never selected on this page. Always null here.
+      linkedinProfile: null as string | null,
+      currentCompany: jl.lead.currentCompany,
+      role: jl.lead.role,
+      linkRole: jl.role,
+    })),
+    reachOuts: a.reachOuts.map((r) => ({
+      id: r.id,
+      subject: r.subject,
+      status: r.status,
+      sentAt: r.sentAt?.toISOString() ?? null,
+      recipientName: r.recipientName,
+      recipientEmail: r.recipientEmail,
+      createdAt: r.createdAt.toISOString(),
+    })),
   }));
 
   return (
@@ -70,15 +141,40 @@ export default async function ApplicationsPage({
       <RefreshOnFocus />
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-3">
-          <h1 className="text-3xl font-bold tracking-tight">Applications</h1>
+          <h1 className="text-3xl font-semibold tracking-tight font-[family-name:var(--font-display)]">Applications</h1>
           <span className="badge badge-primary font-mono tabular-nums px-3 py-1 text-sm">
             {total}
           </span>
         </div>
-        <div
-          role="tablist"
-          className="inline-flex items-center gap-0.5 p-1 rounded-lg bg-base-200/60 border border-base-300/60 flex-wrap"
-        >
+        <div className="flex items-center gap-2 flex-wrap">
+          <a
+            href={
+              status === "all"
+                ? "/api/applications/export"
+                : `/api/applications/export?status=${encodeURIComponent(status)}`
+            }
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium border border-base-300/60 bg-base-200/40 hover:bg-base-200/70 transition-colors"
+            download
+          >
+            <svg
+              className="h-3.5 w-3.5 opacity-70"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+              strokeWidth={2}
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3"
+              />
+            </svg>
+            Export CSV
+          </a>
+          <div
+            role="tablist"
+            className="inline-flex items-center gap-0.5 p-1 rounded-lg bg-base-200/60 border border-base-300/60 flex-wrap"
+          >
           {STATUSES.map((s) => {
             const active = s === status;
             return (
@@ -101,10 +197,26 @@ export default async function ApplicationsPage({
               </Link>
             );
           })}
+          </div>
         </div>
       </div>
 
       <ApplicationsTable apps={serialised} resumes={resumes} total={total} />
+
+      {truncated && (
+        <div className="flex items-center justify-center pt-2">
+          <Link
+            href={
+              status === "all"
+                ? "/applications?all=1"
+                : `/applications?status=${encodeURIComponent(status)}&all=1`
+            }
+            className="text-xs px-3 py-1.5 rounded-md border border-base-300/60 bg-base-200/40 hover:bg-base-200/70 transition-colors opacity-70 hover:opacity-100"
+          >
+            Showing {apps.length} of {total} · load all
+          </Link>
+        </div>
+      )}
     </div>
   );
 }

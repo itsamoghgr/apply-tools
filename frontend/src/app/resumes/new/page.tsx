@@ -7,7 +7,7 @@ export default function NewResumePage() {
   return (
     <div className="space-y-6 max-w-4xl animate-slide-up">
       <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold tracking-tight">New resume</h1>
+        <h1 className="text-3xl font-semibold tracking-tight font-[family-name:var(--font-display)]">New resume</h1>
         <Link
           href="/resumes"
           className="text-sm opacity-60 hover:opacity-100 transition-opacity flex items-center gap-1.5"

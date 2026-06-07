@@ -15,7 +15,7 @@ export default async function ResumesPage() {
     <div className="space-y-6 animate-slide-up">
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <h1 className="text-3xl font-bold tracking-tight">Resumes</h1>
+          <h1 className="text-3xl font-semibold tracking-tight font-[family-name:var(--font-display)]">Resumes</h1>
           <span className="badge badge-primary font-mono tabular-nums px-3 py-1 text-sm">
             {resumes.length}
           </span>

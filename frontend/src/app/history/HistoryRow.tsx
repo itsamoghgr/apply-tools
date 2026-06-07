@@ -13,12 +13,16 @@ type App = {
   pdfPath: string | null;
 };
 
+// Warm-minimal category palette — mirrors the .mode-dot-* hues in globals.css
+// (indigo accent / slate-blue / plum / forest / amber). Tonal soft tags: tinted
+// bg, full-strength text, hairline border. Driven by .mode-badge-* utilities so
+// the colors live in one place (globals.css) alongside the dots.
 const MODE_BADGE: Record<string, string> = {
-  cover_letter: "bg-indigo-500/15 text-indigo-400 border-indigo-500/25",
-  email: "bg-cyan-500/15 text-cyan-400 border-cyan-500/25",
-  outreach: "bg-purple-500/15 text-purple-400 border-purple-500/25",
-  score: "bg-emerald-500/15 text-emerald-400 border-emerald-500/25",
-  answer_question: "bg-orange-500/15 text-orange-400 border-orange-500/25",
+  cover_letter: "mode-badge-cover_letter",
+  email: "mode-badge-email",
+  outreach: "mode-badge-outreach",
+  score: "mode-badge-score",
+  answer_question: "mode-badge-answer_question",
 };
 
 function prettyOutput(mode: string, raw: string | null): string {

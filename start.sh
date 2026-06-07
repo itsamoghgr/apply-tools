@@ -13,9 +13,12 @@ if [ ! -f "$ROOT_DIR/backend/.env" ]; then
 fi
 
 # DB / frontend checks
-if [ ! -f "$ROOT_DIR/data/apply-tools.db" ]; then
-  echo "data/apply-tools.db not found. Run setup first:"
-  echo "  cd frontend && npm install && npx prisma migrate dev"
+# Postgres replaces the old SQLite file. Confirm the server is reachable on
+# 5432 before we boot the apps, since both backend and frontend need it.
+if ! nc -z localhost 5432 2>/dev/null; then
+  echo "Postgres not reachable on localhost:5432. Start it first, e.g.:"
+  echo "  brew services start postgresql@17"
+  echo "Then ensure the apply_tools database + role exist (see dev.md)."
   exit 1
 fi
 if [ ! -d "$ROOT_DIR/frontend/node_modules" ]; then

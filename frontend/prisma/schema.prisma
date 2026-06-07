@@ -3,7 +3,7 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -58,9 +58,23 @@ model JobApplication {
   jobDescription    String?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
+  leads             JobApplicationLead[]
+  reachOuts         ReachOut[]
 
   @@index([createdAt])
   @@index([status])
+}
+
+model JobApplicationLead {
+  jobApplicationId String
+  leadId           String
+  role             String?
+  createdAt        DateTime       @default(now())
+  jobApplication   JobApplication @relation(fields: [jobApplicationId], references: [id], onDelete: Cascade)
+  lead             Lead           @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@id([jobApplicationId, leadId])
+  @@index([leadId])
 }
 
 model ReachOut {
@@ -71,6 +85,9 @@ model ReachOut {
   contextNote     String?
   resumeId        String?
   resume          Resume?   @relation(fields: [resumeId], references: [id], onDelete: SetNull)
+  leadId          String?
+  lead            Lead?     @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  channel         String    @default("email")
   subject         String
   body            String
   htmlBody        String?
@@ -79,13 +96,59 @@ model ReachOut {
   errorMessage    String?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
+  jobApplicationId String?
+  jobApplication   JobApplication? @relation(fields: [jobApplicationId], references: [id], onDelete: SetNull)
 
   @@index([createdAt])
   @@index([status])
+  @@index([leadId])
+  @@index([jobApplicationId])
+}
+
+model Lead {
+  id              String     @id
+  name            String
+  email           String?    @unique
+  linkedinUrl     String?
+  linkedinProfile String?
+  currentCompany  String?
+  role            String?
+  replied         Boolean    @default(false)
+  repliedAt       DateTime?
+  notes           String?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  reachOuts       ReachOut[]
+  applications    JobApplicationLead[]
+
+  @@index([createdAt])
+  @@index([replied])
 }
 
 model Setting {
   key       String   @id
   value     String
   updatedAt DateTime @updatedAt
+}
+
+// Structured resume authored in the Resume Builder. Sections are stored as
+// JSON so the builder can evolve fields without a migration each time; the
+// backend (resume_render.py) renders this shape to the sb2nov LaTeX template.
+//   header     -> { fullName, phone, email, linkedin, github, portfolio, scholar, location }
+//   education  -> [{ school, dates, degree, location }]
+//   experience -> [{ company, dates, title, location, bullets: string[] }]
+//   skills     -> [{ category, items }]
+//   projects   -> [{ name, date, bullets: string[] }]
+model ResumeProfile {
+  id         String   @id
+  name       String
+  header     Json     @default("{}")
+  education  Json     @default("[]")
+  experience Json     @default("[]")
+  skills     Json     @default("[]")
+  projects   Json     @default("[]")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([updatedAt])
 }

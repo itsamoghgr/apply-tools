@@ -17,9 +17,12 @@ import { relativeTime } from "@/lib/time";
 export const dynamic = "force-dynamic";
 
 // appliedDate values come from a `<input type="date">` (a local calendar
-// date) and are stored as midnight in SQLite without a timezone, which
-// Prisma surfaces as midnight UTC. Compare against UTC midnight of the
-// user's *local* day so the boundaries line up with how the data was saved.
+// date). The backend stores them as UTC midnight of that date (see
+// server._coerce_date), and a one-time migration
+// (backend/migrate_normalize_applied_dates.py) snapped legacy SQLite-migrated
+// rows back to UTC midnight too. So every appliedDate is UTC midnight of its
+// calendar date; we compare against UTC midnight of the user's *local* day so
+// the day/week boundaries line up with how the data was saved.
 const APP_TZ = "America/New_York";
 
 function startOfLocalTodayAsUTC(tz: string = APP_TZ): Date {
@@ -144,7 +147,7 @@ export default async function Home() {
       {/* ─── Header ─── */}
       <div className="flex flex-col lg:flex-row lg:items-start lg:justify-between gap-6 animate-slide-up stagger-1">
         <div>
-          <h1 className="text-3xl font-bold tracking-tight">Overview</h1>
+          <h1 className="text-3xl font-semibold tracking-tight font-[family-name:var(--font-display)]">Overview</h1>
           <p className="text-sm opacity-50 mt-1">
             Application activity at a glance.
           </p>
@@ -362,7 +365,7 @@ function StatCard({
         <div className="min-w-0">
           <div
             className={`text-2xl font-bold tracking-tight tabular-nums ${
-              accent ? "gradient-text" : ""
+              accent ? "text-primary" : ""
             }`}
           >
             {value}

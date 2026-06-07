@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx prisma *)",
+      "Bash(sqlite3 /Users/amoghramagiri/Documents/Projects/apply-tools/data/apply-tools.db \".schema JobApplicationLead\")",
+      "Bash(sqlite3 /Users/amoghramagiri/Documents/Projects/apply-tools/data/apply-tools.db \".schema ReachOut\")"
+    ]
+  },
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  }
+}

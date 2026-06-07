@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
-  "name": "Cover Letter Generator",
+  "name": "Apply Tools",
   "version": "1.0.0",
-  "description": "Generate a tailored, LaTeX-compiled PDF cover letter from a company name and job description.",
+  "description": "Auto-detect job postings, generate cover letters, draft outreach, score resume fit, and track applications.",
   "action": {
-    "default_title": "Cover Letter Generator",
+    "default_title": "Apply Tools",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icon-16.png",

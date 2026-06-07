@@ -1,6 +1,10 @@
 """One-shot migration: convert JobApplication.appliedDate / decisionDate from
 text-format ('YYYY-MM-DD HH:MM:SS') to INTEGER epoch milliseconds (UTC).
 
+OBSOLETE (SQLite era): only relevant to the old SQLite epoch-ms storage. The
+app now runs on Postgres with native timestamp columns; see
+migrate_sqlite_to_postgres.py for the one-time data move. Kept for history.
+
 Why: Prisma's SQLite adapter stores DateTime as INTEGER ms and binds query
 inputs the same way. Mixing text + integer storage breaks Prisma range
 filters (text >= integer is always true under SQLite type-affinity rules),

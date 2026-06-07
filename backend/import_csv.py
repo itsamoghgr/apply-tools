@@ -1,5 +1,11 @@
 """One-shot import of the historical job-tracker CSV into the JobApplication table.
 
+DEPRECATED (SQLite era): written against the old SQLite backend; uses raw
+sqlite3-style SQL (``?`` placeholders, manual ``.commit()``, ``isActive = 1``)
+that will NOT run now that db.py is on SQLAlchemy + Postgres. The data it
+produced has already been migrated. Kept for reference; port its queries to
+``sqlalchemy.text`` named binds before any reuse.
+
 Usage:
     python import_csv.py <path-to-csv> [--dry-run]
 

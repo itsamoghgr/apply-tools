@@ -88,6 +88,9 @@
       <button type="button" class="tab" role="tab" data-tab="track" aria-selected="false">
         Track
       </button>
+      <button type="button" class="tab" role="tab" data-tab="lead" aria-selected="false">
+        Lead
+      </button>
     </nav>
 
     <!-- ============ Cover Letter tab ============ -->
@@ -294,6 +297,102 @@
         <button type="button" id="trackSubmit" class="btn-primary">Save to tracker</button>
       </div>
       <div id="trackStatus" class="status" role="status" aria-live="polite"></div>
+    </section>
+
+    <!-- ============ Lead tab ============ -->
+    <section class="panel" data-panel="lead">
+      <div class="panel-note">
+        Capture a person to reach out to. Auto-detect fills the form from a
+        LinkedIn profile page.
+      </div>
+
+      <div class="panel-actions">
+        <button
+          type="button"
+          id="leadAutoDetectBtn"
+          class="btn-secondary"
+          title="Detect lead info from the active tab (LinkedIn profile)"
+        >
+          Auto-detect from LinkedIn
+        </button>
+      </div>
+      <div
+        id="leadAutoDetectStatus"
+        class="status"
+        role="status"
+        aria-live="polite"
+      ></div>
+
+      <label for="lead-name">
+        Name <span class="hint">(required)</span>
+      </label>
+      <input
+        type="text"
+        id="lead-name"
+        maxlength="200"
+        autocomplete="off"
+      />
+
+      <label for="lead-email">Email <span class="hint">(optional)</span></label>
+      <input
+        type="email"
+        id="lead-email"
+        maxlength="200"
+        autocomplete="off"
+      />
+
+      <label for="lead-linkedin-url">
+        LinkedIn URL <span class="hint">(filled by Auto-detect)</span>
+      </label>
+      <input
+        type="url"
+        id="lead-linkedin-url"
+        maxlength="2000"
+        autocomplete="off"
+      />
+
+      <div class="lead-row">
+        <div class="lead-cell">
+          <label for="lead-role">Role / title</label>
+          <input
+            type="text"
+            id="lead-role"
+            maxlength="200"
+            autocomplete="off"
+          />
+        </div>
+        <div class="lead-cell">
+          <label for="lead-company">Current company</label>
+          <input
+            type="text"
+            id="lead-company"
+            maxlength="200"
+            autocomplete="off"
+          />
+        </div>
+      </div>
+
+      <label for="lead-profile">
+        Profile text <span class="hint">(About + experience, optional)</span>
+      </label>
+      <textarea
+        id="lead-profile"
+        class="lead-scroll-textarea"
+        rows="5"
+        maxlength="30000"
+      ></textarea>
+
+      <label for="lead-notes">Notes <span class="hint">(optional)</span></label>
+      <textarea
+        id="lead-notes"
+        rows="3"
+        maxlength="10000"
+      ></textarea>
+
+      <div class="panel-actions">
+        <button type="button" id="leadSubmit" class="btn-primary">Save lead</button>
+      </div>
+      <div id="leadStatus" class="status" role="status" aria-live="polite"></div>
     </section>
 
     <script src="popup.js"></script>

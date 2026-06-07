@@ -1,9 +1,22 @@
 "use client";
 
-import { useState, useTransition } from "react";
+import { memo, useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Pencil, ExternalLink, Trash2 } from "lucide-react";
+import {
+  Pencil,
+  ExternalLink,
+  Trash2,
+  Mail,
+  Plus,
+  Send,
+  X as XIcon,
+  Sparkles,
+  Copy,
+  Check,
+} from "lucide-react";
+import LeadPicker from "./LeadPicker";
+import type { LinkedLead, AppReachOut } from "./ApplicationsTable";
 
 type App = {
   id: string;
@@ -25,6 +38,9 @@ type App = {
   hrEmail: string | null;
   referral: string | null;
   referralLinkedin: string | null;
+  jobDescription: string | null;
+  linkedLeads: LinkedLead[];
+  reachOuts: AppReachOut[];
 };
 
 const STATUS_OPTIONS = [
@@ -72,6 +88,7 @@ const FIELD_LABELS: Partial<Record<keyof App, string>> = {
   referral: "Referral",
   referralLinkedin: "Referral LinkedIn",
   notes: "Notes",
+  jobDescription: "Job description",
 };
 
 function fieldLabel(field: keyof App): string {
@@ -88,7 +105,7 @@ function fmtDate(iso: string | null): string {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-export default function ApplicationsRow({
+function ApplicationsRowInner({
   slNo,
   app,
   resumes,
@@ -102,6 +119,111 @@ export default function ApplicationsRow({
   const [busy, setBusy] = useState(false);
   const [local, setLocal] = useState(app);
   const [open, setOpen] = useState(false);
+  const [pickerMode, setPickerMode] = useState<
+    "off" | "link" | "reach-out"
+  >("off");
+
+  // Re-sync local state when the parent re-renders with fresh props
+  // (e.g., after router.refresh()). We compare by reference; the page
+  // re-serialises rows on every refresh so identity changes correctly.
+  const lastAppRef = useRef(app);
+  useEffect(() => {
+    if (lastAppRef.current !== app) {
+      lastAppRef.current = app;
+      setLocal(app);
+    }
+  }, [app]);
+
+  function navigateToReachOut(leadId: string) {
+    router.push(
+      `/reach-out?leadId=${encodeURIComponent(
+        leadId
+      )}&applicationId=${encodeURIComponent(app.id)}`
+    );
+  }
+
+  function onMainReachOutClick() {
+    if (local.linkedLeads.length === 1) {
+      navigateToReachOut(local.linkedLeads[0].id);
+      return;
+    }
+    setPickerMode("reach-out");
+  }
+
+  async function linkLead(
+    leadId: string,
+    role: string | null
+  ): Promise<LinkedLead> {
+    const res = await fetch(`/api/proxy/track/${app.id}/leads`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ leadId, role }),
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.detail || `HTTP ${res.status}`);
+    }
+    const json = (await res.json()) as { lead: LinkedLead };
+    return json.lead;
+  }
+
+  function mergeLinkedLead(lead: LinkedLead) {
+    setLocal((prev) =>
+      prev.linkedLeads.some((l) => l.id === lead.id)
+        ? prev
+        : { ...prev, linkedLeads: [...prev.linkedLeads, lead] }
+    );
+  }
+
+  async function onPickForLink(leadId: string, role: string | null) {
+    try {
+      const lead = await linkLead(leadId, role);
+      mergeLinkedLead(lead);
+      toast.success("Lead linked");
+      setPickerMode("off");
+      // No router.refresh(): mergeLinkedLead already updated this row's
+      // local state. Refreshing would re-run the 800-row Prisma query
+      // for one inline link change.
+    } catch (e) {
+      toast.error(`Link failed: ${(e as Error).message}`);
+    }
+  }
+
+  async function onPickForReachOut(leadId: string, role: string | null) {
+    try {
+      // If this lead isn't already linked, link it on the way through.
+      if (!local.linkedLeads.some((l) => l.id === leadId)) {
+        const lead = await linkLead(leadId, role);
+        mergeLinkedLead(lead);
+      }
+      setPickerMode("off");
+      navigateToReachOut(leadId);
+    } catch (e) {
+      toast.error(`Could not start reach-out: ${(e as Error).message}`);
+    }
+  }
+
+  async function unlinkLead(leadId: string) {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const res = await fetch(
+        `/api/proxy/track/${app.id}/leads/${leadId}`,
+        { method: "DELETE" }
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      toast.success("Lead unlinked");
+      setLocal((prev) => ({
+        ...prev,
+        linkedLeads: prev.linkedLeads.filter((l) => l.id !== leadId),
+      }));
+      // No refresh: local filter is the only visible change for this row.
+    } catch (e) {
+      toast.error(`Unlink failed: ${(e as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function patch(field: keyof App, value: string | null) {
     if (busy) return;
@@ -122,7 +244,9 @@ export default function ApplicationsRow({
           ? `${fieldLabel(field)} cleared`
           : `${fieldLabel(field)} updated`
       );
-      startTransition(() => router.refresh());
+      // No router.refresh(): the row's setLocal above already reflects
+      // the change. router.refresh() here would re-run the full Prisma
+      // query for every keystroke-blur on every cell.
     } catch (e) {
       toast.error(`${fieldLabel(field)} save failed: ${(e as Error).message}`);
     } finally {
@@ -150,7 +274,7 @@ export default function ApplicationsRow({
           ? `${fieldLabel(keys[0])} updated`
           : `Saved ${keys.length} changes`
       );
-      startTransition(() => router.refresh());
+      // No router.refresh(): setLocal already reflects every patched field.
       return true;
     } catch (e) {
       toast.error(`Save failed: ${(e as Error).message}`);
@@ -293,20 +417,92 @@ export default function ApplicationsRow({
             placeholder="e.g. 2:00pm"
           />
         </td>
+        <td className="text-right pr-4">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onMainReachOutClick();
+            }}
+            disabled={busy}
+            title={
+              local.linkedLeads.length === 0
+                ? "Pick a lead to reach out to"
+                : local.linkedLeads.length === 1
+                ? `Reach out to ${local.linkedLeads[0].name}`
+                : "Choose which lead to reach out to"
+            }
+            className="inline-flex items-center gap-1.5 text-xs font-medium text-primary/80 hover:text-primary hover:bg-primary/10 rounded-md px-2.5 py-1.5 transition-colors disabled:opacity-40"
+          >
+            <Mail className="h-3.5 w-3.5" />
+            Reach out
+            {local.linkedLeads.length > 1 && (
+              <span className="badge badge-ghost badge-xs ml-0.5">
+                {local.linkedLeads.length}
+              </span>
+            )}
+          </button>
+        </td>
       </tr>
       {open && (
         <tr className="bg-base-200/40">
-          <td colSpan={10} className="p-0 border-t border-base-300/40">
+          <td colSpan={11} className="p-0 border-t border-base-300/40">
             <DetailsPanel
               app={local}
               busy={busy}
               onSaveMany={patchMany}
               onDelete={onDelete}
+              onUnlinkLead={unlinkLead}
+              onLinkLead={() => setPickerMode("link")}
+              onReachOutToLead={navigateToReachOut}
             />
           </td>
         </tr>
       )}
+      {pickerMode !== "off" && (
+        <PickerPortal
+          mode={pickerMode}
+          alreadyLinkedIds={local.linkedLeads.map((l) => l.id)}
+          onPick={
+            pickerMode === "link" ? onPickForLink : onPickForReachOut
+          }
+          onClose={() => setPickerMode("off")}
+        />
+      )}
     </>
+  );
+}
+
+// React.memo so typing in the search box doesn't re-render the ~200 rows
+// whose `app` reference didn't change. Reference identity is stable for
+// unchanged rows because the parent maps over the same serialised array.
+const ApplicationsRow = memo(ApplicationsRowInner);
+export default ApplicationsRow;
+
+function PickerPortal({
+  mode,
+  alreadyLinkedIds,
+  onPick,
+  onClose,
+}: {
+  mode: "link" | "reach-out";
+  alreadyLinkedIds: string[];
+  onPick: (leadId: string, role: string | null) => Promise<void> | void;
+  onClose: () => void;
+}) {
+  // For "reach-out" we let the user pick from any lead (linked or not).
+  // For "link" we hide already-linked leads.
+  const exclude = mode === "link" ? alreadyLinkedIds : [];
+  const title =
+    mode === "link" ? "Link a lead to this application" : "Reach out to…";
+  return (
+    <LeadPicker
+      title={title}
+      excludeLeadIds={exclude}
+      onPick={onPick}
+      onClose={onClose}
+      showRoleField={mode === "link"}
+    />
   );
 }
 
@@ -320,6 +516,7 @@ const DETAIL_FIELDS = [
   "referral",
   "referralLinkedin",
   "notes",
+  "jobDescription",
 ] as const;
 type DetailField = (typeof DETAIL_FIELDS)[number];
 
@@ -334,6 +531,7 @@ function appToDraft(app: App): Draft {
     referral: app.referral ?? "",
     referralLinkedin: app.referralLinkedin ?? "",
     notes: app.notes ?? "",
+    jobDescription: app.jobDescription ?? "",
   };
 }
 
@@ -353,11 +551,17 @@ function DetailsPanel({
   busy,
   onSaveMany,
   onDelete,
+  onUnlinkLead,
+  onLinkLead,
+  onReachOutToLead,
 }: {
   app: App;
   busy: boolean;
   onSaveMany: (updates: Partial<App>) => Promise<boolean>;
   onDelete: () => void;
+  onUnlinkLead: (leadId: string) => void;
+  onLinkLead: () => void;
+  onReachOutToLead: (leadId: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -428,6 +632,20 @@ function DetailsPanel({
 
         {/* Sections */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-6">
+          <Section label="Linked leads" full>
+            <LinkedLeadsList
+              leads={app.linkedLeads}
+              busy={busy}
+              onLinkLead={onLinkLead}
+              onUnlinkLead={onUnlinkLead}
+              onReachOutToLead={onReachOutToLead}
+            />
+          </Section>
+
+          <Section label="Outreach history" full>
+            <OutreachHistoryList reachOuts={app.reachOuts} />
+          </Section>
+
           <Section label="Career page" full>
             {editing ? (
               <UrlInput
@@ -518,6 +736,28 @@ function DetailsPanel({
             ) : (
               <ReadNotes value={draft.notes} />
             )}
+          </Section>
+
+          <Section label="Job description" full>
+            {editing ? (
+              <textarea
+                value={draft.jobDescription}
+                onChange={(e) => setField("jobDescription", e.target.value)}
+                rows={8}
+                placeholder="Paste the job description"
+                className="textarea textarea-bordered textarea-sm w-full font-mono text-xs"
+              />
+            ) : (
+              <ReadJobDescription value={draft.jobDescription} />
+            )}
+          </Section>
+
+          <Section label="Ask a question" full>
+            <QuestionSection
+              company={app.companyName}
+              jobDescription={draft.jobDescription}
+              resumeId={app.resumeId}
+            />
           </Section>
         </div>
 
@@ -641,6 +881,287 @@ function ReadNotes({ value }: { value: string }) {
     <p className="text-sm whitespace-pre-wrap leading-relaxed text-base-content">
       {value}
     </p>
+  );
+}
+
+function LinkedLeadsList({
+  leads,
+  busy,
+  onLinkLead,
+  onUnlinkLead,
+  onReachOutToLead,
+}: {
+  leads: LinkedLead[];
+  busy: boolean;
+  onLinkLead: () => void;
+  onUnlinkLead: (leadId: string) => void;
+  onReachOutToLead: (leadId: string) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      {leads.length === 0 ? (
+        <p className="text-sm opacity-30 italic">
+          No leads linked yet.
+        </p>
+      ) : (
+        <ul className="flex flex-wrap gap-2">
+          {leads.map((l) => (
+            <li
+              key={l.id}
+              className="inline-flex items-center gap-2 rounded-full bg-base-100 border border-base-300/60 pl-3 pr-1 py-1"
+            >
+              <span className="text-sm font-medium">{l.name}</span>
+              {l.linkRole && (
+                <span className="badge badge-ghost badge-xs">
+                  {l.linkRole}
+                </span>
+              )}
+              {l.email && (
+                <span className="text-xs opacity-50 truncate max-w-[180px]">
+                  {l.email}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => onReachOutToLead(l.id)}
+                className="inline-flex items-center justify-center h-6 w-6 rounded-full text-primary/80 hover:text-primary hover:bg-primary/10 transition-colors"
+                title={`Reach out to ${l.name}`}
+              >
+                <Send className="h-3 w-3" />
+              </button>
+              <button
+                type="button"
+                onClick={() => onUnlinkLead(l.id)}
+                disabled={busy}
+                className="inline-flex items-center justify-center h-6 w-6 rounded-full opacity-50 hover:opacity-100 hover:bg-error/10 hover:text-error transition-colors disabled:opacity-30"
+                title="Unlink"
+              >
+                <XIcon className="h-3 w-3" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <button
+        type="button"
+        onClick={onLinkLead}
+        className="inline-flex items-center gap-1.5 text-xs font-medium text-primary/80 hover:text-primary hover:bg-primary/10 rounded-md px-2.5 py-1.5 transition-colors"
+      >
+        <Plus className="h-3.5 w-3.5" />
+        Link a lead
+      </button>
+    </div>
+  );
+}
+
+const REACH_OUT_STATUS_BADGE: Record<string, string> = {
+  draft: "badge-ghost",
+  sent: "badge-success",
+  failed: "badge-error",
+};
+
+function OutreachHistoryList({ reachOuts }: { reachOuts: AppReachOut[] }) {
+  if (reachOuts.length === 0) {
+    return (
+      <p className="text-sm opacity-30 italic">
+        No reach-outs recorded for this application yet.
+      </p>
+    );
+  }
+  return (
+    <ul className="space-y-2">
+      {reachOuts.map((r) => {
+        const variant =
+          REACH_OUT_STATUS_BADGE[r.status] ?? "badge-ghost";
+        const dateIso = r.sentAt ?? r.createdAt;
+        const date = new Date(dateIso);
+        const dateStr = isNaN(date.getTime())
+          ? ""
+          : date.toLocaleDateString();
+        return (
+          <li
+            key={r.id}
+            className="flex items-center gap-3 rounded-lg bg-base-100 border border-base-300/40 px-3 py-2"
+          >
+            <span className={`badge ${variant} badge-xs shrink-0`}>
+              {r.status}
+            </span>
+            <a
+              href={`/reach-out?edit=${encodeURIComponent(r.id)}`}
+              className="link link-hover text-sm flex-1 min-w-0 truncate"
+              title={r.subject}
+            >
+              {r.subject || <span className="opacity-50 italic">(no subject)</span>}
+            </a>
+            <span className="text-xs opacity-50 shrink-0">
+              {r.recipientName}
+            </span>
+            {dateStr && (
+              <span className="text-xs opacity-40 shrink-0 tabular-nums">
+                {dateStr}
+              </span>
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+function ReadJobDescription({ value }: { value: string }) {
+  const [expanded, setExpanded] = useState(false);
+  if (!value)
+    return (
+      <span className="text-sm opacity-30 italic">
+        No job description saved
+      </span>
+    );
+
+  const COLLAPSED_LIMIT = 600;
+  const isLong = value.length > COLLAPSED_LIMIT;
+  const display = expanded || !isLong ? value : value.slice(0, COLLAPSED_LIMIT);
+
+  return (
+    <div className="space-y-2">
+      <p className="text-sm whitespace-pre-wrap leading-relaxed text-base-content/90">
+        {display}
+        {isLong && !expanded && <span className="opacity-50">…</span>}
+      </p>
+      {isLong && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          className="text-xs font-medium text-primary/80 hover:text-primary transition-colors"
+        >
+          {expanded ? "Show less" : `Show full (${value.length} chars)`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ─── Ask-a-question (application form answers) ──────────────────────────────
+
+function QuestionSection({
+  company,
+  jobDescription,
+  resumeId,
+}: {
+  company: string;
+  jobDescription: string;
+  resumeId: string | null;
+}) {
+  const [question, setQuestion] = useState("");
+  const [answer, setAnswer] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const hasJd = jobDescription.trim().length > 0;
+  const canAsk = hasJd && question.trim().length > 0 && !loading;
+
+  async function ask() {
+    if (!canAsk) return;
+    setLoading(true);
+    setAnswer("");
+    setCopied(false);
+    try {
+      const res = await fetch(`/api/proxy/answer-question`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          company,
+          job_description: jobDescription,
+          question: question.trim(),
+          resume_id: resumeId,
+        }),
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${res.status}`);
+      }
+      const json = (await res.json()) as { answer?: string };
+      setAnswer(json.answer ?? "");
+    } catch (e) {
+      toast.error(`Couldn't answer: ${(e as Error).message}`);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function copyAnswer() {
+    try {
+      await navigator.clipboard.writeText(answer);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      toast.error("Copy failed");
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      {!hasJd && (
+        <p className="text-xs opacity-50 italic">
+          Add a job description above to answer application questions in context.
+        </p>
+      )}
+      <textarea
+        value={question}
+        onChange={(e) => setQuestion(e.target.value)}
+        onKeyDown={(e) => {
+          // Cmd/Ctrl+Enter submits, matching the rest of the app's textareas.
+          if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
+            e.preventDefault();
+            ask();
+          }
+        }}
+        rows={2}
+        placeholder='e.g. "Why do you want to work here?" or "Describe a time you handled conflicting priorities."'
+        disabled={!hasJd}
+        className="textarea textarea-bordered textarea-sm w-full"
+      />
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={ask}
+          disabled={!canAsk}
+          className="inline-flex items-center gap-1.5 text-xs font-semibold text-primary-content bg-primary hover:bg-primary/90 rounded-md px-3 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <Sparkles className="h-3.5 w-3.5" />
+          {loading ? "Answering…" : "Answer"}
+        </button>
+        <span className="text-[11px] opacity-40">⌘/Ctrl + Enter</span>
+      </div>
+
+      {answer && (
+        <div className="rounded-lg bg-base-100 border border-base-300/60 p-3 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] uppercase tracking-wider opacity-50 font-medium">
+              Answer
+            </span>
+            <button
+              type="button"
+              onClick={copyAnswer}
+              className="inline-flex items-center gap-1 text-xs opacity-60 hover:opacity-100 hover:text-primary transition-colors"
+              title="Copy answer"
+            >
+              {copied ? (
+                <>
+                  <Check className="h-3 w-3" /> Copied
+                </>
+              ) : (
+                <>
+                  <Copy className="h-3 w-3" /> Copy
+                </>
+              )}
+            </button>
+          </div>
+          <p className="text-sm whitespace-pre-wrap leading-relaxed text-base-content">
+            {answer}
+          </p>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -891,22 +1412,38 @@ function RoleCell({
 
   if (url) {
     return (
-      <a
-        href={url}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="link link-primary text-sm"
-        title="Click to open · double-click to edit"
-        onClick={(e) => e.stopPropagation()}
-        onDoubleClick={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          setV(role);
-          setEditing(true);
-        }}
-      >
-        {role || "View posting"}
-      </a>
+      <span className="group inline-flex items-center gap-1 min-w-0">
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="link link-primary text-sm truncate"
+          title="Click to open posting · double-click to edit"
+          onClick={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setV(role);
+            setEditing(true);
+          }}
+        >
+          {role || "View posting"}
+        </a>
+        <button
+          type="button"
+          title="Edit role"
+          aria-label="Edit role"
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setV(role);
+            setEditing(true);
+          }}
+          className="shrink-0 opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:text-primary transition-opacity p-0.5 rounded"
+        >
+          <Pencil className="h-3 w-3" />
+        </button>
+      </span>
     );
   }
 
