@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Cover Letter Generator</title>
+    <title>Apply Tools</title>
     <link rel="stylesheet" href="popup.css" />
   </head>
   <body>
@@ -21,6 +21,48 @@
       </select>
     </div>
 
+    <!-- ============ Shared JD context ============ -->
+    <section class="jd-context" id="jdContext">
+      <div class="jd-context-row">
+        <input
+          type="text"
+          id="shared-company"
+          class="jd-company"
+          placeholder="Company"
+          maxlength="200"
+          autocomplete="off"
+        />
+        <button
+          type="button"
+          id="autoDetectBtn"
+          class="btn-mini"
+          title="Detect company + JD from the active tab"
+        >
+          Auto-detect
+        </button>
+      </div>
+      <textarea
+        id="shared-jd"
+        class="jd-textarea"
+        placeholder="Paste the job description here..."
+        rows="6"
+        maxlength="40000"
+      ></textarea>
+      <div class="jd-context-meta">
+        <span
+          id="autoDetectStatus"
+          class="autodetect-status"
+          role="status"
+          aria-live="polite"
+        ></span>
+        <div id="sharedScore" class="score-pill hidden" title="Fit score">
+          <span class="score-pill-num">-</span>
+          <span class="score-pill-denom">/10</span>
+          <span class="score-pill-verdict"></span>
+        </div>
+      </div>
+    </section>
+
     <nav class="tabs" role="tablist">
       <button
         type="button"
@@ -29,7 +71,7 @@
         data-tab="cover"
         aria-selected="true"
       >
-        Cover Letter
+        Cover
       </button>
       <button type="button" class="tab" role="tab" data-tab="email" aria-selected="false">
         Email
@@ -40,74 +82,49 @@
       <button type="button" class="tab" role="tab" data-tab="score" aria-selected="false">
         Score
       </button>
+      <button type="button" class="tab" role="tab" data-tab="question" aria-selected="false">
+        Question
+      </button>
+      <button type="button" class="tab" role="tab" data-tab="track" aria-selected="false">
+        Track
+      </button>
+      <button type="button" class="tab" role="tab" data-tab="lead" aria-selected="false">
+        Lead
+      </button>
     </nav>
 
     <!-- ============ Cover Letter tab ============ -->
     <section class="panel active" data-panel="cover">
-      <form id="coverForm" autocomplete="off">
-        <label for="cover-company">Company</label>
-        <input
-          type="text"
-          id="cover-company"
-          placeholder="Anthropic"
-          required
-          maxlength="200"
-        />
-
-        <label for="cover-jd">Job description</label>
-        <textarea
-          id="cover-jd"
-          placeholder="Paste the full JD here..."
-          required
-          rows="9"
-          maxlength="20000"
-        ></textarea>
-
-        <button type="submit" id="coverSubmit">Generate PDF</button>
-      </form>
-      <div id="coverScore" class="score-display compact hidden">
-        <div class="score-number-wrap">
-          <span class="score-number">-</span><span class="score-denom">/10</span>
-        </div>
-        <div class="score-verdict"></div>
+      <div class="panel-actions">
+        <button type="button" id="coverSubmit" class="btn-primary">Generate PDF</button>
+        <button type="button" id="coverTextBtn" class="btn-secondary">Generate text</button>
       </div>
       <div id="coverStatus" class="status" role="status" aria-live="polite"></div>
+
+      <div id="coverTextResult" class="result hidden">
+        <div class="result-row">
+          <label for="cover-body-out">Cover letter</label>
+          <button type="button" class="copy-btn" data-copy="cover-body-out">Copy</button>
+        </div>
+        <textarea id="cover-body-out" rows="14"></textarea>
+      </div>
     </section>
 
     <!-- ============ Email tab ============ -->
     <section class="panel" data-panel="email">
-      <form id="emailForm" autocomplete="off">
-        <label for="email-company">Company</label>
-        <input
-          type="text"
-          id="email-company"
-          placeholder="Anthropic"
-          required
-          maxlength="200"
-        />
+      <label for="email-intent">
+        What is this email for? <span class="hint">(optional)</span>
+      </label>
+      <textarea
+        id="email-intent"
+        placeholder="e.g. asking the recruiter to consider me for this role"
+        rows="2"
+        maxlength="2000"
+      ></textarea>
 
-        <label for="email-jd">Job description</label>
-        <textarea
-          id="email-jd"
-          placeholder="Paste the full JD here..."
-          required
-          rows="7"
-          maxlength="20000"
-        ></textarea>
-
-        <label for="email-intent">
-          What is this email for? <span class="hint">(optional)</span>
-        </label>
-        <textarea
-          id="email-intent"
-          placeholder="e.g. asking the recruiter to consider me for this role"
-          rows="2"
-          maxlength="2000"
-        ></textarea>
-
-        <button type="submit" id="emailSubmit">Generate email</button>
-      </form>
-
+      <div class="panel-actions">
+        <button type="button" id="emailSubmit" class="btn-primary">Generate email</button>
+      </div>
       <div id="emailStatus" class="status" role="status" aria-live="polite"></div>
 
       <div id="emailResult" class="result hidden">
@@ -125,40 +142,42 @@
       </div>
     </section>
 
-    <!-- ============ Outreach tab ============ -->
+    <!-- ============ Outreach tab (uses its own profile, not shared JD) ============ -->
     <section class="panel" data-panel="outreach">
-      <form id="outreachForm" autocomplete="off">
-        <label for="outreach-channel">Channel</label>
-        <select id="outreach-channel" required>
-          <option value="linkedin_invitation">LinkedIn invitation (~280 chars)</option>
-          <option value="linkedin_message">LinkedIn message / InMail</option>
-          <option value="email">Email</option>
-        </select>
+      <div class="panel-note">
+        Outreach uses the target person's profile, not the JD above.
+      </div>
 
-        <label for="outreach-profile">
-          Their LinkedIn profile <span class="hint">(paste text)</span>
-        </label>
-        <textarea
-          id="outreach-profile"
-          placeholder="Paste their profile: name, headline, current role, recent experience, posts they've written..."
-          required
-          rows="7"
-          maxlength="30000"
-        ></textarea>
+      <label for="outreach-channel">Channel</label>
+      <select id="outreach-channel" required>
+        <option value="linkedin_invitation">LinkedIn invitation (~280 chars)</option>
+        <option value="linkedin_message">LinkedIn message / InMail</option>
+        <option value="email">Email</option>
+      </select>
 
-        <label for="outreach-context">
-          What is this about? <span class="hint">(optional)</span>
-        </label>
-        <textarea
-          id="outreach-context"
-          placeholder="e.g. asking for a referral at their company / interested in their work on X / want a 15-min chat about Y"
-          rows="2"
-          maxlength="2000"
-        ></textarea>
+      <label for="outreach-profile">
+        Their LinkedIn profile <span class="hint">(paste text)</span>
+      </label>
+      <textarea
+        id="outreach-profile"
+        placeholder="Paste their profile: name, headline, current role, recent experience, posts they've written..."
+        rows="6"
+        maxlength="30000"
+      ></textarea>
 
-        <button type="submit" id="outreachSubmit">Generate message</button>
-      </form>
+      <label for="outreach-context">
+        What is this about? <span class="hint">(optional)</span>
+      </label>
+      <textarea
+        id="outreach-context"
+        placeholder="e.g. asking for a referral / interested in their work on X"
+        rows="2"
+        maxlength="2000"
+      ></textarea>
 
+      <div class="panel-actions">
+        <button type="button" id="outreachSubmit" class="btn-primary">Generate message</button>
+      </div>
       <div id="outreachStatus" class="status" role="status" aria-live="polite"></div>
 
       <div id="outreachResult" class="result hidden">
@@ -179,32 +198,201 @@
 
     <!-- ============ Score tab ============ -->
     <section class="panel" data-panel="score">
-      <form id="scoreForm" autocomplete="off">
-        <label for="score-company">
-          Company <span class="hint">(optional)</span>
-        </label>
-        <input
-          type="text"
-          id="score-company"
-          placeholder="Anthropic"
-          maxlength="200"
-        />
-
-        <label for="score-jd">Job description</label>
-        <textarea
-          id="score-jd"
-          placeholder="Paste the JD - score appears in ~3-5s"
-          required
-          rows="10"
-          maxlength="20000"
-        ></textarea>
-
-        <button type="submit" id="scoreSubmit">Score against all resumes</button>
-      </form>
-
+      <div class="panel-note">
+        Scores all resumes against the JD above. Click a row to make that resume active for the other tabs.
+      </div>
+      <div class="panel-actions">
+        <button type="button" id="scoreSubmit" class="btn-primary">Score against all resumes</button>
+      </div>
       <div id="scoreStatus" class="status" role="status" aria-live="polite"></div>
-
       <div id="scoreList" class="score-list hidden"></div>
+    </section>
+
+    <!-- ============ Question tab ============ -->
+    <section class="panel" data-panel="question">
+      <label for="question-text">Application question</label>
+      <textarea
+        id="question-text"
+        placeholder="Paste the application question here..."
+        rows="4"
+        maxlength="4000"
+      ></textarea>
+
+      <div class="panel-actions">
+        <button type="button" id="questionSubmit" class="btn-primary">Generate answer</button>
+      </div>
+      <div id="questionStatus" class="status" role="status" aria-live="polite"></div>
+
+      <div id="questionResult" class="result hidden">
+        <div class="result-row">
+          <label for="question-answer-out">Answer</label>
+          <button type="button" class="copy-btn" data-copy="question-answer-out">Copy</button>
+        </div>
+        <textarea id="question-answer-out" rows="12"></textarea>
+      </div>
+    </section>
+
+    <!-- ============ Track tab ============ -->
+    <section class="panel" data-panel="track">
+      <label for="track-role">Job role</label>
+      <input
+        type="text"
+        id="track-role"
+        placeholder="Senior ML Engineer"
+        maxlength="200"
+      />
+
+      <label for="track-location">Location</label>
+      <input
+        type="text"
+        id="track-location"
+        placeholder="San Francisco, CA / Remote"
+        maxlength="200"
+      />
+
+      <label for="track-job-url">Job URL</label>
+      <input
+        type="url"
+        id="track-job-url"
+        placeholder="Auto-fills from page URL on detect"
+        maxlength="2000"
+      />
+
+      <div class="track-row">
+        <div class="track-cell">
+          <label for="track-status">Status</label>
+          <select id="track-status">
+            <option value="Applied" selected>Applied</option>
+            <option value="In-Progress">In-Progress</option>
+            <option value="Offer">Offer</option>
+            <option value="Rejected">Rejected</option>
+            <option value="Withdrawn">Withdrawn</option>
+            <option value="Ghosted">Ghosted</option>
+          </select>
+        </div>
+        <div class="track-cell">
+          <label for="track-applied-date">Applied date</label>
+          <input type="date" id="track-applied-date" />
+        </div>
+      </div>
+
+      <label for="track-interview">Interview status</label>
+      <select id="track-interview">
+        <option value="" selected>(none)</option>
+        <option value="Assessment">Assessment</option>
+        <option value="Interviewing">Interviewing</option>
+        <option value="Offer">Offer</option>
+        <option value="Rejected">Rejected</option>
+      </select>
+
+      <label for="track-notes">Notes</label>
+      <textarea
+        id="track-notes"
+        placeholder="Anything to remember about this one..."
+        rows="3"
+        maxlength="10000"
+      ></textarea>
+
+      <div class="panel-actions">
+        <button type="button" id="trackSubmit" class="btn-primary">Save to tracker</button>
+      </div>
+      <div id="trackStatus" class="status" role="status" aria-live="polite"></div>
+    </section>
+
+    <!-- ============ Lead tab ============ -->
+    <section class="panel" data-panel="lead">
+      <div class="panel-note">
+        Capture a person to reach out to. Auto-detect fills the form from a
+        LinkedIn profile page.
+      </div>
+
+      <div class="panel-actions">
+        <button
+          type="button"
+          id="leadAutoDetectBtn"
+          class="btn-secondary"
+          title="Detect lead info from the active tab (LinkedIn profile)"
+        >
+          Auto-detect from LinkedIn
+        </button>
+      </div>
+      <div
+        id="leadAutoDetectStatus"
+        class="status"
+        role="status"
+        aria-live="polite"
+      ></div>
+
+      <label for="lead-name">
+        Name <span class="hint">(required)</span>
+      </label>
+      <input
+        type="text"
+        id="lead-name"
+        maxlength="200"
+        autocomplete="off"
+      />
+
+      <label for="lead-email">Email <span class="hint">(optional)</span></label>
+      <input
+        type="email"
+        id="lead-email"
+        maxlength="200"
+        autocomplete="off"
+      />
+
+      <label for="lead-linkedin-url">
+        LinkedIn URL <span class="hint">(filled by Auto-detect)</span>
+      </label>
+      <input
+        type="url"
+        id="lead-linkedin-url"
+        maxlength="2000"
+        autocomplete="off"
+      />
+
+      <div class="lead-row">
+        <div class="lead-cell">
+          <label for="lead-role">Role / title</label>
+          <input
+            type="text"
+            id="lead-role"
+            maxlength="200"
+            autocomplete="off"
+          />
+        </div>
+        <div class="lead-cell">
+          <label for="lead-company">Current company</label>
+          <input
+            type="text"
+            id="lead-company"
+            maxlength="200"
+            autocomplete="off"
+          />
+        </div>
+      </div>
+
+      <label for="lead-profile">
+        Profile text <span class="hint">(About + experience, optional)</span>
+      </label>
+      <textarea
+        id="lead-profile"
+        class="lead-scroll-textarea"
+        rows="5"
+        maxlength="30000"
+      ></textarea>
+
+      <label for="lead-notes">Notes <span class="hint">(optional)</span></label>
+      <textarea
+        id="lead-notes"
+        rows="3"
+        maxlength="10000"
+      ></textarea>
+
+      <div class="panel-actions">
+        <button type="button" id="leadSubmit" class="btn-primary">Save lead</button>
+      </div>
+      <div id="leadStatus" class="status" role="status" aria-live="polite"></div>
     </section>
 
     <script src="popup.js"></script>

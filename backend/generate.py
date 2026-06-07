@@ -13,6 +13,7 @@ tool, not a written artifact.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -21,11 +22,16 @@ from typing import Any
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
+from groq import Groq
+from openai import OpenAI
 
+from db import fetch_resume, insert_application, list_resume_rows, save_pdf
 from latex_utils import compile_latex, escape_latex
 
 
 load_dotenv()
+
+logger = logging.getLogger("coverletter")
 
 BACKEND_DIR = Path(__file__).resolve().parent
 TEMPLATE_PATH = BACKEND_DIR / "template.tex"
@@ -34,8 +40,56 @@ LEGACY_RESUME_PATH = BACKEND_DIR / "resume.txt"
 RESUME_ID_RE = re.compile(r"^[a-z0-9_-]+$")
 DEFAULT_RESUME_ID = "default"
 
+# ---------------------------------------------------------------------------
+# Provider routing.  Set AI_PROVIDER to route ALL generation calls.
+# SCORE_PROVIDER overrides just the score path (defaults to AI_PROVIDER).
+# ---------------------------------------------------------------------------
+AI_PROVIDER = os.environ.get("AI_PROVIDER", "anthropic").lower()
+SCORE_PROVIDER = os.environ.get("SCORE_PROVIDER", AI_PROVIDER).lower()
+# EXTRACT_PROVIDER overrides just the JD auto-detect path. Defaults to Groq
+# (fast/consistent Llama) regardless of where generation runs; the extract path
+# then falls back NVIDIA -> Bedrock -> Anthropic (see EXTRACT_FALLBACK_CHAIN).
+# Override via env if you want auto-detect on a different primary.
+EXTRACT_PROVIDER = os.environ.get("EXTRACT_PROVIDER", "groq").lower()
+
+# Hard ceiling on a single LLM call. Without this, a slow upstream stalls
+# the popup forever (no client-side timeout in popup.js for /score, /extract-jd).
+LLM_TIMEOUT_SECS = float(os.environ.get("LLM_TIMEOUT_SECS", "45"))
+
+# Anthropic (Claude)
 DEFAULT_MODEL = os.environ.get("MODEL", "claude-opus-4-5")
 MAX_TOKENS = 2048
+
+# Groq
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MAX_TOKENS = 4096
+SCORE_GROQ_MODEL = os.environ.get("SCORE_GROQ_MODEL", "llama-3.3-70b-versatile")
+
+# NVIDIA NIM (OpenAI-compatible)
+NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
+NIM_MODEL = os.environ.get("NIM_MODEL", "meta/llama-3.3-70b-instruct")
+NIM_MAX_TOKENS = 4096
+
+# AWS Bedrock (boto3, Converse API). Auth via the standard AWS credential
+# chain (env vars / ~/.aws/credentials / IAM role); region from BEDROCK_REGION
+# or AWS_REGION (default us-east-1). Generation/score/answer use Claude Sonnet;
+# the JD extractor uses Llama 3.3 to match the groq/nvidia extract path.
+BEDROCK_REGION = os.environ.get("BEDROCK_REGION") or os.environ.get(
+    "AWS_REGION", "us-east-1"
+)
+BEDROCK_MODEL = os.environ.get(
+    # Claude Sonnet 4.5 on Bedrock requires a region-prefixed inference profile
+    # (the bare anthropic.claude-sonnet-4-5-... id raises ValidationException).
+    "BEDROCK_MODEL", "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+)
+BEDROCK_EXTRACT_MODEL = os.environ.get(
+    "BEDROCK_EXTRACT_MODEL", "meta.llama3-3-70b-instruct-v1:0"
+)
+BEDROCK_MAX_TOKENS = 4096
+
+# Extract JD (kept separate for backward compat; honours AI_PROVIDER)
+EXTRACT_MODEL = os.environ.get("EXTRACT_MODEL", "llama-3.3-70b-versatile")
+EXTRACT_MAX_TOKENS = 4096
 
 
 # -----------------------------------------------------------------------------
@@ -115,7 +169,8 @@ Output schema (all fields required):
 
 - Plain text with blank lines between paragraphs. No markdown.
 - The ONLY LaTeX commands you may emit are: \\emph{{...}}, \\textbf{{...}}, and \\\\ (forced line break, used sparingly). Use them rarely - the Faire letter above uses none.
-- Do NOT emit: $, &, %, #, _, {{, }}, ~, ^, or backslashes outside the whitelist. If you must reference a literal percent or ampersand, rephrase ("13 percent", "and").
+- Do NOT emit: $, &, #, _, {{, }}, ~, ^, or backslashes outside the whitelist.
+- Percent signs ARE allowed: write "43%" with the symbol, not "43 percent". (The renderer escapes it safely.) Ampersands and dollar signs are still banned - spell them out ("and", "USD" or the written amount). A bare number where a percentage was meant is a bug; always keep the % on the number.
 - Do NOT include the salutation ("Dear ...") or sign-off ("Best Regards,") - those are in the template.
 """
 
@@ -154,27 +209,40 @@ OUTREACH_INVITATION_SYSTEM = f"""You are ghostwriting a LinkedIn connection requ
 
 You will receive: his resume (ground truth about him), the target person's LinkedIn profile (pasted text), and an optional context note describing the angle ("looking for referral at their company", "wanted to chat about their work in X", etc.).
 
-LinkedIn caps these notes at 300 characters. Target 240-280 characters to leave a buffer.
+LinkedIn caps these notes at 300 characters. Target 260-290 characters — use the budget.
 
 Return STRICT JSON only - no markdown fences, no commentary before or after.
 
 Output schema (all fields required):
 {{
-  "message": "<the connection request note, plain text, NO greeting like 'Hi X,' and NO signoff. Just the note itself. 240-280 characters.>"
+  "message": "<the connection request note, plain text. Includes greeting, brief intro of Amogh, and a soft ask. 260-290 characters.>"
 }}
 
 {VOICE_RULES}
 
 # LinkedIn invitation rules
 
-- HARD MAXIMUM: 290 characters. If you're at 300, you've failed.
-- Target 240-280 characters.
-- No greeting ("Hi X,") and no signoff. The recipient sees this inline; greetings waste characters.
-- Anchor on ONE specific thing from their profile (a project, a company, a post topic). Generic flattery is wasted.
-- One sentence connecting their work to his (a relevant experience or skill from the resume).
-- One short closing sentence with the ask, soft. e.g. "Would love to connect." / "Open to chatting if you have a moment."
-- Use first-name only if their first name appears in the profile.
-- Use contractions. No buzzwords.
+## Structure (in this order)
+
+1. **Greeting** — "Hi {{first name}}," using their actual first name from the profile. If the profile has no first name, use "Hi,".
+2. **Who Amogh is** — one short clause introducing him: role + program. e.g. "I'm a Data Scientist finishing my MS at GW" or "DS student at GW wrapping up my MS in May".
+3. **Specific anchor** — name ONE concrete thing from their profile: a current role, a company, a project, a domain they work in. Not vague adjectives.
+4. **Soft ask** — short, specific. "Would love to connect to hear how you got into <X>." / "Open to chatting about <Y> if you have a moment." Use the context note to pick the angle when one is given.
+
+## Hard rules
+
+- HARD MAXIMUM: 295 characters. If you're at or above 300, you've failed.
+- Target 260-290 characters — don't leave 50+ characters on the table; use them to make the message specific.
+- DO include the greeting. DO NOT include a signoff like "Thanks, Amogh" — connection requests show the sender's name automatically and a signoff wastes the budget.
+- Lead with THEIR work, not Amogh's accomplishments. The intro of Amogh is a one-clause identifier ("I'm a DS finishing my MS at GW"), not a brag. No metrics, no "reduced X by Y%". Save numbers for follow-up messages.
+- Banned filler words: "interesting", "impressive", "complex", "fascinating", "amazing", "great work". They add no information and burn characters.
+- Anchor must be SPECIFIC: name the company, the team, the product, the topic. "your work in revenue management at Holland America Line" is acceptable; "your work in revenue management" alone is weaker; "your interesting work" is forbidden.
+- One thought per sentence. Three sentences max after the greeting.
+- Use contractions. No buzzwords. No em-dashes that look ChatGPT-generated.
+
+## Example shape (for structure only — do not copy phrasing)
+
+"Hi Abbie, I'm a Data Scientist finishing my MS at GW. Saw you're leading revenue management at Holland America Line — I've been working on forecasting and pricing problems and would love to hear how you got into RM."
 """
 
 
@@ -226,6 +294,34 @@ Output schema (all fields required):
 - Soft, specific ask. No "let me know if you have any questions" filler.
 - Sign off with "Thanks,\\nAmogh" or "Best,\\nAmogh". Casual.
 - Plain text only, no HTML or markdown. Use real newlines between paragraphs.
+"""
+
+
+ANSWER_QUESTION_SYSTEM = f"""You are answering an application question in the candidate's own voice. The candidate is Amogh Ramagiri, a Data Scientist finishing his MS at GW.
+
+You will receive: his resume (ground truth about him), the company name, the job description, and the application question to answer.
+
+Return STRICT JSON only - no markdown fences, no commentary before or after.
+
+Output schema (all fields required):
+{{
+  "answer": "<plain-text answer to the question. First-person. No bullet lists, no markdown, no headings - the form renders plain text.>"
+}}
+
+{VOICE_RULES}
+
+# Answer rules
+
+- One short paragraph. Hard target: 60-120 words. Never more than 150.
+- Yes/no or short-factual questions ("authorized to work?", "willing to relocate?"): one sentence.
+- "in one sentence" / "briefly" / "in a few words": one or two sentences, <40 words.
+- Even for "describe a time" / "tell us about" / "walk us through" questions: stay one paragraph. One line of situation, one or two lines of what you did, one line of outcome with a real metric if the resume has one. Don't expand into a multi-paragraph story.
+- First-person. Use contractions. Concrete tools, projects, and numbers from the resume when relevant.
+- Don't restate the question in the answer. Don't open with "Great question" or any preamble.
+- Don't pad to hit a word count. If the honest answer is shorter, keep it shorter.
+- Never invent experience, employers, projects, metrics, or tools not in the resume. If the question asks about something not in the resume, pivot honestly to the closest real experience and say what you have, not what you don't.
+- One paragraph only. No line breaks, no blank lines, no bullet lists, no numbered lists, no markdown, no headings. Application forms strip formatting and a wall of prose reads cleaner than a fake-structured one.
+- For "why this company" / "why this role" questions: anchor on something specific about the company or the role from the JD, not generic praise. State an opinion with a reason.
 """
 
 
@@ -288,6 +384,30 @@ Output schema (all fields required):
 """
 
 
+EXTRACT_JD_SYSTEM = """You extract structured job-posting data from raw web page text scraped from a browser tab.
+
+Return STRICT JSON only - no markdown fences, no commentary before or after.
+
+Output schema (all fields required, but job_role / location may be empty strings if not on the page):
+{
+  "company": "<the hiring company's name as a human would say it; no legal suffix unless that's how they brand themselves (e.g. 'OpenAI', 'Stripe', not 'OpenAI, Inc.'). Empty string if you can't tell.>",
+  "job_role": "<the role/job title as displayed on the page (e.g. 'Senior ML Engineer', 'Data Science Intern'). No company suffix. Empty string if not visible.>",
+  "location": "<the job location as displayed (e.g. 'San Francisco, CA', 'Remote', 'New York, NY (Hybrid)'). Prefer the most specific value the page shows. Empty string if not visible.>",
+  "job_description": "<the cleaned job description as plain text. Start with a single line containing the role title if you can find one. Then include the about/responsibilities/requirements/qualifications sections. Preserve paragraph breaks with blank lines.>"
+}
+
+# Extraction rules
+
+- Strip site chrome: navigation menus, search bars, footer links, cookie/consent banners, login or signup prompts, "apply now" / "save job" buttons, share buttons, similar/recommended jobs lists, breadcrumbs, copyright notices.
+- Strip per-applicant noise: "you have applied", "X applicants", time-since-posted, view counts, salary calculators, "easy apply" prompts.
+- Keep the substantive content: role summary, what the team does, responsibilities, qualifications (required and preferred), tech stack, compensation if listed, location/remote policy if listed.
+- Do NOT invent content. If a section isn't on the page, leave it out (empty string for job_role/location).
+- Do NOT translate. Keep the original language of the posting.
+- If the page is clearly not a single job posting (job board listing page, login wall, 404, generic careers landing page), return {"company": "", "job_role": "", "location": "", "job_description": ""}.
+- The page text may contain duplicate copies of the description (mobile + desktop renders). Pick one clean copy; don't concatenate duplicates.
+"""
+
+
 # -----------------------------------------------------------------------------
 # Generic Claude call + JSON parsing helpers.
 # -----------------------------------------------------------------------------
@@ -341,6 +461,25 @@ def _require_api_key() -> str:
     return api_key
 
 
+def _require_groq_key() -> str:
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "GROQ_API_KEY not set. Add it to backend/.env to use auto-detect."
+        )
+    return api_key
+
+
+def _require_nim_key() -> str:
+    api_key = os.environ.get("NVIDIA_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "NVIDIA_API_KEY not set. Add it to backend/.env "
+            "(get one at https://build.nvidia.com)."
+        )
+    return api_key
+
+
 def _strip_label_header(text: str) -> str:
     """Drop a leading `# Label: ...` line if present."""
     lines = text.splitlines()
@@ -367,54 +506,26 @@ def _label_for(path: Path) -> str:
 
 
 def _read_resume(resume_id: str | None = None) -> str:
-    """Read a resume by id, returning its content (label header stripped).
+    """Read a resume by id from the SQLite DB, returning its content.
 
-    Defaults to "default" when no id is supplied. Validates that the id is a
-    safe slug. Falls back to the legacy resume.txt for back-compat. If no id
-    was specified and there's no `default.txt`, falls back to the first
-    available resume file - makes CLI / curl callers work without forcing the
-    user to maintain a file literally named `default.txt`.
+    When no id is given, returns the first active resume. Validates the id is a
+    safe slug. Raises FileNotFoundError if no row matches (so the existing
+    error-translation path in server.py turns it into a 400).
     """
-    is_implicit_default = resume_id is None or not str(resume_id).strip()
-    rid = (resume_id or DEFAULT_RESUME_ID).strip()
-    if not RESUME_ID_RE.match(rid):
+    rid = resume_id.strip() if resume_id else None
+    if rid and not RESUME_ID_RE.match(rid):
         raise ValueError(f"Invalid resume_id: {rid!r}")
 
-    path = RESUMES_DIR / f"{rid}.txt"
-    if path.is_file():
-        return _strip_label_header(path.read_text(encoding="utf-8"))
-
-    # Legacy fallback: pre-multi-resume installs only had backend/resume.txt.
-    if rid == DEFAULT_RESUME_ID and LEGACY_RESUME_PATH.is_file():
-        return _strip_label_header(LEGACY_RESUME_PATH.read_text(encoding="utf-8"))
-
-    # Implicit-default fallback: caller didn't pick anything and there is no
-    # `default.txt` on disk. Use the first available resume so the call works
-    # instead of forcing every caller to know the active filename.
-    if is_implicit_default and RESUMES_DIR.is_dir():
-        candidates = sorted(p for p in RESUMES_DIR.iterdir() if p.is_file() and p.suffix.lower() == ".txt")
-        if candidates:
-            return _strip_label_header(candidates[0].read_text(encoding="utf-8"))
-
-    raise FileNotFoundError(f"Unknown resume_id: {rid}")
+    row = fetch_resume(rid)
+    if row is None:
+        raise FileNotFoundError(f"Unknown resume_id: {rid or '<active>'}")
+    _, content = row
+    return _strip_label_header(content)
 
 
 def list_resumes() -> list[dict[str, str]]:
-    """List available resumes as [{"id", "label"}], 'default' first then alpha."""
-    entries: list[dict[str, str]] = []
-    if RESUMES_DIR.is_dir():
-        for path in RESUMES_DIR.iterdir():
-            if path.is_file() and path.suffix.lower() == ".txt":
-                entries.append({"id": path.stem, "label": _label_for(path)})
-    elif LEGACY_RESUME_PATH.is_file():
-        # Synthesize a default entry so the popup has something to show during
-        # an upgrade where the user hasn't moved the file yet.
-        entries.append({"id": DEFAULT_RESUME_ID, "label": "Default"})
-
-    entries.sort(
-        key=lambda e: (0 if e["id"] == DEFAULT_RESUME_ID else 1, e["id"])
-    )
-    return entries
+    """List available resumes as [{"id", "label"}], alpha-sorted."""
+    return list_resume_rows()
 
 
 def _call_claude(
@@ -423,22 +534,20 @@ def _call_claude(
     required_keys: set[str],
     *,
     extra_messages: list[dict[str, str]] | None = None,
-) -> dict[str, Any]:
-    """Single Claude messages.create call, JSON-parsed and key-validated.
-
-    `extra_messages` lets a caller continue a conversation (e.g. for the
-    invitation retry-on-too-long flow).
-    """
+    model: str | None = None,
+    max_tokens: int | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Single Claude messages.create call, JSON-parsed and key-validated."""
     api_key = _require_api_key()
-    client = Anthropic(api_key=api_key)
+    client = Anthropic(api_key=api_key, timeout=LLM_TIMEOUT_SECS)
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
     if extra_messages:
         messages.extend(extra_messages)
 
     response = client.messages.create(
-        model=DEFAULT_MODEL,
-        max_tokens=MAX_TOKENS,
+        model=model or DEFAULT_MODEL,
+        max_tokens=max_tokens or MAX_TOKENS,
         system=system_prompt,
         messages=messages,
     )
@@ -451,6 +560,279 @@ def _call_claude(
     payload = _parse_claude_json(raw_text)
     _validate_keys(payload, required_keys)
     return payload, raw_text
+
+
+def _call_groq(
+    system_prompt: str,
+    user_message: str,
+    required_keys: set[str],
+    *,
+    extra_messages: list[dict[str, str]] | None = None,
+    model: str | None = None,
+    max_tokens: int | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Groq chat completion, JSON-parsed and key-validated."""
+    api_key = _require_groq_key()
+    client = Groq(api_key=api_key, timeout=LLM_TIMEOUT_SECS)
+
+    msgs: list[dict[str, str]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+    if extra_messages:
+        msgs.extend(extra_messages)
+
+    try:
+        response = client.chat.completions.create(
+            model=model or GROQ_MODEL,
+            max_tokens=max_tokens or GROQ_MAX_TOKENS,
+            response_format={"type": "json_object"},
+            messages=msgs,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Groq request failed: {exc}") from exc
+
+    raw_text = response.choices[0].message.content or ""
+    payload = _parse_claude_json(raw_text)
+    _validate_keys(payload, required_keys)
+    return payload, raw_text
+
+
+def _call_nim(
+    system_prompt: str,
+    user_message: str,
+    required_keys: set[str],
+    *,
+    extra_messages: list[dict[str, str]] | None = None,
+    model: str | None = None,
+    max_tokens: int | None = None,
+) -> tuple[dict[str, Any], str]:
+    """NVIDIA NIM chat completion (OpenAI-compatible), JSON-parsed and key-validated."""
+    api_key = _require_nim_key()
+    client = OpenAI(base_url=NIM_BASE_URL, api_key=api_key, timeout=LLM_TIMEOUT_SECS)
+
+    msgs: list[dict[str, str]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+    if extra_messages:
+        msgs.extend(extra_messages)
+
+    try:
+        response = client.chat.completions.create(
+            model=model or NIM_MODEL,
+            max_tokens=max_tokens or NIM_MAX_TOKENS,
+            response_format={"type": "json_object"},
+            messages=msgs,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"NVIDIA NIM request failed: {exc}") from exc
+
+    raw_text = response.choices[0].message.content or ""
+    payload = _parse_claude_json(raw_text)
+    _validate_keys(payload, required_keys)
+    return payload, raw_text
+
+
+def _call_bedrock(
+    system_prompt: str,
+    user_message: str,
+    required_keys: set[str],
+    *,
+    extra_messages: list[dict[str, str]] | None = None,
+    model: str | None = None,
+    max_tokens: int | None = None,
+) -> tuple[dict[str, Any], str]:
+    """AWS Bedrock Converse API call, JSON-parsed and key-validated.
+
+    The Converse API is model-agnostic, so the same code path serves both the
+    Claude default (generation/score) and the Llama extract model. The system
+    prompt already instructs "STRICT JSON only", which both model families
+    honour; Bedrock has no OpenAI-style response_format toggle.
+    """
+    import boto3  # local import so a missing optional dep doesn't break others
+    from botocore.config import Config
+
+    # botocore reads creds from the standard chain (env / ~/.aws / IAM role).
+    # Cap the read timeout at the shared ceiling so a slow Bedrock call falls
+    # through to the next provider instead of stalling the popup.
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name=BEDROCK_REGION,
+        config=Config(
+            read_timeout=LLM_TIMEOUT_SECS,
+            connect_timeout=min(10.0, LLM_TIMEOUT_SECS),
+            retries={"max_attempts": 1},
+        ),
+    )
+
+    # Converse splits the system prompt out; user/assistant turns go in messages.
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": [{"text": user_message}]}
+    ]
+    for m in extra_messages or []:
+        messages.append({"role": m["role"], "content": [{"text": m["content"]}]})
+
+    try:
+        response = client.converse(
+            modelId=model or BEDROCK_MODEL,
+            system=[{"text": system_prompt}],
+            messages=messages,
+            inferenceConfig={"maxTokens": max_tokens or BEDROCK_MAX_TOKENS},
+        )
+    except Exception as exc:
+        raise RuntimeError(f"AWS Bedrock request failed: {exc}") from exc
+
+    blocks = response.get("output", {}).get("message", {}).get("content", [])
+    raw_text = "".join(b.get("text", "") for b in blocks)
+    payload = _parse_claude_json(raw_text)
+    _validate_keys(payload, required_keys)
+    return payload, raw_text
+
+
+def _dispatch_provider(
+    provider: str,
+    system_prompt: str,
+    user_message: str,
+    required_keys: set[str],
+    *,
+    extra_messages: list[dict[str, str]] | None,
+    model: str | None,
+    max_tokens: int | None,
+) -> tuple[dict[str, Any], str]:
+    kwargs = dict(extra_messages=extra_messages, model=model, max_tokens=max_tokens)
+    if provider == "nvidia":
+        return _call_nim(system_prompt, user_message, required_keys, **kwargs)
+    if provider == "groq":
+        return _call_groq(system_prompt, user_message, required_keys, **kwargs)
+    if provider == "bedrock":
+        return _call_bedrock(system_prompt, user_message, required_keys, **kwargs)
+    return _call_claude(system_prompt, user_message, required_keys, **kwargs)
+
+
+# When the primary provider hits a recoverable error (rate-limit / quota /
+# timeout) we walk down this chain, trying each subsequent provider until one
+# succeeds. Ordered fastest-and-most-reliable-first: Bedrock (Claude Sonnet) and
+# Groq (free, 3-15s) lead; Anthropic is the reliable paid backstop; NVIDIA NIM is
+# LAST because its public endpoint frequently times out (>45s, sometimes >90s),
+# so it should only ever be reached when everything else is unavailable. The
+# primary is removed from the chain before walking (no point retrying the one
+# that just failed), and we keep going even if an intermediate fallback also
+# fails recoverably — that's the bug this replaces, where groq quota-out +
+# nvidia timeout dead-ended with no further hop.
+FALLBACK_CHAIN = ("bedrock", "groq", "anthropic", "nvidia")
+
+# JD auto-detect (extract) prefers the cheap/fast Llama providers, in order:
+# Groq (Llama 3.3 70b) first — fast and consistent (~2-3s) — then NVIDIA NIM,
+# then Bedrock, with Anthropic as the final backstop. (NVIDIA's public NIM
+# endpoint swings 3-15s+, so it's the secondary, not the primary.) Used only by
+# extract_jd_from_page, not generation/scoring.
+EXTRACT_FALLBACK_CHAIN = ("groq", "nvidia", "bedrock", "anthropic")
+
+# Substrings that mark an exception as "provider is unusable right now"
+# rather than "the request itself is malformed". Lowercased before match.
+_FALLBACK_TRIGGERS = (
+    "rate limit",
+    "rate_limit",
+    "rate-limit",
+    "429",
+    "quota",
+    "tokens per day",
+    "tpd",
+    "tpm",
+    "timed out",
+    "timeout",
+    "service unavailable",
+    "503",
+)
+
+
+def _should_fallback(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(t in msg for t in _FALLBACK_TRIGGERS)
+
+
+def _provider_unconfigured(exc: BaseException) -> bool:
+    """True when the error is a missing API key / credentials for a provider.
+
+    A fallback provider that isn't configured should be skipped (try the next
+    one), not treated as a hard failure that aborts the whole chain.
+    """
+    msg = str(exc).lower()
+    return (
+        "not set" in msg  # _require_*_key messages
+        or "no credentials" in msg  # botocore NoCredentialsError
+        or "unable to locate credentials" in msg
+        or "could not connect to the endpoint" in msg
+    )
+
+
+def _call_llm(
+    system_prompt: str,
+    user_message: str,
+    required_keys: set[str],
+    *,
+    extra_messages: list[dict[str, str]] | None = None,
+    provider: str | None = None,
+    model: str | None = None,
+    max_tokens: int | None = None,
+    fallback_chain: tuple[str, ...] | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Unified dispatcher: routes to the configured AI provider.
+
+    `provider` defaults to AI_PROVIDER.  Pass explicitly for score/extract
+    overrides. On a recoverable failure (rate limit, timeout) we walk down the
+    fallback chain, trying each remaining provider until one succeeds — Groq's
+    free tier caps at 100k tokens/day (easy to hit) and NIM can time out, so a
+    single fallback hop isn't enough; we keep going and finally Anthropic, which
+    is the reliable backstop.
+
+    `fallback_chain` overrides the global FALLBACK_CHAIN for this call only
+    (e.g. JD auto-detect wants NVIDIA -> Groq -> Bedrock -> Anthropic). The
+    primary is always tried first and de-duped out of the chain regardless.
+    """
+    primary = (provider or AI_PROVIDER).lower()
+
+    # Try the primary first (honouring its provider-specific `model`), then walk
+    # the rest of the chain. De-dupe so the primary isn't retried mid-chain.
+    walk = fallback_chain or FALLBACK_CHAIN
+    chain = [primary] + [p for p in walk if p != primary]
+
+    last_exc: Exception | None = None
+    for i, prov in enumerate(chain):
+        try:
+            return _dispatch_provider(
+                prov,
+                system_prompt,
+                user_message,
+                required_keys,
+                extra_messages=extra_messages,
+                # `model` is provider-specific; only the primary gets the
+                # caller's model. Every fallback uses its own default.
+                model=model if i == 0 else None,
+                max_tokens=max_tokens,
+            )
+        except Exception as exc:
+            last_exc = exc
+            is_last = i == len(chain) - 1
+            # Walk to the next provider on a recoverable error (rate limit /
+            # quota / timeout) OR when this fallback simply isn't configured
+            # (missing key/creds) — an unconfigured backstop shouldn't abort
+            # the chain. Anything else (e.g. malformed request) surfaces as-is.
+            recoverable = _should_fallback(exc) or (
+                i > 0 and _provider_unconfigured(exc)
+            )
+            if not recoverable or is_last:
+                raise
+            logger.warning(
+                "Provider %s failed (%s); falling back to %s",
+                prov,
+                exc,
+                chain[i + 1],
+            )
+
+    # Unreachable (loop either returns or raises), but keeps type-checkers happy.
+    raise last_exc if last_exc else RuntimeError("no provider available")
 
 
 def _substitute(template: str, mapping: dict[str, str]) -> str:
@@ -511,9 +893,108 @@ def _user_msg_outreach(
     )
 
 
+def _user_msg_answer_question(
+    company: str, jd: str, question: str, resume: str
+) -> str:
+    return (
+        "RESUME (ground truth - do not invent beyond this):\n"
+        f"{resume}\n\n"
+        "COMPANY:\n"
+        f"{company}\n\n"
+        "JOB DESCRIPTION:\n"
+        f"{jd}\n\n"
+        "APPLICATION QUESTION:\n"
+        f"{question}\n\n"
+        "Return JSON only."
+    )
+
+
 # -----------------------------------------------------------------------------
 # Public entry points.
 # -----------------------------------------------------------------------------
+
+
+def _cover_letter_payload(
+    company: str, jd: str, resume_id: str | None
+) -> dict[str, str]:
+    """Run the cover-letter LLM call and validate inputs. Shared by PDF + text paths."""
+    if not company or not company.strip():
+        raise ValueError("company must not be empty")
+    if not jd or not jd.strip():
+        raise ValueError("job_description must not be empty")
+
+    resume = _read_resume(resume_id)
+    payload, _ = _call_llm(
+        COVER_LETTER_SYSTEM,
+        _user_msg_cover_letter(company.strip(), jd.strip(), resume),
+        required_keys={"role_title", "hiring_manager", "body_paragraphs"},
+    )
+    return payload
+
+
+# Whitelist of LaTeX commands the cover-letter prompt is allowed to emit.
+_LATEX_EMPH_RE = re.compile(r"\\emph\{([^{}]*)\}")
+_LATEX_TEXTBF_RE = re.compile(r"\\textbf\{([^{}]*)\}")
+
+
+def _cover_body_to_plain_text(body: str) -> str:
+    """Strip the whitelisted LaTeX commands so the body reads cleanly as plain text."""
+    out = _LATEX_EMPH_RE.sub(r"\1", body)
+    out = _LATEX_TEXTBF_RE.sub(r"\1", out)
+    out = out.replace("\\\\", "\n")
+    return out.strip()
+
+
+# Sentinel placeholders unlikely to appear in any cover letter body. We
+# stash whitelisted markup behind these tokens, escape every other
+# LaTeX-special char, then restore the markup. This way a stray `%`,
+# `$`, `&`, `_`, etc. from the model can't crash tectonic.
+_TOK_EMPH_OPEN = "\x01\x02\x03"
+_TOK_EMPH_CLOSE = "\x01\x02\x04"
+_TOK_BF_OPEN = "\x01\x02\x05"
+_TOK_BF_CLOSE = "\x01\x02\x06"
+_TOK_BREAK = "\x01\x02\x07"
+
+
+def _sanitize_cover_body(body: str) -> str:
+    """Escape stray LaTeX specials in the body while preserving the whitelisted
+    commands the prompt is allowed to emit (\\emph{}, \\textbf{}, \\\\).
+
+    Models occasionally slip through a `%`, `$`, `&`, etc. despite prompt
+    instructions; without sanitisation tectonic aborts the compile. Sanitising
+    after generation is cheaper than re-prompting.
+    """
+    # 1) Stash whitelisted markup behind sentinels.
+    s = _LATEX_EMPH_RE.sub(
+        lambda m: f"{_TOK_EMPH_OPEN}{m.group(1)}{_TOK_EMPH_CLOSE}", body
+    )
+    s = _LATEX_TEXTBF_RE.sub(
+        lambda m: f"{_TOK_BF_OPEN}{m.group(1)}{_TOK_BF_CLOSE}", s
+    )
+    s = s.replace("\\\\", _TOK_BREAK)
+
+    # 2) Escape every remaining LaTeX-special character. (Don't reuse
+    # escape_latex on the whole body because the sentinels themselves
+    # contain bytes we want to preserve verbatim, and we want braces
+    # *outside* sentinels escaped too if present.)
+    s = (
+        s.replace("\\", r"\textbackslash{}")
+        .replace("&", r"\&")
+        .replace("%", r"\%")
+        .replace("$", r"\$")
+        .replace("#", r"\#")
+        .replace("_", r"\_")
+        .replace("{", r"\{")
+        .replace("}", r"\}")
+        .replace("~", r"\textasciitilde{}")
+        .replace("^", r"\textasciicircum{}")
+    )
+
+    # 3) Restore whitelisted markup.
+    s = s.replace(_TOK_EMPH_OPEN, r"\emph{").replace(_TOK_EMPH_CLOSE, "}")
+    s = s.replace(_TOK_BF_OPEN, r"\textbf{").replace(_TOK_BF_CLOSE, "}")
+    s = s.replace(_TOK_BREAK, r"\\")
+    return s
 
 
 def generate_cover_letter(
@@ -524,30 +1005,53 @@ def generate_cover_letter(
     Returns PDF bytes. Raises if the API key is missing, Claude returns
     unparseable output, the template is malformed, or tectonic fails.
     """
-    if not company or not company.strip():
-        raise ValueError("company must not be empty")
-    if not jd or not jd.strip():
-        raise ValueError("job_description must not be empty")
-
-    resume = _read_resume(resume_id)
+    payload = _cover_letter_payload(company, jd, resume_id)
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
-
-    payload, _ = _call_claude(
-        COVER_LETTER_SYSTEM,
-        _user_msg_cover_letter(company.strip(), jd.strip(), resume),
-        required_keys={"role_title", "hiring_manager", "body_paragraphs"},
-    )
 
     substitutions = {
         "COMPANY_NAME": escape_latex(company.strip()),
         "ROLE_TITLE": escape_latex(payload["role_title"].strip()),
         "HIRING_MANAGER_OR_TEAM": escape_latex(payload["hiring_manager"].strip()),
-        # Body is intentionally NOT escaped - Claude is instructed to only emit
-        # the whitelist of \emph, \textbf, \\ and blank-line paragraph breaks.
-        "BODY_PARAGRAPHS": payload["body_paragraphs"].strip(),
+        # Body keeps the whitelisted \emph / \textbf / \\ commands. All other
+        # LaTeX-special characters get escaped so a stray % or & from the
+        # model can't break tectonic.
+        "BODY_PARAGRAPHS": _sanitize_cover_body(payload["body_paragraphs"].strip()),
     }
     tex_source = _substitute(template, substitutions)
-    return compile_latex(tex_source, jobname="cover_letter")
+    pdf_bytes = compile_latex(tex_source, jobname="cover_letter")
+    pdf_path = save_pdf(company.strip(), pdf_bytes)
+    insert_application(
+        mode="cover_letter",
+        company=company.strip(),
+        job_description=jd.strip(),
+        resume_id=resume_id,
+        pdf_path=pdf_path,
+    )
+    return pdf_bytes
+
+
+def generate_cover_letter_text(
+    company: str, jd: str, resume_id: str | None = None
+) -> dict[str, str]:
+    """Generate a tailored cover letter as plain text (no PDF compile).
+
+    Returns {'role_title', 'hiring_manager', 'body'} where body is plain text
+    with whitelisted LaTeX commands stripped.
+    """
+    payload = _cover_letter_payload(company, jd, resume_id)
+    out = {
+        "role_title": payload["role_title"].strip(),
+        "hiring_manager": payload["hiring_manager"].strip(),
+        "body": _cover_body_to_plain_text(payload["body_paragraphs"]),
+    }
+    insert_application(
+        mode="cover_letter_text",
+        company=company.strip(),
+        job_description=jd.strip(),
+        resume_id=resume_id,
+        output=json.dumps(out),
+    )
+    return out
 
 
 def generate_application_email(
@@ -563,14 +1067,55 @@ def generate_application_email(
         raise ValueError("job_description must not be empty")
 
     resume = _read_resume(resume_id)
-    payload, _ = _call_claude(
+    payload, _ = _call_llm(
         APPLICATION_EMAIL_SYSTEM,
         _user_msg_application_email(
             company.strip(), jd.strip(), intent.strip() if intent else None, resume
         ),
         required_keys={"subject", "body"},
     )
-    return {"subject": payload["subject"].strip(), "body": payload["body"].strip()}
+    out = {"subject": payload["subject"].strip(), "body": payload["body"].strip()}
+    insert_application(
+        mode="email",
+        company=company.strip(),
+        job_description=jd.strip(),
+        resume_id=resume_id,
+        output=json.dumps(out),
+    )
+    return out
+
+
+def answer_application_question(
+    company: str,
+    jd: str,
+    question: str,
+    resume_id: str | None = None,
+) -> dict[str, str]:
+    """Answer a free-text application question. Returns {'answer': ...}."""
+    if not company or not company.strip():
+        raise ValueError("company must not be empty")
+    if not jd or not jd.strip():
+        raise ValueError("job_description must not be empty")
+    if not question or not question.strip():
+        raise ValueError("question must not be empty")
+
+    resume = _read_resume(resume_id)
+    payload, _ = _call_llm(
+        ANSWER_QUESTION_SYSTEM,
+        _user_msg_answer_question(
+            company.strip(), jd.strip(), question.strip(), resume
+        ),
+        required_keys={"answer"},
+    )
+    out = {"answer": payload["answer"].strip()}
+    insert_application(
+        mode="answer_question",
+        company=company.strip(),
+        job_description=jd.strip(),
+        resume_id=resume_id,
+        output=json.dumps({"question": question.strip(), **out}),
+    )
+    return out
 
 
 VALID_OUTREACH_CHANNELS = ("linkedin_invitation", "linkedin_message", "email")
@@ -626,7 +1171,7 @@ def generate_outreach_message(
         profile_text.strip(), context.strip() if context else None, resume
     )
 
-    payload, raw = _call_claude(system_prompt, user_message, required_keys)
+    payload, raw = _call_llm(system_prompt, user_message, required_keys)
 
     message = payload["message"].strip()
 
@@ -644,7 +1189,7 @@ def generate_outreach_message(
                 ),
             },
         ]
-        payload, _ = _call_claude(
+        payload, _ = _call_llm(
             system_prompt,
             user_message,
             required_keys,
@@ -660,6 +1205,11 @@ def generate_outreach_message(
     result: dict[str, Any] = {"message": message, "char_count": len(message)}
     if channel == "email":
         result["subject"] = payload["subject"].strip()
+    insert_application(
+        mode="outreach",
+        resume_id=resume_id,
+        output=json.dumps({"channel": channel, **result}),
+    )
     return result
 
 
@@ -854,33 +1404,37 @@ def _compose_score(
     return {"score": score_10, "score_100": int(score_100), "breakdown": breakdown}
 
 
-def score_jd_fit(
+def score_resume_text(
     job_description: str,
+    resume_text: str,
     company: str | None = None,
-    resume_id: str | None = None,
 ) -> dict[str, Any]:
-    """Score how well the resume fits the JD using rubric-based grading.
+    """Score a raw resume-text string against a JD (rubric-based grading).
 
-    Single Claude call extracts the JD's requirements, grades the resume on
-    each one with evidence, and returns a one-line verdict summary. The
-    composite score is computed deterministically from those grades.
-
-    Returns {"score": int 0-10, "score_100": int 0-100, "verdict": str,
-    "breakdown": dict}. The frontend uses score+verdict; score_100 is for
-    finer ranking; breakdown is for debug/CLI.
+    The scoring core, decoupled from where the resume comes from. `score_jd_fit`
+    reads a stored resume by id then calls this; the Resume Builder renders its
+    in-memory profile to text and calls this directly. Returns the same shape:
+    {"score": int 0-10, "score_100": int 0-100, "verdict": str, "breakdown": dict}.
     """
     if not job_description or not job_description.strip():
         raise ValueError("job_description must not be empty")
+    if not resume_text or not resume_text.strip():
+        raise ValueError("resume_text must not be empty")
 
-    resume = _read_resume(resume_id)
     user_message = _user_msg_score(
         job_description.strip(),
         company.strip() if company and company.strip() else None,
-        resume,
+        resume_text,
     )
 
-    payload, _ = _call_claude(
-        SCORE_SYSTEM, user_message, required_keys={"verdict_summary"}
+    score_model = SCORE_GROQ_MODEL if SCORE_PROVIDER == "groq" else None
+    payload, _ = _call_llm(
+        SCORE_SYSTEM,
+        user_message,
+        required_keys={"verdict_summary"},
+        provider=SCORE_PROVIDER,
+        model=score_model,
+        max_tokens=4096,
     )
 
     rubric, coverage = _normalize_rubric_and_coverage(
@@ -903,6 +1457,33 @@ def score_jd_fit(
         "verdict": verdict,
         "breakdown": composite["breakdown"],
     }
+
+
+def score_jd_fit(
+    job_description: str,
+    company: str | None = None,
+    resume_id: str | None = None,
+    *,
+    _log: bool = True,
+) -> dict[str, Any]:
+    """Score how well a stored resume fits the JD using rubric-based grading.
+
+    Reads the resume by id (or the active one) and delegates to
+    `score_resume_text`. Returns {"score", "score_100", "verdict", "breakdown"}.
+    The frontend uses score+verdict; score_100 is for finer ranking.
+    """
+    resume = _read_resume(resume_id)
+    out = score_resume_text(job_description, resume, company)
+    if _log:
+        insert_application(
+            mode="score",
+            company=company.strip() if company and company.strip() else None,
+            job_description=job_description.strip(),
+            resume_id=resume_id,
+            output=out["verdict"],
+            score_data=json.dumps(out),
+        )
+    return out
 
 
 def score_jd_fit_all(
@@ -930,7 +1511,7 @@ def score_jd_fit_all(
 
     def _score_one(entry: dict[str, str]) -> dict[str, Any]:
         try:
-            out = score_jd_fit(jd, co, resume_id=entry["id"])
+            out = score_jd_fit(jd, co, resume_id=entry["id"], _log=False)
             return {
                 "resume_id": entry["id"],
                 "label": entry["label"],
@@ -959,6 +1540,95 @@ def score_jd_fit_all(
 
 
 # -----------------------------------------------------------------------------
+# JD extractor (used by the popup's auto-detect button when site selectors miss).
+# -----------------------------------------------------------------------------
+
+EXTRACT_JD_MAX_PAGE_TEXT = 40000
+
+
+def extract_jd_from_page(
+    url: str, page_title: str | None, page_text: str
+) -> dict[str, str]:
+    """Extract {company, job_description} from raw scraped page text.
+
+    Routes through AI_PROVIDER so it works with Anthropic, Groq, or NVIDIA NIM.
+    Unlike the other modes, empty strings are a valid response: they signal
+    "this page isn't a job posting" and the popup surfaces that cleanly.
+    """
+    if not page_text or not page_text.strip():
+        raise ValueError("page_text must not be empty")
+
+    trimmed = page_text[:EXTRACT_JD_MAX_PAGE_TEXT]
+
+    user_msg = (
+        f"URL:\n{url or ''}\n\n"
+        f"PAGE TITLE:\n{page_title or ''}\n\n"
+        f"PAGE TEXT (raw, may contain noise):\n{trimmed}\n\n"
+        "Return JSON only."
+    )
+
+    # Auto-detect routes through EXTRACT_PROVIDER (default NVIDIA NIM) and uses
+    # the extract-specific fallback order NVIDIA -> Groq -> Bedrock -> Anthropic
+    # (EXTRACT_FALLBACK_CHAIN), keeping extraction on cheap/fast Llama providers
+    # before the Anthropic backstop. It uses a lighter Llama model where the
+    # provider offers one (Groq and Bedrock); nvidia uses NIM_MODEL by default.
+    # Note: this only sets the *primary* model — each fallback uses its own
+    # default (so a fail-over to Bedrock lands on BEDROCK_MODEL/Claude, not
+    # Llama). Acceptable for the rare fallback path.
+    if EXTRACT_PROVIDER == "groq":
+        extract_model: str | None = EXTRACT_MODEL
+    elif EXTRACT_PROVIDER == "bedrock":
+        extract_model = BEDROCK_EXTRACT_MODEL
+    else:
+        extract_model = None
+    # _validate_keys would reject empty strings which are valid for extract,
+    # so pass an empty required_keys set and validate manually below.
+    payload, _ = _call_llm(
+        EXTRACT_JD_SYSTEM,
+        user_msg,
+        required_keys=set(),
+        provider=EXTRACT_PROVIDER,
+        model=extract_model,
+        max_tokens=EXTRACT_MAX_TOKENS,
+        fallback_chain=EXTRACT_FALLBACK_CHAIN,
+    )
+
+    missing = {"company", "job_description"} - payload.keys()
+    if missing:
+        raise ValueError(f"LLM response missing required keys: {missing}")
+    if not isinstance(payload["company"], str) or not isinstance(
+        payload["job_description"], str
+    ):
+        raise ValueError(
+            "LLM response fields 'company' and 'job_description' must be strings"
+        )
+
+    # job_role / location are newer fields; older models may omit them. Default
+    # to empty strings rather than failing extraction.
+    job_role = payload.get("job_role", "")
+    location = payload.get("location", "")
+    if not isinstance(job_role, str):
+        job_role = ""
+    if not isinstance(location, str):
+        location = ""
+
+    company = payload["company"].strip()
+    jd = payload["job_description"].strip()
+    job_role = job_role.strip()
+    location = location.strip()
+    logger.info(
+        "extract_jd url=%s company_len=%d jd_len=%d role=%r location=%r company=%r",
+        url, len(company), len(jd), job_role[:120], location[:120], company[:200],
+    )
+    return {
+        "company": company,
+        "job_description": jd,
+        "job_role": job_role,
+        "location": location,
+    }
+
+
+# -----------------------------------------------------------------------------
 # CLI smoke test entry point.
 # -----------------------------------------------------------------------------
 
@@ -971,6 +1641,7 @@ if __name__ == "__main__":
         "  python generate.py email <company> <job_description> [intent] [--resume ID]\n"
         "  python generate.py outreach <channel> <profile_text> [context] [--resume ID]\n"
         "    where <channel> is one of: linkedin_invitation, linkedin_message, email\n"
+        "  python generate.py question <company> <job_description> <question> [--resume ID]\n"
         "  python generate.py score <job_description> [company] [--resume ID]\n"
         "  python generate.py score-all <job_description> [company]\n"
         "  python generate.py resumes\n"
@@ -1016,6 +1687,14 @@ if __name__ == "__main__":
         context = args[4] if len(args) == 5 else None
         out = generate_outreach_message(
             args[3], args[2], context, resume_id=cli_resume_id
+        )
+        print(json.dumps(out, indent=2))
+    elif mode == "question":
+        if len(args) != 5:
+            print(usage, file=sys.stderr)
+            sys.exit(2)
+        out = answer_application_question(
+            args[2], args[3], args[4], resume_id=cli_resume_id
         )
         print(json.dumps(out, indent=2))
     elif mode == "score":

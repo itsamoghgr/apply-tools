@@ -1,0 +1,28 @@
+# Render Blueprint for the apply-tools tracking sidecar.
+# Apply via: https://dashboard.render.com/select-repo?type=blueprint
+# (or the `Sync` button if the blueprint is already linked).
+#
+# Free plan caveats:
+#   - Service sleeps after 15 min of no traffic; first request after sleep
+#     takes ~30-60s to wake. Gmail's image proxy generally retries, so opens
+#     are usually still recorded, but the first one may be missed.
+#   - 750 hours/month of free runtime is way more than this needs.
+
+services:
+  - type: web
+    name: apply-tools-tracker
+    runtime: docker
+    rootDir: tracking-sidecar
+    region: oregon
+    plan: free
+    healthCheckPath: /
+    envVars:
+      - key: DATABASE_URL
+        sync: false        # set manually from your Neon project's connection string
+      - key: TRACKING_FERNET_KEY
+        sync: false        # copy from backend/.env after the local backend generates one
+      - key: TRACKING_API_TOKEN
+        sync: false        # any random secret; must match backend/.env
+      # PUBLIC_BASE_URL is auto-derived from Render's RENDER_EXTERNAL_URL on
+      # the *.onrender.com hostname. Set it explicitly only if you bind a
+      # custom domain.

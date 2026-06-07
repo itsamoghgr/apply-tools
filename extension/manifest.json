@@ -1,22 +1,32 @@
 {
   "manifest_version": 3,
-  "name": "Cover Letter Generator",
+  "name": "Apply Tools",
   "version": "1.0.0",
-  "description": "Generate a tailored, LaTeX-compiled PDF cover letter from a company name and job description.",
+  "description": "Auto-detect job postings, generate cover letters, draft outreach, score resume fit, and track applications.",
   "action": {
-    "default_title": "Cover Letter Generator",
+    "default_title": "Apply Tools",
     "default_popup": "popup.html",
     "default_icon": {
-      "16": "icon.png",
-      "48": "icon.png",
-      "128": "icon.png"
+      "16": "icon-16.png",
+      "48": "icon-48.png",
+      "128": "icon-128.png"
     }
   },
   "icons": {
-    "16": "icon.png",
-    "48": "icon.png",
-    "128": "icon.png"
+    "16": "icon-16.png",
+    "48": "icon-48.png",
+    "128": "icon-128.png"
   },
-  "permissions": ["downloads", "storage"],
-  "host_permissions": ["http://localhost:8000/*", "http://127.0.0.1:8000/*"]
+  "permissions": ["downloads", "storage", "activeTab", "scripting"],
+  "host_permissions": [
+    "http://localhost:8000/*",
+    "http://127.0.0.1:8000/*",
+    "https://jobs.ashbyhq.com/*",
+    "https://*.ashbyhq.com/*",
+    "https://boards.greenhouse.io/*",
+    "https://*.greenhouse.io/*",
+    "https://jobs.lever.co/*",
+    "https://*.lever.co/*",
+    "https://*.myworkdayjobs.com/*"
+  ]
 }

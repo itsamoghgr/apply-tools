@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import tempfile
@@ -89,3 +90,28 @@ def compile_latex(tex_source: str, jobname: str = "cover_letter") -> bytes:
             )
 
         return pdf_path.read_bytes()
+
+
+# Fallback page-object scan for the rare uncompressed PDF. Tectonic compresses
+# everything into object streams, so this regex finds nothing there — pypdf is
+# the real path. Careful NOT to match `/Type /Pages` (the tree node).
+_PAGE_OBJ_RE = re.compile(rb"/Type\s*/Page(?![s])")
+
+
+def count_pdf_pages(pdf_bytes: bytes) -> int:
+    """Return the number of pages in a PDF.
+
+    Uses pypdf (handles Tectonic's compressed object/xref streams). Falls back
+    to a plaintext page-object scan, then returns 0 if both fail — callers
+    treat 0 as "unknown" and skip the page-limit check rather than wrongly
+    blocking the user.
+    """
+    try:
+        import io
+
+        from pypdf import PdfReader
+
+        return len(PdfReader(io.BytesIO(pdf_bytes)).pages)
+    except Exception:
+        # pypdf missing or parse error — try the plaintext scan as a last resort.
+        return len(_PAGE_OBJ_RE.findall(pdf_bytes))
