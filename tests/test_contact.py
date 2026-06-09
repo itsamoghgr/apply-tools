@@ -61,10 +61,10 @@ class _LLM:
 
 
 def test_agent_uses_verify_tool_then_returns_email():
-    # Turn 1: call verify_email. Turn 2: final JSON with the found email.
+    # Turn 1: call provider_lookup.  Turn 2: final JSON with the found email.
     llm = _LLM([
         {"text": "", "tool_calls": [
-            {"id": "t1", "name": "verify_email", "input": {"domain": "acme.com", "full_name": "Jane Doe"}}]},
+            {"id": "t1", "name": "provider_lookup", "input": {"domain": "acme.com", "full_name": "Jane Doe"}}]},
         {"text": '{"email": "jane@acme.com", "score": 0.95, "method": "apollo", "rationale": "Apollo verified"}',
          "tool_calls": []},
     ])
@@ -81,7 +81,7 @@ def test_agent_falls_back_to_best_candidate_when_final_json_empty():
     # Model calls verify (which finds an email) but then returns empty JSON.
     llm = _LLM([
         {"text": "", "tool_calls": [
-            {"id": "t1", "name": "verify_email", "input": {"domain": "acme.com", "full_name": "Jane Doe"}}]},
+            {"id": "t1", "name": "provider_lookup", "input": {"domain": "acme.com", "full_name": "Jane Doe"}}]},
         {"text": "{}", "tool_calls": []},
     ])
     verifier = _Verifier(EmailVerdict(email="jane@acme.com", score=0.8, method="hunter", detail={}))

@@ -35,8 +35,30 @@ from agent_server.stages.verify import WaterfallVerifier
 
 logger = get_logger(__name__)
 
-MAX_TOOL_CALLS = 8
+MAX_TOOL_CALLS = 14   # deep open-web research needs room for several searches
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+
+# Personal/free mail providers — a WORK email at the company domain is almost
+# always preferred over one of these for outreach.
+_PERSONAL_DOMAINS = {
+    "gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com",
+    "proton.me", "protonmail.com", "aol.com", "me.com", "live.com", "msn.com",
+}
+
+
+def _email_quality(email: str, target_domain: str | None) -> float:
+    """A 0–1 preference weight for an email candidate, independent of how it was
+    found: same as the target company domain > other corporate domain > personal.
+    Used to pick the best candidate when several were collected.
+    """
+    if not email or "@" not in email:
+        return 0.0
+    dom = email.split("@", 1)[1].lower()
+    if target_domain and dom == target_domain.lower():
+        return 1.0
+    if dom in _PERSONAL_DOMAINS:
+        return 0.2
+    return 0.6  # some other corporate domain
 
 
 @dataclass
@@ -80,22 +102,34 @@ _TOOLS: list[dict] = [
         },
     },
     {
-        "name": "verify_email",
+        "name": "validate_email_smtp",
         "description": (
-            "Find and/or verify an email via the provider waterfall (Apollo, "
-            "Hunter, Abstract, then a weak SMTP check). If `email` is provided it "
-            "is validated; otherwise an address is discovered from name+domain. "
-            "Returns {email, score (0-1), method}."
+            "FREE, no paid API. Validate a specific candidate email via DNS/MX + a "
+            "lightweight SMTP check. Use this on your best pattern guesses and on "
+            "addresses you found in web snippets. Returns {email, score (0-1), "
+            "method}. Prefer this over provider_lookup."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "email": {"type": "string", "description": "Candidate to validate."},
+            },
+            "required": ["email"],
+        },
+    },
+    {
+        "name": "provider_lookup",
+        "description": (
+            "LAST RESORT — costs a paid API credit (Apollo/Hunter/Abstract). Only "
+            "call this AFTER open-web search, pattern guessing, and SMTP validation "
+            "have failed to produce a confident email. Discovers/verifies an email "
+            "from name + domain. Returns {email, score (0-1), method}."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "domain": {"type": "string"},
                 "full_name": {"type": "string"},
-                "email": {
-                    "type": "string",
-                    "description": "Optional candidate to validate.",
-                },
             },
             "required": ["domain"],
         },
@@ -103,17 +137,27 @@ _TOOLS: list[dict] = [
 ]
 
 _SYSTEM = (
-    "You are a contact-research agent. Your job: find the single best WORK email "
-    "for a named person at a company domain, and verify it is deliverable.\n\n"
-    "Plan, then act with the tools:\n"
-    "1. Start with verify_email (no email arg) — providers like Apollo/Hunter can "
-    "find it directly. If that returns a high score, you're nearly done.\n"
-    "2. If not found, call guess_email_patterns, then verify_email on the most "
-    "likely candidate(s) — stop early once one scores well (>= 0.7).\n"
-    "3. Optionally web_search for a published address to corroborate.\n"
-    "Be frugal: a few tool calls, not many. When done, reply with ONLY a JSON "
-    'object: {"email": <best email or null>, "score": <0-1>, "method": <provider/'
-    'source>, "rationale": <one sentence>}. No prose outside the JSON.'
+    "You are a contact-research agent. Find the single best WORK email for a named "
+    "person at a company. PREFER THE OPEN WEB. Paid providers cost money — only "
+    "use provider_lookup as a LAST RESORT. Be persistent across several searches.\n\n"
+    "Strategy (in order):\n"
+    "1. CONFIRM THE DOMAIN. The given domain may be a guess (e.g. .com when the "
+    "real site is .ai/.io/.co). web_search '<company> official website' and read "
+    "snippets to confirm the real domain. Use it for everything after.\n"
+    "2. DEEP OPEN-WEB SEARCH for the address (this is your MAIN method). Run "
+    "multiple web_search queries: '<name> <company> email', '<name> email address', "
+    "'<company> contact <name>', '<name> <domain> contact'. Snippets from "
+    "RocketReach, Crunchbase, press, and company team/contact pages often expose "
+    "or hint the email. Emails found in snippets are captured automatically.\n"
+    "3. guess_email_patterns on the confirmed domain, then validate_email_smtp "
+    "(FREE) on the most likely candidates. If a web snippet and a pattern agree, "
+    "confidence is high — you're done.\n"
+    "4. ONLY IF the open web + SMTP fail to yield a confident email, call "
+    "provider_lookup ONCE as a paid last resort.\n"
+    "Spend your search budget before concluding null. When done, reply with ONLY a "
+    'JSON object: {"email": <best email or null>, "score": <0-1>, "method": '
+    '<source: web_snippet|smtp|pattern|apollo|hunter|...>, "domain": <confirmed '
+    'domain>, "rationale": <one sentence>}. No prose outside the JSON.'
 )
 
 
@@ -155,19 +199,35 @@ def _run_tool(name: str, args: dict, deps: AgentDeps, verifier: WaterfallVerifie
             cands = _patterns(args.get("full_name", ""), args.get("domain", ""))
             return json.dumps({"candidates": cands})
 
-        if name == "verify_email":
+        if name == "validate_email_smtp":
+            # FREE path — no paid API. Confirm the domain has mail (MX) records;
+            # a well-formed candidate at a real MX domain is a weak-positive even
+            # when the SMTP RCPT probe is inconclusive (port 25 blocked / accept-
+            # all servers — the documented common case).
+            email = (args.get("email") or "").strip().lower()
+            if "@" not in email:
+                return json.dumps({"error": "provide a full email to validate"})
+            domain = email.split("@", 1)[1]
+            has_mx = False
+            try:
+                import dns.resolver
+
+                dns.resolver.resolve(domain, "MX")
+                has_mx = True
+            except Exception:
+                has_mx = False
+            score = 0.4 if has_mx else 0.1
+            result = {"email": email, "score": score,
+                      "method": "smtp" if has_mx else "smtp_no_mx"}
+            found.append(dict(result))
+            return json.dumps(result)
+
+        if name == "provider_lookup":
+            # LAST RESORT — paid API waterfall (Apollo/Hunter/Abstract).
             domain = args.get("domain", "")
             full_name = args.get("full_name") or None
-            email = args.get("email")
-            if email:
-                # Validate a specific candidate (Abstract-style providers + SMTP).
-                v = verifier.find_and_verify(domain, full_name)
-                # find_and_verify discovers; for explicit candidate validation we
-                # still surface its verdict but tag the candidate the model asked for.
-                result = {"email": v.email or email, "score": v.score, "method": v.method}
-            else:
-                v = verifier.find_and_verify(domain, full_name)
-                result = {"email": v.email, "score": v.score, "method": v.method}
+            v = verifier.find_and_verify(domain, full_name)
+            result = {"email": v.email, "score": v.score, "method": v.method}
             if result["email"]:
                 found.append(dict(result))
             return json.dumps(result)
@@ -301,10 +361,18 @@ def _finalize(parsed: dict, found: list[dict], domain: str) -> ContactResult:
 
 
 def _best_of(found: list[dict], domain: str, *, rationale: str) -> ContactResult:
-    """Pick the highest-scoring verified candidate the tools produced."""
+    """Pick the best candidate the tools produced.
+
+    Rank by score × email-quality so a personal address (e.g. a founder's
+    gmail/yahoo scraped from GitHub) never beats a work email at the company
+    domain when both were collected.
+    """
     if not found:
         return ContactResult(rationale=rationale or "no email found")
-    best = max(found, key=lambda c: c.get("score", 0))
+    best = max(
+        found,
+        key=lambda c: c.get("score", 0.0) * _email_quality(c.get("email", ""), domain),
+    )
     return ContactResult(
         email=best.get("email"),
         score=float(best.get("score", 0.0)),
