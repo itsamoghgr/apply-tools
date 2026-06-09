@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 import secrets
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -816,3 +817,102 @@ def insert_application(
         # log is unavailable.
         logger.warning("application_log_failed", mode=mode, error=str(exc))
     return app_id
+
+
+# -----------------------------------------------------------------------------
+# Domain-keyed lead intake (used by the lead-generation agent service).
+#
+# The agent server (agent_server/, port 8001) discovers + verifies startups and
+# pushes clean leads here over HTTP. These two helpers back the two new
+# endpoints (POST /api/v1/leads/exists, POST /api/v1/leads/upsert). They key on
+# the normalised root `domain` column added by platform_migration.sql, with a
+# partial UNIQUE index (domain WHERE domain IS NOT NULL).
+# -----------------------------------------------------------------------------
+
+
+def platform_leads_known_domains(domains: list[str]) -> list[str]:
+    """Return the subset of `domains` already present on some Lead row.
+
+    Used by the agent's dedup stage to avoid re-researching anything the
+    platform already has. Case-insensitive on the stored domain.
+    """
+    wanted = [d.strip().lower() for d in domains if isinstance(d, str) and d.strip()]
+    if not wanted:
+        return []
+    with get_conn() as conn:
+        rows = conn.execute(
+            text(
+                'SELECT DISTINCT "domain" FROM "Lead" '
+                'WHERE "domain" = ANY(:domains) AND "domain" IS NOT NULL'
+            ),
+            {"domains": wanted},
+        ).fetchall()
+    return [r.domain for r in rows]
+
+
+def platform_upsert_lead(payload: dict) -> dict:
+    """Idempotently upsert a verified lead keyed on `domain`.
+
+    `payload` is the agent's PlatformUpsertRequest shape (snake_case). Returns
+    ``{"lead_id": str, "created": bool}``. ON CONFLICT (domain) updates in
+    place — never creates a duplicate. `founderName` also seeds `name` when the
+    row is new, since `name` is NOT NULL on the table.
+    """
+    domain = (payload.get("domain") or "").strip().lower()
+    if not domain:
+        raise ValueError("domain is required for a domain-keyed upsert")
+
+    company_name = payload.get("company_name")
+    founder_name = payload.get("founder_name")
+    # `name` is NOT NULL; fall back to founder, then company, then the domain.
+    name = founder_name or company_name or domain
+    sources = payload.get("sources") or []
+
+    params = {
+        "id": secrets.token_urlsafe(12),
+        "name": name,
+        "email": payload.get("founder_email"),
+        "linkedinUrl": payload.get("founder_linkedin_url"),
+        "domain": domain,
+        "companyName": company_name,
+        "fundingStage": payload.get("funding_stage"),
+        "fundingAmount": payload.get("funding_amount"),
+        "founderName": founder_name,
+        "confidence": payload.get("confidence"),
+        "source": payload.get("source") or "agent-server",
+        "sourcesJson": json.dumps(sources),
+    }
+
+    # The conflict target must repeat the partial index predicate. On update we
+    # refresh the agent-sourced columns and bump updatedAt, but we do NOT clobber
+    # an existing human-edited `name`/`email` with nulls — COALESCE keeps the old
+    # value when the incoming one is null.
+    sql = text(
+        """
+        INSERT INTO "Lead" (
+            "id", "name", "email", "linkedinUrl", "domain", "companyName",
+            "fundingStage", "fundingAmount", "founderName", "confidence",
+            "source", "sourcesJson", "updatedAt"
+        ) VALUES (
+            :id, :name, :email, :linkedinUrl, :domain, :companyName,
+            :fundingStage, :fundingAmount, :founderName, :confidence,
+            :source, CAST(:sourcesJson AS jsonb), CURRENT_TIMESTAMP
+        )
+        ON CONFLICT ("domain") WHERE "domain" IS NOT NULL
+        DO UPDATE SET
+            "email"         = COALESCE(EXCLUDED."email", "Lead"."email"),
+            "linkedinUrl"   = COALESCE(EXCLUDED."linkedinUrl", "Lead"."linkedinUrl"),
+            "companyName"   = COALESCE(EXCLUDED."companyName", "Lead"."companyName"),
+            "fundingStage"  = COALESCE(EXCLUDED."fundingStage", "Lead"."fundingStage"),
+            "fundingAmount" = COALESCE(EXCLUDED."fundingAmount", "Lead"."fundingAmount"),
+            "founderName"   = COALESCE(EXCLUDED."founderName", "Lead"."founderName"),
+            "confidence"    = EXCLUDED."confidence",
+            "source"        = EXCLUDED."source",
+            "sourcesJson"   = EXCLUDED."sourcesJson",
+            "updatedAt"     = CURRENT_TIMESTAMP
+        RETURNING "id", (xmax = 0) AS created
+        """
+    )
+    with get_conn() as conn:
+        row = conn.execute(sql, params).fetchone()
+    return {"lead_id": row.id, "created": bool(row.created)}

@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
@@ -35,6 +36,8 @@ from db import (
     list_leads_for_application,
     list_reach_outs,
     list_reach_outs_for_application,
+    platform_leads_known_domains,
+    platform_upsert_lead,
     remove_job_application_lead,
     set_setting,
     update_job_application,
@@ -787,6 +790,71 @@ def leads_delete(lead_id: str) -> dict[str, bool]:
     if not ok:
         raise HTTPException(status_code=404, detail=f"No lead {lead_id}")
     return {"ok": True}
+
+
+# -----------------------------------------------------------------------------
+# Domain-keyed lead intake for the lead-generation agent service.
+#
+# The agent server (separate process, port 8001) discovers + verifies startups
+# and pushes clean verified leads here. Two endpoints, both keyed on the
+# normalised root `domain`. Optional shared-secret auth via X-Agent-Token; when
+# PLATFORM_API_TOKEN is unset, the endpoints accept unauthenticated calls
+# (dev-friendly default). See agent_server/CONTRACTS.md §6.
+# -----------------------------------------------------------------------------
+
+
+def _require_agent_token(x_agent_token: str | None) -> None:
+    """Enforce the shared secret only when PLATFORM_API_TOKEN is configured."""
+    expected = os.environ.get("PLATFORM_API_TOKEN")
+    if expected and x_agent_token != expected:
+        raise HTTPException(status_code=401, detail="invalid or missing X-Agent-Token")
+
+
+class LeadsExistsRequest(BaseModel):
+    domains: list[str] = Field(default_factory=list, max_length=1000)
+
+
+class LeadUpsertRequest(BaseModel):
+    domain: str = Field(..., min_length=1, max_length=255)
+    company_name: str | None = Field(default=None, max_length=300)
+    funding_stage: str | None = Field(default=None, max_length=100)
+    funding_amount: str | None = Field(default=None, max_length=100)
+    founder_name: str | None = Field(default=None, max_length=200)
+    founder_linkedin_url: str | None = Field(default=None, max_length=500)
+    founder_email: str | None = Field(default=None, max_length=320)
+    confidence: float = Field(..., ge=0.0, le=1.0)
+    source: str | None = Field(default="agent-server", max_length=100)
+    sources: list[str] = Field(default_factory=list, max_length=100)
+
+
+@app.post("/api/v1/leads/exists")
+def leads_exists(
+    req: LeadsExistsRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, list[str]]:
+    """Return which of the supplied domains the platform already knows."""
+    _require_agent_token(x_agent_token)
+    try:
+        known = platform_leads_known_domains(req.domains)
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"known": known}
+
+
+@app.post("/api/v1/leads/upsert")
+def leads_upsert(
+    req: LeadUpsertRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Idempotently upsert a verified lead keyed on normalised domain."""
+    _require_agent_token(x_agent_token)
+    try:
+        result = platform_upsert_lead(req.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"ok": True, **result}
 
 
 # -----------------------------------------------------------------------------

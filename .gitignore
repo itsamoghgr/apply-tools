@@ -40,3 +40,9 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# agent server
+agent_server/venv/
+agent_server/.env
+agent_server/*.egg-info/
+.pytest_cache/

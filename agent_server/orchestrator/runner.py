@@ -1,0 +1,243 @@
+"""RUNNER — bridges FastAPI BackgroundTasks to run_pipeline.
+
+Builds the `Stages` bundle.  In Phase 1 the bundle is fully STUBBED so the
+entire loop runs end-to-end without any web requests or LLM calls.
+
+Phase-2/3 note: replace `build_stages()` to wire real implementations.
+The stub helpers are intentionally kept in this file so the real stages
+can be imported from their canonical modules (`agents/`, `stages/`) in later
+phases without touching the loop.
+"""
+
+from __future__ import annotations
+
+import random
+
+from agent_server.contracts.records import (
+    CandidateCompany,
+    PlatformUpsertRequest,
+    ResearchResult,
+    VerifiedLead,
+)
+from agent_server.db.agent_db import (
+    audit_add,
+    outbox_add,
+    outbox_mark_sent,
+)
+from agent_server.log import get_logger
+from agent_server.orchestrator.loop import Stages, run_pipeline
+
+logger = get_logger(__name__)
+
+# ---------------------------------------------------------------------------
+# PHASE 1 STUBS — replaced in Phase 2/3 with real agent implementations
+# ---------------------------------------------------------------------------
+#
+# Each stub is a plain function matching the contract signature in
+# CONTRACTS.md §8.  They are fast, fully deterministic (given the same seed),
+# and never make network calls.
+
+
+def _stub_discover(
+    job_id: str,
+    query_hint: str,
+    target: int,
+) -> list[CandidateCompany]:
+    """Return 80 fake candidates so the loop always has plenty to process.
+
+    Emits more than any realistic `target` so the stop-at-target path is
+    exercised end-to-end without needing a real discovery agent.
+    """
+    count = 80  # always > default target of 50
+    logger.bind(job_id=job_id).info("stub_discover", count=count, query_hint=query_hint)
+    return [
+        CandidateCompany(
+            name=f"Fake Company {i}",
+            domain=f"fake-{i}.com",
+            source="open_web",
+            source_url=f"https://fake-{i}.com/about",
+            description=f"Stub company number {i}",
+        )
+        for i in range(1, count + 1)
+    ]
+
+
+def _stub_dedup(
+    job_id: str,
+    candidates: list[CandidateCompany],
+) -> list[CandidateCompany]:
+    """Pass-through dedup: drop exact domain duplicates, preserve order.
+
+    A trivial O(n) implementation — the real dedup (Phase 2) will also check
+    the seen-cache and normalize domains.
+    """
+    seen: set[str] = set()
+    result: list[CandidateCompany] = []
+    for c in candidates:
+        if c.domain not in seen:
+            seen.add(c.domain)
+            result.append(c)
+    logger.bind(job_id=job_id).info(
+        "stub_dedup", input=len(candidates), output=len(result)
+    )
+    return result
+
+
+def _stub_research(
+    job_id: str,
+    candidate: CandidateCompany,
+) -> ResearchResult:
+    """Echo the candidate back with a fake founder name.
+
+    The real research agent (Phase 3) will do open-web search + LLM extraction.
+    """
+    return ResearchResult(
+        domain=candidate.domain,
+        name=candidate.name,
+        funding_stage=candidate.funding_stage,
+        funding_amount=candidate.funding_amount,
+        founder_name=f"Founder of {candidate.name}",
+        founder_linkedin_url=None,  # not queried in stubs
+        sources=[candidate.source_url] if candidate.source_url else [],
+        used_shortcut=False,
+    )
+
+
+def _stub_verify(
+    job_id: str,
+    research: ResearchResult,
+) -> VerifiedLead:
+    """Return a VerifiedLead with a deterministic (hash-based) confidence score.
+
+    The real verifier (Phase 2) will use hunter.io, abstract-api, and SMTP
+    probing to produce a real confidence score.
+    """
+    # Deterministic pseudo-random confidence in [0.5, 0.9] based on the domain.
+    rng = random.Random(hash(research.domain))
+    confidence = round(rng.uniform(0.5, 0.9), 3)
+
+    return VerifiedLead(
+        domain=research.domain,
+        name=research.name,
+        funding_stage=research.funding_stage,
+        funding_amount=research.funding_amount,
+        founder_name=research.founder_name,
+        founder_linkedin_url=research.founder_linkedin_url,
+        founder_email=f"founder@{research.domain}",
+        confidence=confidence,
+        verification_detail={"stub": True, "confidence_method": "hash_rng"},
+        sources=research.sources,
+    )
+
+
+def _stub_deliver(
+    job_id: str,
+    lead: VerifiedLead,
+    dry_run: bool,
+) -> None:
+    """Write lead to the outbox; if not dry_run, immediately mark it sent.
+
+    In Phase 1 there is no real platform call.  The seam for the real
+    platform HTTP client is marked with TODO below.
+
+    TODO (Phase 2): replace the `outbox_mark_sent` shortcut with a real call
+    to `stages/deliver.py` which POSTs to PLATFORM_API_BASE/api/v1/leads/upsert
+    and only marks sent on HTTP 2xx.
+    """
+    payload = PlatformUpsertRequest.from_verified(lead).model_dump()
+    outbox_id = outbox_add(job_id, lead.domain, payload)
+
+    if not dry_run:
+        # Phase 1: no real platform call — mark sent immediately.
+        # TODO (Phase 2): replace with actual HTTP upsert to the platform API.
+        outbox_mark_sent(outbox_id)
+        audit_add(
+            job_id,
+            "deliver",
+            "sent",
+            {"domain": lead.domain, "outbox_id": outbox_id, "stub": True},
+            domain=lead.domain,
+        )
+    else:
+        audit_add(
+            job_id,
+            "deliver",
+            "dry_run",
+            {"domain": lead.domain, "outbox_id": outbox_id},
+            domain=lead.domain,
+        )
+
+    logger.bind(job_id=job_id).debug(
+        "stub_deliver", domain=lead.domain, outbox_id=outbox_id, dry_run=dry_run
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stage factories
+# ---------------------------------------------------------------------------
+
+
+def build_stub_stages() -> Stages:
+    """Return a fully-stubbed Stages bundle (Phase 1).
+
+    All stages are fast, in-memory, and deterministic.  Safe to call in tests
+    without a live LLM or network.
+    """
+    return Stages(
+        discover=_stub_discover,
+        dedup=_stub_dedup,
+        research=_stub_research,
+        verify=_stub_verify,
+        deliver=_stub_deliver,
+    )
+
+
+def build_stages() -> Stages:
+    """Return the production Stages bundle.
+
+    TODO (Phase 2/3): assemble real implementations:
+      - discover: agents/discovery.py  run_discovery (AgentDeps injected)
+      - dedup:    stages/dedup.py      dedup_candidates
+      - research: agents/research.py   run_research  (AgentDeps injected)
+      - verify:   stages/verify.py     verify_lead
+      - deliver:  stages/deliver.py    deliver_lead
+
+    For Phase 1 this falls back to stubs so the server still runs end-to-end.
+    """
+    # TODO (Phase 2): wire real stages here.
+    return build_stub_stages()
+
+
+# ---------------------------------------------------------------------------
+# Background-task entry point (called from api/app.py)
+# ---------------------------------------------------------------------------
+
+
+def launch_pipeline(
+    job_id: str,
+    *,
+    query_hint: str,
+    target: int,
+    dry_run: bool,
+) -> None:
+    """Entry point for FastAPI BackgroundTasks.
+
+    Builds the stage bundle and delegates to run_pipeline.  Errors are
+    already caught inside run_pipeline (job marked failed); this function
+    never raises.
+    """
+    logger.info(
+        "launch_pipeline",
+        job_id=job_id,
+        target=target,
+        dry_run=dry_run,
+        query_hint=query_hint,
+    )
+    stages = build_stages()
+    run_pipeline(
+        job_id,
+        query_hint=query_hint,
+        target=target,
+        dry_run=dry_run,
+        stages=stages,
+    )
