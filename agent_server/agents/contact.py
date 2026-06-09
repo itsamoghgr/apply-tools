@@ -174,7 +174,13 @@ def _run_tool(name: str, args: dict, deps: AgentDeps, verifier: WaterfallVerifie
 
         return json.dumps({"error": f"unknown tool {name}"})
     except Exception as exc:  # never let a tool crash the agent
-        logger.warning("contact.tool_error", tool=name, error=str(exc))
+        logger.warning(
+            "contact.tool_error",
+            tool=name,
+            error=str(exc),
+            error_type=type(exc).__name__,
+            args=args,
+        )
         return json.dumps({"error": str(exc)})
 
 
@@ -222,9 +228,19 @@ def find_contact(
             results: list[dict] = []
             for tc in tool_calls:
                 calls += 1
-                out = _run_tool(tc.get("name", ""), tc.get("input", {}) or {},
-                                deps, verifier, found)
-                deps.audit("contact", "tool", {"tool": tc.get("name"), "domain": domain})
+                tname = tc.get("name", "")
+                targs = tc.get("input", {}) or {}
+                out = _run_tool(tname, targs, deps, verifier, found)
+                deps.audit("contact", "tool", {"tool": tname, "domain": domain})
+                # Visible in the agent-server log so the work is observable.
+                logger.info(
+                    "contact.tool",
+                    domain=domain,
+                    tool=tname,
+                    query=targs.get("query"),
+                    candidate=targs.get("email"),
+                    result_preview=out[:140],
+                )
                 results.append(
                     {"type": "tool_result", "tool_use_id": tc.get("id", ""),
                      "content": out}
@@ -252,17 +268,35 @@ def _parse_json(text: str) -> dict:
 
 
 def _finalize(parsed: dict, found: list[dict], domain: str) -> ContactResult:
-    """Trust the model's final JSON, but fall back to the best verified candidate
-    if the model returned nothing usable."""
-    email = parsed.get("email")
-    if email and "@" in str(email):
+    """Honor the model's final decision.
+
+    The agent has seen all the tool results and reasons about which (if any) is
+    the *right* person — e.g. a provider may return a high-scoring address for a
+    DIFFERENT employee. So:
+      - model gave an email  → use it (its considered choice);
+      - model EXPLICITLY said email:null → respect "couldn't confirm" and return
+        no email (do NOT override with a high-scored wrong candidate);
+      - model returned nothing parseable → fall back to the best verified one.
+    """
+    if "email" in parsed:  # the model made an explicit decision
+        email = parsed.get("email")
+        if email and "@" in str(email):
+            return ContactResult(
+                email=str(email),
+                score=float(parsed.get("score", 0.0) or 0.0),
+                method=str(parsed.get("method", "agent")),
+                rationale=str(parsed.get("rationale", "")),
+                candidates=found,
+            )
+        # Explicit null/empty → trust it; surface candidates for transparency.
         return ContactResult(
-            email=str(email),
-            score=float(parsed.get("score", 0.0) or 0.0),
-            method=str(parsed.get("method", "agent")),
-            rationale=str(parsed.get("rationale", "")),
+            email=None,
+            score=0.0,
+            method="none",
+            rationale=str(parsed.get("rationale", "") or "agent could not confirm"),
             candidates=found,
         )
+    # No usable JSON at all → best-effort fallback.
     return _best_of(found, domain, rationale=str(parsed.get("rationale", "")))
 
 

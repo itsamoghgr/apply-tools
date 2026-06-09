@@ -43,20 +43,51 @@ export default function LeadsTable({
   const [adding, setAdding] = useState(false);
   const [finding, setFinding] = useState(false);
 
+  // Live progress for the bulk Find-emails run.
+  type FindRow = {
+    name: string;
+    status: "pending" | "searching" | "found" | "miss";
+    email?: string;
+    method?: string;
+  };
+  const [progress, setProgress] = useState<{
+    done: number;
+    total: number;
+    rows: FindRow[];
+  } | null>(null);
+
   // Leads with no email but something to work from (LinkedIn or a company).
   const missingEmail = useMemo(
     () => leads.filter((l) => !l.email && (l.currentCompany || l.linkedinUrl)),
     [leads]
   );
 
-  // Bulk "Find emails": run the agent's verification waterfall for each lead
-  // missing an email, then patch any address found back onto the lead.
+  // Bulk "Find emails": run the agentic contact-finder for each lead missing an
+  // email, patch any address found, and stream per-lead progress to the UI.
   async function findEmails() {
     if (finding || missingEmail.length === 0) return;
     setFinding(true);
+    const rows: FindRow[] = missingEmail.map((l) => ({
+      name: l.name,
+      status: "pending",
+    }));
+    setProgress({ done: 0, total: missingEmail.length, rows });
     let found = 0;
+
+    const update = (i: number, patch: Partial<FindRow>) =>
+      setProgress((p) =>
+        p
+          ? {
+              ...p,
+              rows: p.rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)),
+            }
+          : p
+      );
+
     try {
-      for (const l of missingEmail) {
+      for (let i = 0; i < missingEmail.length; i++) {
+        const l = missingEmail[i];
+        update(i, { status: "searching" });
         try {
           const res = await fetch(`/api/agent/api/v1/verify/email`, {
             method: "POST",
@@ -66,20 +97,22 @@ export default function LeadsTable({
               founder_name: l.name,
             }),
           });
-          if (!res.ok) continue;
-          const v = await res.json();
+          const v = res.ok ? await res.json() : {};
           if (v.email) {
-            // Persist the discovered email on the lead.
             await fetch(`/api/proxy/leads/${l.id}`, {
               method: "PATCH",
               headers: { "content-type": "application/json" },
               body: JSON.stringify({ email: v.email }),
             });
             found += 1;
+            update(i, { status: "found", email: v.email, method: v.method });
+          } else {
+            update(i, { status: "miss" });
           }
         } catch {
-          /* skip this lead, keep going */
+          update(i, { status: "miss" });
         }
+        setProgress((p) => (p ? { ...p, done: p.done + 1 } : p));
       }
       if (found > 0) {
         toast.success(`Found ${found} email${found === 1 ? "" : "s"}.`);
@@ -141,7 +174,9 @@ export default function LeadsTable({
             ) : (
               <MailSearch className="h-4 w-4" />
             )}
-            {finding ? "Finding…" : `Find emails (${missingEmail.length})`}
+            {finding && progress
+              ? `Finding ${progress.done}/${progress.total}…`
+              : `Find emails (${missingEmail.length})`}
           </button>
         )}
         <button
@@ -162,6 +197,58 @@ export default function LeadsTable({
       )}
 
       {adding && <AddLeadForm onClose={() => setAdding(false)} />}
+
+      {/* Live Find-emails progress: the contact agent works one lead at a time. */}
+      {progress && (
+        <div className="rounded-xl border border-base-300/60 bg-base-200/30">
+          <div className="flex items-center justify-between px-3.5 py-2 border-b border-base-300/40">
+            <span className="text-xs font-medium flex items-center gap-1.5">
+              <MailSearch className="h-3.5 w-3.5 opacity-60" />
+              Finding emails — the agent searches, guesses patterns &amp; verifies
+            </span>
+            <span className="text-xs font-mono tabular-nums opacity-60">
+              {progress.done}/{progress.total}
+            </span>
+          </div>
+          <progress
+            className="progress progress-primary w-full h-1 rounded-none"
+            value={progress.done}
+            max={progress.total}
+          />
+          <div className="max-h-48 overflow-y-auto px-3.5 py-2 space-y-1 text-xs">
+            {progress.rows.map((r, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <span className="w-4 shrink-0 text-center">
+                  {r.status === "found"
+                    ? "✓"
+                    : r.status === "miss"
+                      ? "—"
+                      : r.status === "searching"
+                        ? "⋯"
+                        : ""}
+                </span>
+                <span className="font-medium truncate max-w-[180px]">
+                  {r.name}
+                </span>
+                {r.status === "searching" && (
+                  <span className="opacity-50">searching…</span>
+                )}
+                {r.status === "found" && (
+                  <span className="text-success truncate">
+                    {r.email}
+                    {r.method ? (
+                      <span className="opacity-50"> · {r.method}</span>
+                    ) : null}
+                  </span>
+                )}
+                {r.status === "miss" && (
+                  <span className="opacity-40">no email found</span>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {filtered.length === 0 ? (
         <div className="glass-card p-12 text-center">
