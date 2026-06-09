@@ -78,15 +78,18 @@ _TOOLS: list[dict] = [
 
 # ── system prompt ──────────────────────────────────────────────────────────────
 _SYSTEM = """\
-You are a research agent. Your task is to find information about a startup company:
-1. Funding stage (e.g. "Seed", "Series A", "Series B") and funding amount (e.g. "$5M").
-2. The name of the founder (CEO or primary founder).
-3. The founder's LinkedIn URL — you will get this ONLY from search result snippets \
-or URLs (never by fetching a LinkedIn page).
+You are a thorough company-research agent. Find as much as you can about a startup:
+1. Funding stage (e.g. "Seed", "Series A") and funding amount (e.g. "$5M").
+2. The founder (CEO or primary founder) and their LinkedIn URL — the LinkedIn URL \
+ONLY from search result snippets or URLs (never by fetching a LinkedIn page).
+3. Company attributes: employee count, estimated revenue/ARR, HQ location, industry, \
+and the date of the most recent funding round.
 
-Use the provided tools (web_search, fetch_page) to gather evidence. \
-Search for "[company name] funding round founder", "[company name] CEO LinkedIn", etc. \
-Read non-LinkedIn pages (news, company about/team pages) to extract facts.
+Work thoroughly: run SEPARATE targeted searches for the attributes you don't yet have, \
+e.g. "[company] number of employees", "[company] headquarters location", \
+"[company] revenue ARR", "[company] industry", "[company] latest funding round date". \
+Read non-LinkedIn pages (news, Crunchbase-style summaries, the company about/team page) \
+to extract facts. Prefer recent, credible sources.
 
 When you have enough evidence (or have exhausted reasonable attempts), output a JSON \
 object — and ONLY a JSON object — in this exact shape:
@@ -95,14 +98,25 @@ object — and ONLY a JSON object — in this exact shape:
   "funding_amount": "<string or null>",
   "founder_name": "<string or null>",
   "founder_linkedin_url": "<full linkedin.com/in/... URL or null>",
+  "employee_count": "<string or null>",
+  "revenue": "<string or null>",
+  "location": "<string or null>",
+  "industry": "<string or null>",
+  "last_round_date": "<string or null>",
   "sources": ["<url1>", "<url2>"]
 }
 
 Rules:
 - funding_stage: short label like "Seed", "Series A", "Pre-Seed", "Series B", etc.
-- funding_amount: human-readable like "$5M", "$12.5M", etc.  null if not found.
+- funding_amount: human-readable like "$5M", "$12.5M".  null if not found.
 - founder_linkedin_url: MUST be a real linkedin.com/in/<slug> URL seen in a search \
 snippet or result URL.  null if not found.
+- employee_count: a range or count like "11-50", "~200".  null if not found.
+- revenue: like "$10M ARR", "$2M-$5M".  null if not found (common for startups).
+- location: HQ city/region, e.g. "San Francisco, CA" or "London, UK".
+- industry: short sector tag, e.g. "Developer tools", "Fintech", "Robotics".
+- last_round_date: month/year of the most recent round, e.g. "2024-09" or "Sep 2024".
+- Use null for anything you cannot find — never guess or fabricate.
 - sources: list of URLs you actually read or searched.
 - Output ONLY the JSON object — no markdown fences, no extra prose.
 """
@@ -210,6 +224,11 @@ def _do_research(
     result_funding_amount = candidate.funding_amount
     result_founder_name: str | None = None
     result_founder_linkedin_url: str | None = None
+    result_employee_count: str | None = None
+    result_revenue: str | None = None
+    result_location: str | None = None
+    result_industry: str | None = None
+    result_last_round_date: str | None = None
     sources: list[str] = []
 
     # ── TOOL-USE LOOP ───────────────────────────────────────────────────────
@@ -218,18 +237,22 @@ def _do_research(
     if has_structured_funding:
         # Tell the LLM we already have funding; focus on founder
         system = (
-            "You are a research agent. Your task is to find the founder of a startup "
-            "and their LinkedIn URL.\n\n"
-            "Funding information is already known (do NOT re-derive it).\n\n"
-            "1. Find the founder's name (CEO or primary founder).\n"
-            "2. Find their LinkedIn URL — from search result snippets/URLs ONLY; "
-            "never fetch a LinkedIn page.\n\n"
+            "You are a thorough company-research agent. Funding is already known "
+            "(do NOT re-derive it). Find the founder AND company attributes.\n\n"
+            "1. Founder name (CEO or primary founder).\n"
+            "2. Their LinkedIn URL — from search snippets/URLs ONLY; never fetch a "
+            "LinkedIn page.\n"
+            "3. Company attributes via targeted searches: employee count, revenue/ARR, "
+            "HQ location, industry, and the most recent funding round date.\n\n"
             "Use web_search and fetch_page tools as needed. "
             "When done, output ONLY a JSON object:\n"
             '{"founder_name": "<string or null>", "founder_linkedin_url": "<url or null>", '
-            '"sources": ["<url1>"]}\n\n'
+            '"employee_count": "<string or null>", "revenue": "<string or null>", '
+            '"location": "<string or null>", "industry": "<string or null>", '
+            '"last_round_date": "<string or null>", "sources": ["<url1>"]}\n\n'
             "Rules: founder_linkedin_url must be a real linkedin.com/in/<slug> URL "
-            "seen in a search snippet or URL. Output ONLY the JSON — no fences, no prose."
+            "seen in a search snippet or URL. Use null for anything not found; never "
+            "fabricate. Output ONLY the JSON — no fences, no prose."
         )
 
     initial_message = {
@@ -288,6 +311,15 @@ def _do_research(
             candidate_linkedin = parsed.get("founder_linkedin_url")
             if candidate_linkedin and _LINKEDIN_RE.search(candidate_linkedin):
                 result_founder_linkedin_url = _LINKEDIN_RE.search(candidate_linkedin).group(0)  # type: ignore[union-attr]
+
+            # Richer company attributes (best-effort; null when not found).
+            result_employee_count = parsed.get("employee_count") or result_employee_count
+            result_revenue = parsed.get("revenue") or result_revenue
+            result_location = parsed.get("location") or result_location
+            result_industry = parsed.get("industry") or result_industry
+            result_last_round_date = (
+                parsed.get("last_round_date") or result_last_round_date
+            )
 
             parsed_sources = parsed.get("sources") or []
             if isinstance(parsed_sources, list):
@@ -368,6 +400,11 @@ def _do_research(
                     result_founder_linkedin_url
                     or _LINKEDIN_RE.search(candidate_linkedin).group(0)  # type: ignore[union-attr]
                 )
+            result_employee_count = result_employee_count or parsed.get("employee_count")
+            result_revenue = result_revenue or parsed.get("revenue")
+            result_location = result_location or parsed.get("location")
+            result_industry = result_industry or parsed.get("industry")
+            result_last_round_date = result_last_round_date or parsed.get("last_round_date")
         except Exception as exc:  # noqa: BLE001
             log.warning("research_cap_summary_failed", error=str(exc))
 
@@ -416,6 +453,11 @@ def _do_research(
         funding_amount=result_funding_amount,
         founder_name=result_founder_name,
         founder_linkedin_url=result_founder_linkedin_url,
+        employee_count=result_employee_count,
+        revenue=result_revenue,
+        location=result_location,
+        industry=result_industry,
+        last_round_date=result_last_round_date,
         sources=unique_sources,
         used_shortcut=used_shortcut,
     )

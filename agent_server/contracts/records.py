@@ -45,6 +45,12 @@ class ResearchResult(BaseModel):
     founder_name: str | None = None
     # From PUBLIC SEARCH SNIPPETS ONLY; the profile page is never read.
     founder_linkedin_url: str | None = None
+    # Richer company attributes (best-effort; thorough research fills these).
+    employee_count: str | None = None   # e.g. "11-50", "~200"
+    revenue: str | None = None          # e.g. "$10M ARR" (often null for startups)
+    location: str | None = None         # HQ city/region, e.g. "San Francisco, CA"
+    industry: str | None = None         # e.g. "Developer tools", "Fintech"
+    last_round_date: str | None = None  # most recent round, e.g. "2024-09"
     sources: list[str] = Field(default_factory=list)
     used_shortcut: bool = False
 
@@ -63,6 +69,11 @@ class VerifiedLead(BaseModel):
     founder_name: str | None = None
     founder_linkedin_url: str | None = None
     founder_email: str | None = None
+    employee_count: str | None = None
+    revenue: str | None = None
+    location: str | None = None
+    industry: str | None = None
+    last_round_date: str | None = None
     confidence: float
     verification_detail: dict[str, Any] = Field(default_factory=dict)
     sources: list[str] = Field(default_factory=list)
@@ -81,6 +92,11 @@ class PlatformUpsertRequest(BaseModel):
     founder_name: str | None = None
     founder_linkedin_url: str | None = None
     founder_email: str | None = None
+    employee_count: str | None = None
+    revenue: str | None = None
+    location: str | None = None
+    industry: str | None = None
+    last_round_date: str | None = None
     confidence: float
     source: str = "agent-server"
     sources: list[str] = Field(default_factory=list)
@@ -95,6 +111,11 @@ class PlatformUpsertRequest(BaseModel):
             founder_name=lead.founder_name,
             founder_linkedin_url=lead.founder_linkedin_url,
             founder_email=lead.founder_email,
+            employee_count=lead.employee_count,
+            revenue=lead.revenue,
+            location=lead.location,
+            industry=lead.industry,
+            last_round_date=lead.last_round_date,
             confidence=lead.confidence,
             sources=lead.sources,
         )

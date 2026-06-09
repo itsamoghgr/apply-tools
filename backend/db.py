@@ -964,6 +964,11 @@ def platform_upsert_lead(payload: dict) -> dict:
         "fundingStage": payload.get("funding_stage"),
         "fundingAmount": payload.get("funding_amount"),
         "founderName": founder_name,
+        "employeeCount": payload.get("employee_count"),
+        "revenue": payload.get("revenue"),
+        "location": payload.get("location"),
+        "industry": payload.get("industry"),
+        "lastRoundDate": payload.get("last_round_date"),
         "confidence": payload.get("confidence"),
         "source": payload.get("source") or "agent-server",
         "sourcesJson": json.dumps(sources),
@@ -977,11 +982,13 @@ def platform_upsert_lead(payload: dict) -> dict:
         """
         INSERT INTO "Lead" (
             "id", "name", "email", "linkedinUrl", "domain", "companyName",
-            "fundingStage", "fundingAmount", "founderName", "confidence",
+            "fundingStage", "fundingAmount", "founderName", "employeeCount",
+            "revenue", "location", "industry", "lastRoundDate", "confidence",
             "source", "sourcesJson", "updatedAt"
         ) VALUES (
             :id, :name, :email, :linkedinUrl, :domain, :companyName,
-            :fundingStage, :fundingAmount, :founderName, :confidence,
+            :fundingStage, :fundingAmount, :founderName, :employeeCount,
+            :revenue, :location, :industry, :lastRoundDate, :confidence,
             :source, CAST(:sourcesJson AS jsonb), CURRENT_TIMESTAMP
         )
         ON CONFLICT ("domain") WHERE "domain" IS NOT NULL
@@ -992,6 +999,11 @@ def platform_upsert_lead(payload: dict) -> dict:
             "fundingStage"  = COALESCE(EXCLUDED."fundingStage", "Lead"."fundingStage"),
             "fundingAmount" = COALESCE(EXCLUDED."fundingAmount", "Lead"."fundingAmount"),
             "founderName"   = COALESCE(EXCLUDED."founderName", "Lead"."founderName"),
+            "employeeCount" = COALESCE(EXCLUDED."employeeCount", "Lead"."employeeCount"),
+            "revenue"       = COALESCE(EXCLUDED."revenue", "Lead"."revenue"),
+            "location"      = COALESCE(EXCLUDED."location", "Lead"."location"),
+            "industry"      = COALESCE(EXCLUDED."industry", "Lead"."industry"),
+            "lastRoundDate" = COALESCE(EXCLUDED."lastRoundDate", "Lead"."lastRoundDate"),
             "confidence"    = EXCLUDED."confidence",
             "source"        = EXCLUDED."source",
             "sourcesJson"   = EXCLUDED."sourcesJson",

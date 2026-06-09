@@ -131,6 +131,11 @@ model Lead {
   fundingStage    String?
   fundingAmount   String?
   founderName     String?
+  employeeCount   String?
+  revenue         String?
+  location        String?
+  industry        String?
+  lastRoundDate   String?
   confidence      Float?
   source          String?
   sourcesJson     Json?
