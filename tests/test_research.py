@@ -385,7 +385,37 @@ class TestNonShortcutPath:
         assert result.funding_stage == "Seed"
         assert result.funding_amount == "$8M"
         assert result.founder_name == "Frank Lee"
-        assert len(llm.calls) == 2   # two LLM turns
+        # 2 main-loop turns + 1 dedicated company-attribute extraction pass
+        # (runs because employee_count/revenue/location/etc. are still missing).
+        assert len(llm.calls) == 3
+
+    def test_attribute_pass_fills_company_fields(self):
+        """The dedicated attribute pass extracts employee_count / industry /
+        location / revenue / last_round_date from search snippets."""
+        candidate = _make_candidate(name="DeltaCo", domain="deltaco.com")
+        # Turn 1: final founder/funding answer (no attributes). Turn 2: the
+        # attribute-extraction pass returns the company attributes.
+        llm = FakeLLM([
+            {"text": '{"funding_stage": "Series A", "funding_amount": "$15M", '
+                     '"founder_name": "Dana Cole", "founder_linkedin_url": null, '
+                     '"employee_count": null, "revenue": null, "location": null, '
+                     '"industry": null, "last_round_date": null, "sources": []}',
+             "tool_calls": []},
+            {"text": '{"employee_count": "51-100", "revenue": "$12M ARR", '
+                     '"location": "Austin, TX", "industry": "Fintech", '
+                     '"last_round_date": "2024-08"}',
+             "tool_calls": []},
+        ])
+        search_fn = _make_fake_search({
+            "deltaco": [SearchResult(title="DeltaCo", url="https://x.com/d",
+                                     snippet="Austin fintech, 51-100 employees")]
+        })
+        result = run_research("job-attr", candidate, _make_deps(llm, search_fn))
+        assert result.employee_count == "51-100"
+        assert result.revenue == "$12M ARR"
+        assert result.location == "Austin, TX"
+        assert result.industry == "Fintech"
+        assert result.last_round_date == "2024-08"
 
     def test_llm_fetch_tool_call_reads_page(self):
         """LLM requests fetch_page for a non-LinkedIn URL — it is executed."""
