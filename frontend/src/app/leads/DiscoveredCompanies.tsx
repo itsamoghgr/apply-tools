@@ -54,47 +54,59 @@ export default function DiscoveredCompanies({
   const [conf, setConf] = useState<ConfFilter>("all");
   // Optimistic removal: hide deleted ids immediately, reconcile on refresh.
   const [removed, setRemoved] = useState<Set<string>>(new Set());
-  const [deleting, setDeleting] = useState<string | null>(null);
 
-  async function deleteCompany(c: CompanyLead) {
-    if (deleting) return;
-    if (
-      !confirm(
-        `Delete "${c.companyName ?? c.domain}"? It won't be surfaced by future hunts.`
-      )
-    )
-      return;
-    setDeleting(c.id);
-    setRemoved((prev) => new Set(prev).add(c.id)); // optimistic
-    try {
-      // 1. Remove the company lead from the platform.
-      const res = await fetch(`/api/proxy/leads/${c.id}`, { method: "DELETE" });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({}));
-        throw new Error(d.detail || `HTTP ${res.status}`);
+  function hide(id: string, on: boolean) {
+    setRemoved((prev) => {
+      const next = new Set(prev);
+      if (on) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
+
+  // Gmail-style delete: hide the row immediately and show an Undo toast. The
+  // actual DELETE fires only after the toast's grace window, so Undo can cancel
+  // it with no network round-trip — no jarring browser confirm() popup.
+  function deleteCompany(c: CompanyLead) {
+    const label = c.companyName ?? c.domain ?? "company";
+    hide(c.id, true);
+    let undone = false;
+
+    const timer = setTimeout(async () => {
+      if (undone) return;
+      try {
+        const res = await fetch(`/api/proxy/leads/${c.id}`, { method: "DELETE" });
+        if (!res.ok) {
+          const d = await res.json().catch(() => ({}));
+          throw new Error(d.detail || `HTTP ${res.status}`);
+        }
+        // Remember the domain as dropped so future hunts skip it (best-effort).
+        if (c.domain) {
+          fetch(`/api/agent/api/v1/seen/drop`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ domain: c.domain, reason: "user_deleted" }),
+          }).catch(() => {});
+        }
+        router.refresh();
+      } catch (e) {
+        hide(c.id, false); // restore on failure
+        toast.error(`Could not delete ${label}: ${(e as Error).message}`);
       }
-      // 2. Remember the domain as dropped so future hunts skip it. Best-effort:
-      //    if the agent server is down, the delete still stands.
-      if (c.domain) {
-        fetch(`/api/agent/api/v1/seen/drop`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ domain: c.domain, reason: "user_deleted" }),
-        }).catch(() => {});
-      }
-      toast.success(`Deleted ${c.companyName ?? c.domain}`);
-      router.refresh();
-    } catch (e) {
-      // Roll back the optimistic removal.
-      setRemoved((prev) => {
-        const next = new Set(prev);
-        next.delete(c.id);
-        return next;
-      });
-      toast.error(`Could not delete: ${(e as Error).message}`);
-    } finally {
-      setDeleting(null);
-    }
+    }, 4500);
+
+    toast(`Deleted ${label}`, {
+      description: "Won't be surfaced by future hunts.",
+      duration: 4500,
+      action: {
+        label: "Undo",
+        onClick: () => {
+          undone = true;
+          clearTimeout(timer);
+          hide(c.id, false);
+        },
+      },
+    });
   }
 
   const filtered = useMemo(() => {
@@ -308,7 +320,6 @@ export default function DiscoveredCompanies({
                       <button
                         type="button"
                         onClick={() => deleteCompany(c)}
-                        disabled={deleting === c.id}
                         className="btn btn-ghost btn-xs btn-square text-error/70 hover:text-error hover:bg-error/10"
                         title="Delete — won't be re-surfaced by future hunts"
                         aria-label="Delete company"
