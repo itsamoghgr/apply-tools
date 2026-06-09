@@ -3,71 +3,155 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Radar, Loader2, Square } from "lucide-react";
+import { Radar, Loader2, Square, Terminal } from "lucide-react";
 
 type JobStatus = {
-  job_id: string;
   status: "pending" | "running" | "succeeded" | "failed" | "stopped";
-  verified_count: number;
-  target_count: number;
+  verified_count: number | null;
+  target_count: number | null;
   candidates_total: number | null;
-  candidates_processed: number;
+  candidates_processed: number | null;
   stop_reason: string | null;
 };
 
+type Activity = {
+  id: number;
+  stage: string;
+  event: string;
+  domain: string | null;
+  data: Record<string, unknown> | null;
+};
+
 const TERMINAL = new Set(["succeeded", "failed", "stopped"]);
+
+// Turn a raw audit event into a short human line for the live log.
+function describe(a: Activity): string | null {
+  const d = a.data ?? {};
+  const dom = a.domain ? ` ${a.domain}` : "";
+  switch (`${a.stage}.${a.event}`) {
+    case "discovery.start":
+      return d.query_hint
+        ? `Discovering: “${d.query_hint}”`
+        : "Discovering companies…";
+    case "discovery.floor_fetched":
+      return `Pulled ${d.total_floor ?? 0} from free sources (YC ${d.yc ?? 0}, RSS ${d.rss ?? 0}, PH ${d.product_hunt ?? d.producthunt ?? 0})`;
+    case "discovery.open_web_start":
+      return "Reading the open web…";
+    case "discovery.tool_called":
+      return d.tool === "web_search"
+        ? "🔎 Searching the web…"
+        : "📄 Reading a page…";
+    case "discovery.open_web_cap":
+      return `Open-web reading done (${d.tool_calls_used ?? "?"} tool calls)`;
+    case "discovery.open_web_error":
+      return "Open-web reading hit a snag — using free sources";
+    case "discovery.done":
+      return `Found ${d.total ?? d.raw_count ?? "?"} candidate companies`;
+    case "dedup.done":
+      return `Deduplicated → ${d.survivors ?? "?"} to research`;
+    case "loop.iteration_start":
+      return `Researching${dom}…`;
+    case "research.shortcut_taken":
+    case "research.shortcut":
+      return `↳${dom}: funding from a structured source`;
+    case "research.llm_call":
+      return `↳${dom}: thinking…`;
+    case "research.llm_final":
+      return `↳${dom}: research complete`;
+    case "research.done":
+      return d.founder
+        ? `↳${dom}: founder ${d.founder}`
+        : `↳${dom}: researched`;
+    case "research.fatal_error":
+      return `↳${dom}: research error (skipped)`;
+    case "verify.done":
+      return `↳${dom}: verified (confidence ${Math.round(Number(d.confidence ?? 0) * 100)}%)`;
+    case "deliver.outbox_queued":
+      return `↳${dom}: queued for delivery`;
+    case "deliver.delivered":
+    case "deliver.sent":
+      return `✓ Delivered${dom}`;
+    case "deliver.delivery_failed":
+      return `↳${dom}: delivery failed (will retry)`;
+    default:
+      return null; // noisy/internal events are hidden
+  }
+}
 
 export default function HuntPanel() {
   const router = useRouter();
   const [target, setTarget] = useState(10);
   const [hint, setHint] = useState("");
   const [job, setJob] = useState<JobStatus | null>(null);
+  const [log, setLog] = useState<{ id: number; text: string }[]>([]);
   const [starting, setStarting] = useState(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const esRef = useRef<EventSource | null>(null);
   const lastVerified = useRef(0);
+  const logEndRef = useRef<HTMLDivElement | null>(null);
 
-  // Poll the agent server while a job is in flight; refresh the table as new
-  // verified leads land, and stop polling on a terminal state.
+  // Auto-scroll the activity log to the newest line.
   useEffect(() => {
-    if (!job || TERMINAL.has(job.status)) return;
-    pollRef.current = setInterval(async () => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [log]);
+
+  // Clean up the SSE connection on unmount.
+  useEffect(() => () => esRef.current?.close(), []);
+
+  function openStream(jobId: string) {
+    esRef.current?.close();
+    const es = new EventSource(`/api/agent/api/v1/hunt/${jobId}/events`);
+    esRef.current = es;
+
+    es.addEventListener("activity", (e) => {
       try {
-        const res = await fetch(`/api/agent/api/v1/hunt/${job.job_id}`, {
-          cache: "no-store",
-        });
-        if (!res.ok) return;
-        const next: JobStatus = await res.json();
-        setJob(next);
-        // New leads were delivered — pull the fresh rows into the table.
-        if (next.verified_count > lastVerified.current) {
-          lastVerified.current = next.verified_count;
-          router.refresh();
-        }
-        if (TERMINAL.has(next.status)) {
-          router.refresh();
-          if (next.status === "succeeded") {
-            toast.success(
-              `Hunt complete — ${next.verified_count} verified leads.`
-            );
-          } else if (next.status === "failed") {
-            toast.error("Hunt failed. Check the agent server logs.");
-          } else {
-            toast(`Hunt ${next.status} (${next.stop_reason ?? ""}).`);
-          }
+        const a: Activity = JSON.parse((e as MessageEvent).data);
+        const text = describe(a);
+        if (text) setLog((prev) => [...prev, { id: a.id, text }]);
+      } catch {
+        /* ignore malformed line */
+      }
+    });
+
+    es.addEventListener("status", (e) => {
+      try {
+        const s: JobStatus = JSON.parse((e as MessageEvent).data);
+        setJob(s);
+        if ((s.verified_count ?? 0) > lastVerified.current) {
+          lastVerified.current = s.verified_count ?? 0;
+          router.refresh(); // pull newly delivered leads into the table
         }
       } catch {
-        /* transient; keep polling */
+        /* ignore */
       }
-    }, 2500);
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
+    });
+
+    const finish = (e: Event) => {
+      try {
+        const s: JobStatus = JSON.parse((e as MessageEvent).data);
+        setJob(s);
+        router.refresh();
+        if (s.status === "succeeded")
+          toast.success(`Hunt complete — ${s.verified_count} verified leads.`);
+        else if (s.status === "failed")
+          toast.error("Hunt failed. Check the agent server logs.");
+        else toast(`Hunt ${s.status} (${s.stop_reason ?? ""}).`);
+      } catch {
+        /* ignore */
+      }
+      es.close();
     };
-  }, [job, router]);
+    es.addEventListener("done", finish);
+    es.onerror = () => {
+      // Network blip or stream closed; close so the browser doesn't hammer it.
+      es.close();
+    };
+  }
 
   async function startHunt() {
     if (starting) return;
     setStarting(true);
     lastVerified.current = 0;
+    setLog([]);
     try {
       const res = await fetch(`/api/agent/api/v1/hunt`, {
         method: "POST",
@@ -83,7 +167,6 @@ export default function HuntPanel() {
       }
       const data = await res.json();
       setJob({
-        job_id: data.job_id,
         status: data.status ?? "pending",
         verified_count: 0,
         target_count: target,
@@ -91,6 +174,7 @@ export default function HuntPanel() {
         candidates_processed: 0,
         stop_reason: null,
       });
+      openStream(data.job_id);
       toast.success("Hunt started — discovering companies…");
     } catch (e) {
       toast.error(`Could not start hunt: ${(e as Error).message}`);
@@ -101,8 +185,11 @@ export default function HuntPanel() {
 
   const active = job && !TERMINAL.has(job.status);
   const pct =
-    job && job.target_count > 0
-      ? Math.min(100, Math.round((job.verified_count / job.target_count) * 100))
+    job && job.target_count
+      ? Math.min(
+          100,
+          Math.round(((job.verified_count ?? 0) / job.target_count) * 100)
+        )
       : 0;
 
   return (
@@ -199,6 +286,24 @@ export default function HuntPanel() {
               value={pct}
               max={100}
             />
+
+            {/* Live activity log streamed via SSE */}
+            {log.length > 0 && (
+              <div className="mt-1 rounded-lg border border-base-300/50 bg-base-300/20">
+                <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-base-300/40 text-[11px] uppercase tracking-wide opacity-50">
+                  <Terminal className="h-3 w-3" />
+                  Live activity
+                </div>
+                <div className="max-h-44 overflow-y-auto px-3 py-2 space-y-0.5 font-mono text-xs leading-relaxed">
+                  {log.slice(-80).map((l) => (
+                    <div key={l.id} className="opacity-80">
+                      {l.text}
+                    </div>
+                  ))}
+                  <div ref={logEndRef} />
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

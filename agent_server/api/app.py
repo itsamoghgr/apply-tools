@@ -14,12 +14,15 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+import asyncio
+import json
+
 from fastapi import BackgroundTasks, FastAPI
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from agent_server.config import CONFIG
-from agent_server.db.agent_db import create_job, get_job, seen_add
+from agent_server.db.agent_db import audit_since, create_job, get_job, seen_add
 from agent_server.log import configure_logging, get_logger
 from agent_server.orchestrator.runner import launch_pipeline
 from agent_server.stages.normalize import normalize_domain
@@ -144,6 +147,72 @@ def get_hunt(job_id: str) -> Any:
         created_at=row.get("created_at"),
         updated_at=row.get("updated_at"),
         finished_at=row.get("finished_at"),
+    )
+
+
+_TERMINAL = {"succeeded", "failed", "stopped"}
+
+
+@app.get(
+    "/api/v1/hunt/{job_id}/events",
+    summary="Live SSE stream of agent activity for a hunt",
+)
+async def hunt_events(job_id: str) -> Any:
+    """Server-Sent Events: stream audit traces as the agent works.
+
+    Each `event: activity` carries one audit row (stage, event, domain, data).
+    A periodic `event: status` carries job counters so the client can update its
+    progress bar. The stream closes with `event: done` once the job is terminal.
+    The client reconnects with no state — we always start from the beginning so a
+    late-opened stream still shows the full timeline.
+    """
+
+    async def gen():
+        last_id = 0
+        # Replay from the start so opening the stream mid-run shows history.
+        while True:
+            rows = await asyncio.to_thread(audit_since, job_id, last_id)
+            for r in rows:
+                last_id = r["id"]
+                payload = {
+                    "id": r["id"],
+                    "stage": r["stage"],
+                    "event": r["event"],
+                    "domain": r.get("domain"),
+                    "data": r.get("data"),
+                    "created_at": r.get("created_at"),
+                }
+                yield f"event: activity\ndata: {json.dumps(payload)}\n\n"
+
+            job = await asyncio.to_thread(get_job, job_id)
+            if job is None:
+                yield f'event: error\ndata: {json.dumps({"detail": "job not found"})}\n\n'
+                return
+
+            status = {
+                "status": job["status"],
+                "verified_count": job.get("verified_count"),
+                "target_count": job.get("target_count"),
+                "candidates_total": job.get("candidates_total"),
+                "candidates_processed": job.get("candidates_processed"),
+                "stop_reason": job.get("stop_reason"),
+            }
+            yield f"event: status\ndata: {json.dumps(status)}\n\n"
+
+            if job["status"] in _TERMINAL:
+                yield f"event: done\ndata: {json.dumps(status)}\n\n"
+                return
+
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # disable proxy buffering
+        },
     )
 
 
