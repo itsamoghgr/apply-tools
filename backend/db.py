@@ -17,7 +17,6 @@ responses stay JSON-friendly and stable for the extension/UI.
 
 from __future__ import annotations
 
-import logging
 import os
 import re
 import secrets
@@ -31,11 +30,13 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection, Engine, Row
 from sqlalchemy.exc import IntegrityError
 
+from log import get_logger
+
 # Load backend/.env so DATABASE_URL is visible even when db is imported before
 # any other module calls load_dotenv() (server.py imports db first).
 load_dotenv()
 
-logger = logging.getLogger("coverletter")
+logger = get_logger(__name__)
 
 BACKEND_DIR = Path(__file__).resolve().parent
 DATA_DIR = (BACKEND_DIR / ".." / "data").resolve()
@@ -813,5 +814,5 @@ def insert_application(
     except Exception as exc:
         # Logging-only failure — generations should not fail because the audit
         # log is unavailable.
-        logger.warning("Failed to log application (%s): %s", mode, exc)
+        logger.warning("application_log_failed", mode=mode, error=str(exc))
     return app_id

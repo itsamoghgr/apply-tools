@@ -28,7 +28,15 @@ fi
 
 trap 'kill 0' EXIT INT TERM
 
-(cd "$ROOT_DIR/backend" && source venv/bin/activate && exec uvicorn server:app --host 127.0.0.1 --port 8000 --reload) &
-(cd "$ROOT_DIR/frontend" && exec npm run dev) &
+(cd "$ROOT_DIR/backend" && source venv/bin/activate && exec python -m server) &
+# Pipe the Next.js dev server through the backend's structlog filter so the
+# frontend's request lines render in the same format as the backend logs.
+# PYTHONPATH lets the filter import `log` from backend/; -u keeps the pipe
+# unbuffered so lines aren't held back.
+(
+  cd "$ROOT_DIR/frontend" \
+    && npm run dev 2>&1 \
+       | PYTHONPATH="$ROOT_DIR/backend" "$ROOT_DIR/backend/venv/bin/python" -u -m frontend_log_filter
+) &
 
 wait

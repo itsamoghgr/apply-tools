@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
+import { useRouter } from "next/navigation";
 import ApplicationsRow from "./ApplicationsRow";
 
 // Total <th> count in the table header below — used to colSpan group
@@ -135,33 +136,54 @@ export default function ApplicationsTable({
   apps,
   resumes,
   total,
+  query: serverQuery,
+  status,
 }: {
   apps: App[];
   resumes: { id: string; label: string }[];
   total: number;
+  // The query the server actually filtered by (mirrors the `q` URL param).
+  query: string;
+  // Active status tab, preserved when we rewrite the URL on search.
+  status: string;
 }) {
-  const [query, setQuery] = useState("");
+  const router = useRouter();
+  // Local input state for a responsive field; the URL (and thus the DB
+  // query) is updated on a debounce so search hits *all* applications,
+  // not just the loaded browse window.
+  const [query, setQuery] = useState(serverQuery);
 
-  const filtered = useMemo(() => {
-    if (!query.trim()) return apps;
-    const q = query.toLowerCase();
-    return apps.filter(
-      (a) =>
-        a.companyName.toLowerCase().includes(q) ||
-        (a.jobRole ?? "").toLowerCase().includes(q) ||
-        (a.location ?? "").toLowerCase().includes(q) ||
-        (a.status ?? "").toLowerCase().includes(q) ||
-        (a.interviewStatus ?? "").toLowerCase().includes(q) ||
-        (a.notes ?? "").toLowerCase().includes(q) ||
-        (a.hrName ?? "").toLowerCase().includes(q) ||
-        (a.referral ?? "").toLowerCase().includes(q) ||
-        (a.jobDescription ?? "").toLowerCase().includes(q)
-    );
-  }, [apps, query]);
+  // Keep the input in sync if the server query changes underneath us
+  // (e.g. back/forward navigation).
+  useEffect(() => {
+    setQuery(serverQuery);
+  }, [serverQuery]);
 
-  // Stable slot numbers based on the original (pre-filter, pre-group)
-  // server order, so the "Sl" column doesn't reshuffle when the user
-  // filters or when a row jumps groups.
+  // Push the debounced query into the URL. Searching server-side means we
+  // navigate rather than filter in memory; status is preserved, and `all`
+  // is dropped because a query returns all its own matches.
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const next = query.trim();
+    if (next === serverQuery) return;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      const params = new URLSearchParams();
+      if (status !== "all") params.set("status", status);
+      if (next) params.set("q", next);
+      const qs = params.toString();
+      router.replace(qs ? `/applications?${qs}` : "/applications");
+    }, 300);
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, [query, serverQuery, status, router]);
+
+  // Server already filtered; render what we were given.
+  const filtered = apps;
+
+  // Stable slot numbers based on the original (pre-group) server order, so
+  // the "Sl" column doesn't reshuffle when a row jumps date groups.
   const slNoById = useMemo(() => {
     const m = new Map<string, number>();
     apps.forEach((a, idx) => m.set(a.id, apps.length - idx));
@@ -211,7 +233,7 @@ export default function ApplicationsTable({
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search by company, role, location, status…"
-          className="flex-1 bg-transparent border-0 outline-none text-sm placeholder:opacity-40"
+          className="flex-1 bg-transparent border-0 outline-none focus:outline-none focus:ring-0 focus:border-0 shadow-none text-sm placeholder:opacity-40"
           id="applications-search"
         />
         {query && (
