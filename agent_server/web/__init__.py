@@ -39,18 +39,13 @@ class FetchedPage:
 # here by the web-tooling agent. Until then these names exist for type-checking
 # and imports; calling them raises NotImplementedError.
 
-def search(query: str, *, max_results: int = 10) -> list[SearchResult]:  # noqa: D401
-    """See module docstring / CONTRACTS.md §2."""
-    from agent_server.web.search import search as _impl
-
-    return _impl(query, max_results=max_results)
-
-
-def fetch_page(url: str, *, render_js: bool = False) -> FetchedPage:
-    """See module docstring / CONTRACTS.md §2."""
-    from agent_server.web.fetch import fetch_page as _impl
-
-    return _impl(url, render_js=render_js)
-
+# Implementation modules are named ddg_search / page_fetch (NOT search / fetch)
+# so they never collide with the `search` / `fetch_page` function names exported
+# here. A submodule named `search` would shadow the `search` function in this
+# package namespace once imported — `from agent_server.web import search` would
+# then return a module, breaking `deps.search(...)` with "'module' object is not
+# callable". Distinct names make the exports unambiguous.
+from agent_server.web.ddg_search import search  # noqa: E402,F401
+from agent_server.web.page_fetch import fetch_page  # noqa: E402,F401
 
 __all__ = ["SearchResult", "FetchedPage", "search", "fetch_page"]

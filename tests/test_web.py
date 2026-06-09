@@ -1,4 +1,4 @@
-"""Tests for agent_server.web.search and agent_server.web.fetch.
+"""Tests for agent_server.web.ddg_search and agent_server.web.page_fetch.
 
 All tests run fully offline — no real network calls.
 
@@ -20,8 +20,8 @@ import pytest
 import respx
 
 from agent_server.web import FetchedPage, SearchResult
-from agent_server.web.fetch import fetch_page, _is_linkedin
-from agent_server.web.search import search
+from agent_server.web.page_fetch import fetch_page, _is_linkedin
+from agent_server.web.ddg_search import search
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +272,7 @@ class TestSearchBackoff:
     def test_retry_on_ratelimit_then_success(self, monkeypatch) -> None:
         """DDGS.text raises RatelimitException twice, then succeeds on 3rd attempt."""
         from ddgs.exceptions import RatelimitException
-        import agent_server.web.search as search_mod
+        import agent_server.web.ddg_search as search_mod
 
         call_count = 0
 
@@ -305,7 +305,7 @@ class TestSearchBackoff:
     def test_retry_on_timeout_then_success(self, monkeypatch) -> None:
         """DDGS.text raises TimeoutException once, then succeeds."""
         from ddgs.exceptions import TimeoutException
-        import agent_server.web.search as search_mod
+        import agent_server.web.ddg_search as search_mod
 
         call_count = 0
 
@@ -328,7 +328,7 @@ class TestSearchBackoff:
     def test_persistent_failure_returns_empty_list(self, monkeypatch) -> None:
         """DDGS.text always raises; search() returns [] and never raises."""
         from ddgs.exceptions import RatelimitException
-        import agent_server.web.search as search_mod
+        import agent_server.web.ddg_search as search_mod
 
         class FakeDDGS:
             def text(self, query, **kwargs):
@@ -344,7 +344,7 @@ class TestSearchBackoff:
     def test_persistent_ddgs_exception_returns_empty_list(self, monkeypatch) -> None:
         """Generic DDGSException always — returns []."""
         from ddgs.exceptions import DDGSException
-        import agent_server.web.search as search_mod
+        import agent_server.web.ddg_search as search_mod
 
         class FakeDDGS:
             def text(self, query, **kwargs):
@@ -359,7 +359,7 @@ class TestSearchBackoff:
 
     def test_unexpected_exception_returns_empty_list(self, monkeypatch) -> None:
         """Totally unexpected exception — returns [], never raises."""
-        import agent_server.web.search as search_mod
+        import agent_server.web.ddg_search as search_mod
 
         class FakeDDGS:
             def text(self, query, **kwargs):
@@ -372,7 +372,7 @@ class TestSearchBackoff:
 
     def test_maps_result_keys_correctly(self, monkeypatch) -> None:
         """Mapping from ddgs result dict keys title/href/body -> SearchResult fields."""
-        import agent_server.web.search as search_mod
+        import agent_server.web.ddg_search as search_mod
 
         class FakeDDGS:
             def text(self, query, **kwargs):
@@ -395,7 +395,7 @@ class TestSearchBackoff:
 
     def test_defensive_fallback_keys(self, monkeypatch) -> None:
         """Results with alternate keys (url, link, snippet) are handled defensively."""
-        import agent_server.web.search as search_mod
+        import agent_server.web.ddg_search as search_mod
 
         class FakeDDGS:
             def text(self, query, **kwargs):
@@ -417,7 +417,7 @@ class TestSearchBackoff:
 
     def test_empty_results_from_ddgs(self, monkeypatch) -> None:
         """DDGS returns empty list — search returns []."""
-        import agent_server.web.search as search_mod
+        import agent_server.web.ddg_search as search_mod
 
         class FakeDDGS:
             def text(self, query, **kwargs):
@@ -430,7 +430,7 @@ class TestSearchBackoff:
 
     def test_none_results_from_ddgs(self, monkeypatch) -> None:
         """DDGS returns None (shouldn't happen but defensive) — search returns []."""
-        import agent_server.web.search as search_mod
+        import agent_server.web.ddg_search as search_mod
 
         class FakeDDGS:
             def text(self, query, **kwargs):
@@ -467,7 +467,7 @@ class TestPublicInterface:
 
     @respx.mock
     def test_top_level_fetch_page_delegates(self) -> None:
-        """agent_server.web.fetch_page (top-level) delegates to fetch.py impl."""
+        """agent_server.web.page_fetch_page (top-level) delegates to fetch.py impl."""
         from agent_server.web import fetch_page as top_level_fetch_page
 
         url = "https://example.com/test"
