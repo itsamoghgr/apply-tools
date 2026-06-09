@@ -117,5 +117,7 @@ class PlatformUpsertRequest(BaseModel):
             industry=lead.industry,
             last_round_date=lead.last_round_date,
             confidence=lead.confidence,
-            sources=lead.sources,
+            # Cap sources — thorough research can accumulate 100+ URLs, which the
+            # platform rejects (max 100). Keep the first 50 (most relevant).
+            sources=lead.sources[:50],
         )
