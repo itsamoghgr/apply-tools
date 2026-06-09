@@ -107,6 +107,36 @@ class ProviderClient(Protocol):
 # ---------------------------------------------------------------------------
 
 
+def _match_person(emails: list[dict], founder_name: str) -> dict | None:
+    """Return the email entry that belongs to `founder_name`, or None.
+
+    Matches on Hunter's first_name/last_name fields when present, else on the
+    email local-part containing the person's first or last name. Avoids passing
+    off a different employee as the requested person.
+    """
+    parts = [re.sub(r"[^a-z]", "", p) for p in founder_name.lower().split()]
+    parts = [p for p in parts if len(p) >= 2]
+    if not parts:
+        return None
+    first, last = parts[0], parts[-1]
+
+    for e in emails:
+        fn = re.sub(r"[^a-z]", "", str(e.get("first_name") or "").lower())
+        ln = re.sub(r"[^a-z]", "", str(e.get("last_name") or "").lower())
+        if fn and ln and fn == first and ln == last:
+            return e  # strong: both names match
+
+    # Weaker: the local part contains first or last name.
+    for e in emails:
+        local = str(e.get("value") or "").split("@")[0].lower()
+        local = re.sub(r"[^a-z]", "", local)
+        if last and last in local:
+            return e
+        if first and len(first) >= 3 and first in local:
+            return e
+    return None
+
+
 class HunterProvider:
     """Calls Hunter.io domain-search + email-verifier endpoints.
 
@@ -170,12 +200,36 @@ class HunterProvider:
             logger.debug("hunter.no_emails", domain=domain)
             return None
 
-        # Pick the highest-confidence email; prefer the founder if name given.
-        best = max(emails, key=lambda e: e.get("confidence", 0))
+        # Prefer an email that actually MATCHES the requested person. Hunter's
+        # domain-search returns many people; picking max-confidence alone can
+        # return a DIFFERENT employee (e.g. asking for "Bret Taylor" and getting
+        # the top-confidence "jillian@"). Match on first/last name when given.
+        name_match = None
+        if founder_name:
+            name_match = _match_person(emails, founder_name)
+
+        if name_match is not None:
+            best = name_match
+            matched = True
+        else:
+            best = max(emails, key=lambda e: e.get("confidence", 0))
+            matched = False
+
         best_email = best.get("value")
         hunter_confidence = best.get("confidence", 0)  # 0–100
 
         if not best_email:
+            return None
+
+        if founder_name and not matched:
+            # We could not find this person's address — don't pass off a random
+            # colleague as them. Skip so the agent/waterfall keeps looking.
+            logger.info(
+                "hunter.no_name_match",
+                domain=domain,
+                wanted=founder_name,
+                top_email=best_email,
+            )
             return None
 
         # Step 2: verify the address
