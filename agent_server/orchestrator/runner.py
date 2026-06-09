@@ -1,18 +1,21 @@
 """RUNNER — bridges FastAPI BackgroundTasks to run_pipeline.
 
-Builds the `Stages` bundle.  In Phase 1 the bundle is fully STUBBED so the
-entire loop runs end-to-end without any web requests or LLM calls.
-
-Phase-2/3 note: replace `build_stages()` to wire real implementations.
-The stub helpers are intentionally kept in this file so the real stages
-can be imported from their canonical modules (`agents/`, `stages/`) in later
-phases without touching the loop.
+Builds the `Stages` bundle.  `build_stages(job_id)` wires the REAL stages:
+agentic leaves (discovery, research) get a job-bound `AgentDeps` carrying the
+shared web tools + LLM client; the deterministic stages (dedup, verify, deliver)
+are wired directly.  The fully-STUBBED bundle (`build_stub_stages()`) is kept for
+tests and for running the whole loop without an LLM key or network.
 """
 
 from __future__ import annotations
 
+import functools
 import random
 
+from agent_server.agents.deps import AgentDeps
+from agent_server.agents.discovery import run_discovery
+from agent_server.agents.llm import AnthropicLLM
+from agent_server.agents.research import run_research
 from agent_server.contracts.records import (
     CandidateCompany,
     PlatformUpsertRequest,
@@ -26,6 +29,11 @@ from agent_server.db.agent_db import (
 )
 from agent_server.log import get_logger
 from agent_server.orchestrator.loop import Stages, run_pipeline
+from agent_server.stages.dedup import dedup as _real_dedup
+from agent_server.stages.deliver import deliver as _real_deliver
+from agent_server.stages.normalize import normalize_domain
+from agent_server.stages.verify import verify as _real_verify
+from agent_server.web import fetch_page, search
 
 logger = get_logger(__name__)
 
@@ -192,20 +200,51 @@ def build_stub_stages() -> Stages:
     )
 
 
-def build_stages() -> Stages:
-    """Return the production Stages bundle.
+def _build_deps(job_id: str) -> AgentDeps:
+    """Assemble the AgentDeps the runtime leaves need, bound to one job.
 
-    TODO (Phase 2/3): assemble real implementations:
-      - discover: agents/discovery.py  run_discovery (AgentDeps injected)
-      - dedup:    stages/dedup.py      dedup_candidates
-      - research: agents/research.py   run_research  (AgentDeps injected)
-      - verify:   stages/verify.py     verify_lead
-      - deliver:  stages/deliver.py    deliver_lead
-
-    For Phase 1 this falls back to stubs so the server still runs end-to-end.
+    `audit` is closed over `job_id` so the agents call deps.audit(stage, event,
+    data) without knowing the job. The LLM client is the shared AnthropicLLM.
     """
-    # TODO (Phase 2): wire real stages here.
-    return build_stub_stages()
+
+    def _audit(stage: str, event: str, data: dict) -> None:
+        # Resilient: an audit-write failure must never crash an agent.
+        try:
+            audit_add(job_id, stage, event, data)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("audit_write_failed", job_id=job_id, stage=stage, error=str(exc))
+
+    return AgentDeps(
+        search=search,
+        fetch_page=fetch_page,
+        llm=AnthropicLLM(),
+        audit=_audit,
+        normalize_domain=normalize_domain,
+    )
+
+
+def build_stages(job_id: str) -> Stages:
+    """Return the production Stages bundle wired to real implementations.
+
+    The agentic leaves (discover, research) are wrapped with a job-bound
+    AgentDeps so they match the loop's stage signatures. The deterministic
+    stages are wired directly.
+    """
+    deps = _build_deps(job_id)
+
+    def discover(jid: str, query_hint: str, target: int) -> list[CandidateCompany]:
+        return run_discovery(jid, query_hint=query_hint, target=target, deps=deps)
+
+    def research(jid: str, candidate: CandidateCompany) -> ResearchResult:
+        return run_research(jid, candidate, deps)
+
+    return Stages(
+        discover=discover,
+        dedup=_real_dedup,
+        research=research,
+        verify=_real_verify,
+        deliver=_real_deliver,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +272,7 @@ def launch_pipeline(
         dry_run=dry_run,
         query_hint=query_hint,
     )
-    stages = build_stages()
+    stages = build_stages(job_id)
     run_pipeline(
         job_id,
         query_hint=query_hint,

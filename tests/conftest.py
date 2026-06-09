@@ -47,3 +47,27 @@ def live_db():
     yield engine
 
     engine.dispose()
+
+
+# Operational tables wiped before each live-DB test so the suite is isolated
+# from rows left behind by prior runs (orchestrator/e2e tests write many outbox
+# rows). FK CASCADE from jobs clears the children; seen_cache is independent.
+_OPERATIONAL_TABLES = "outbox, audit_traces, checkpoints, seen_cache, jobs"
+
+
+@pytest.fixture(autouse=True)
+def _clean_agent_db(request):
+    """Truncate operational tables before any test that uses `live_db`.
+
+    Autouse but a no-op for tests that don't request `live_db` (most pure-logic
+    tests), so non-DB tests stay fast and DB-free.
+    """
+    if "live_db" not in request.fixturenames:
+        yield
+        return
+    engine = request.getfixturevalue("live_db")  # may pytest.skip()
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        conn.execute(text(f"TRUNCATE {_OPERATIONAL_TABLES} RESTART IDENTITY CASCADE"))
+    yield
