@@ -446,6 +446,65 @@ def _do_research(
         except Exception as exc:  # noqa: BLE001
             log.warning("research_linkedin_search_failed", error=str(exc))
 
+    # ── Dedicated company-attribute pass (thorough mode) ─────────────────────
+    # The main loop prioritises founder+funding and often exhausts its budget
+    # before researching company attributes. So we ALWAYS run a focused pass:
+    # a couple of targeted searches + ONE extraction LLM call for just the
+    # attributes still missing. This makes attribute fill-rate reliable instead
+    # of dependent on how the founder loop happened to spend its calls.
+    missing = {
+        "employee_count": result_employee_count,
+        "revenue": result_revenue,
+        "location": result_location,
+        "industry": result_industry,
+        "last_round_date": result_last_round_date,
+    }
+    if any(v is None for v in missing.values()):
+        try:
+            snippets: list[str] = []
+            for q in (
+                f"{candidate.name} {candidate.domain} headquarters employees industry",
+                f"{candidate.name} number of employees revenue funding round",
+            ):
+                for r in deps.search(q, max_results=5):
+                    snippets.append(f"{r.title} — {r.snippet} ({r.url})")
+                    if r.url not in sources:
+                        sources.append(r.url)
+            if snippets:
+                attr_sys = (
+                    "Extract company attributes from the search snippets. Output "
+                    "ONLY a JSON object with keys employee_count, revenue, location, "
+                    "industry, last_round_date. Use null for anything not present in "
+                    "the snippets. Do not guess or fabricate."
+                )
+                attr_msg = [{
+                    "role": "user",
+                    "content": f"Company: {candidate.name} ({candidate.domain})\n\n"
+                    + "\n".join(snippets[:12]),
+                }]
+                attr_resp = deps.llm.complete(attr_sys, attr_msg, tools=None)
+                ap = _parse_llm_json(attr_resp.get("text", ""))
+                result_employee_count = result_employee_count or ap.get("employee_count")
+                result_revenue = result_revenue or ap.get("revenue")
+                result_location = result_location or ap.get("location")
+                result_industry = result_industry or ap.get("industry")
+                result_last_round_date = result_last_round_date or ap.get("last_round_date")
+                deps.audit("research", "attributes_pass", {
+                    "domain": candidate.domain,
+                    "employee_count": result_employee_count,
+                    "industry": result_industry,
+                    "location": result_location,
+                })
+                log.info(
+                    "research_attributes",
+                    domain=candidate.domain,
+                    industry=result_industry,
+                    employees=result_employee_count,
+                    location=result_location,
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("research_attributes_failed", error=str(exc))
+
     # Deduplicate sources
     seen_sources: set[str] = set()
     unique_sources: list[str] = []
