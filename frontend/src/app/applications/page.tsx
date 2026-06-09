@@ -24,7 +24,7 @@ const PAGE_SIZE = 200;
 export default async function ApplicationsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ status?: string; all?: string }>;
+  searchParams: Promise<{ status?: string; all?: string; q?: string }>;
 }) {
   const sp = await searchParams;
   const status: StatusFilter = (STATUSES as readonly string[]).includes(
@@ -33,8 +33,38 @@ export default async function ApplicationsPage({
     ? (sp.status as StatusFilter)
     : "all";
   const showAll = sp.all === "1";
+  const query = (sp.q ?? "").trim();
 
-  const where = status === "all" ? {} : { status };
+  // Search runs in the DB so it covers *all* applications, not just the
+  // PAGE_SIZE window that's loaded for browsing. Match the same fields the
+  // table used to filter client-side. When a query is present we also lift
+  // the 200-cap so every match is returned (a query is its own bound).
+  const searchWhere = query
+    ? {
+        OR: [
+          { companyName: { contains: query, mode: "insensitive" as const } },
+          { jobRole: { contains: query, mode: "insensitive" as const } },
+          { location: { contains: query, mode: "insensitive" as const } },
+          { status: { contains: query, mode: "insensitive" as const } },
+          { interviewStatus: { contains: query, mode: "insensitive" as const } },
+          { notes: { contains: query, mode: "insensitive" as const } },
+          { hrName: { contains: query, mode: "insensitive" as const } },
+          { referral: { contains: query, mode: "insensitive" as const } },
+          { jobDescription: { contains: query, mode: "insensitive" as const } },
+        ],
+      }
+    : {};
+
+  const statusWhere = status === "all" ? {} : { status };
+  const where =
+    query && status !== "all"
+      ? { AND: [statusWhere, searchWhere] }
+      : query
+        ? searchWhere
+        : statusWhere;
+
+  // Once searching, return all matches regardless of the browse cap.
+  const limited = !showAll && !query;
 
   const [apps, resumes, total] = await Promise.all([
     prisma.jobApplication.findMany({
@@ -43,7 +73,7 @@ export default async function ApplicationsPage({
       // position. createdAt is a tie-breaker for rows applied on the same
       // day (newest-saved first).
       orderBy: [{ appliedDate: "desc" }, { createdAt: "desc" }],
-      take: showAll ? undefined : PAGE_SIZE,
+      take: limited ? PAGE_SIZE : undefined,
       include: {
         resume: { select: { id: true, label: true } },
         leads: {
@@ -87,10 +117,13 @@ export default async function ApplicationsPage({
       orderBy: { id: "asc" },
       select: { id: true, label: true },
     }),
-    prisma.jobApplication.count({ where }),
+    // Header badge / "X of Y" denominator: count the status scope, not the
+    // search-narrowed set, so the number reflects the dataset being searched.
+    prisma.jobApplication.count({ where: statusWhere }),
   ]);
 
-  const truncated = !showAll && total > apps.length;
+  // Only the browse window can be truncated; a search returns all its matches.
+  const truncated = limited && total > apps.length;
 
   const serialised = apps.map((a) => ({
     id: a.id,
@@ -201,7 +234,13 @@ export default async function ApplicationsPage({
         </div>
       </div>
 
-      <ApplicationsTable apps={serialised} resumes={resumes} total={total} />
+      <ApplicationsTable
+        apps={serialised}
+        resumes={resumes}
+        total={total}
+        query={query}
+        status={status}
+      />
 
       {truncated && (
         <div className="flex items-center justify-center pt-2">

@@ -150,6 +150,12 @@ main h1 {
   outline: 2px solid color-mix(in oklab, var(--color-primary) 55%, transparent);
   outline-offset: 2px;
 }
+/* The search bar draws its own focus ring on the wrapping container, so the
+   inner input shouldn't also get the baseline outline (it reads as a stray
+   box inside the field). */
+.search-bar input:focus-visible {
+  outline: none;
+}
 
 /* ─── Sidebar width machinery — PRESERVED VERBATIM (layout depends on it) ─── */
 :root { --sidebar-w: 224px; }
