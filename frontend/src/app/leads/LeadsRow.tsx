@@ -229,16 +229,26 @@ export default function LeadsRow({ slNo, lead }: { slNo: number; lead: Lead }) {
             {relativeTime(new Date(local.updatedAt))}
           </span>
         </td>
+        <td className="text-right">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation(); // don't toggle the row open
+              onDelete();
+            }}
+            disabled={busy}
+            className="btn btn-ghost btn-xs btn-square text-error/60 hover:text-error hover:bg-error/10"
+            title="Delete lead"
+            aria-label="Delete lead"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        </td>
       </tr>
       {open && (
         <tr className="bg-base-200/40">
-          <td colSpan={9} className="p-0 border-t border-base-300/40">
-            <DetailsPanel
-              lead={local}
-              busy={busy}
-              onSaveMany={patchMany}
-              onDelete={onDelete}
-            />
+          <td colSpan={10} className="p-0 border-t border-base-300/40">
+            <DetailsPanel lead={local} busy={busy} onSaveMany={patchMany} />
           </td>
         </tr>
       )}
@@ -278,12 +288,10 @@ function DetailsPanel({
   lead,
   busy,
   onSaveMany,
-  onDelete,
 }: {
   lead: Lead;
   busy: boolean;
   onSaveMany: (updates: Partial<Lead>) => Promise<boolean>;
-  onDelete: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<Draft>(() => leadToDraft(lead));
@@ -443,17 +451,6 @@ function DetailsPanel({
               </span>
             </Section>
           )}
-        </div>
-
-        <div className="flex justify-end items-center pt-5 mt-6 border-t border-base-300/40">
-          <button
-            onClick={onDelete}
-            disabled={busy || editing}
-            className="inline-flex items-center gap-1.5 text-xs font-medium text-error/80 hover:text-error hover:bg-error/10 rounded-md px-2.5 py-1.5 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            Delete lead
-          </button>
         </div>
       </div>
     </div>
