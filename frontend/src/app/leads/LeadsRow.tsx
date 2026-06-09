@@ -35,6 +35,7 @@ export default function LeadsRow({ slNo, lead }: { slNo: number; lead: Lead }) {
   const [busy, setBusy] = useState(false);
   const [local, setLocal] = useState(lead);
   const [open, setOpen] = useState(false);
+  const [deleted, setDeleted] = useState(false);
 
   async function patch(
     field: keyof Lead,
@@ -98,19 +99,40 @@ export default function LeadsRow({ slNo, lead }: { slNo: number; lead: Lead }) {
     }
   }
 
-  async function onDelete() {
-    setBusy(true);
-    try {
-      const res = await fetch(`/api/proxy/leads/${lead.id}`, {
-        method: "DELETE",
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      toast.success(`Deleted ${lead.name}`);
-      startTransition(() => router.refresh());
-    } catch (e) {
-      toast.error(`Delete failed: ${(e as Error).message}`);
-      setBusy(false);
-    }
+  // Gmail-style delete: hide the row immediately and show an Undo toast. The
+  // DELETE fires only after the grace window, so Undo cancels it with no
+  // network round-trip — matching the Discovered-companies tab.
+  function onDelete() {
+    setOpen(false);
+    setDeleted(true);
+    let undone = false;
+
+    const timer = setTimeout(async () => {
+      if (undone) return;
+      try {
+        const res = await fetch(`/api/proxy/leads/${lead.id}`, {
+          method: "DELETE",
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        startTransition(() => router.refresh());
+      } catch (e) {
+        setDeleted(false); // restore on failure
+        toast.error(`Delete failed: ${(e as Error).message}`);
+      }
+    }, 4500);
+
+    toast(`Deleted ${lead.name}`, {
+      description: "Linked reach-outs are kept but unlinked.",
+      duration: 4500,
+      action: {
+        label: "Undo",
+        onClick: () => {
+          undone = true;
+          clearTimeout(timer);
+          setDeleted(false);
+        },
+      },
+    });
   }
 
   const cellInput =
@@ -118,6 +140,9 @@ export default function LeadsRow({ slNo, lead }: { slNo: number; lead: Lead }) {
 
   const sentCount = local.reachOuts.filter((r) => r.status === "sent").length;
   const totalReachOuts = local.reachOuts.length;
+
+  // Optimistically hidden while a delete is pending (Undo restores it).
+  if (deleted) return null;
 
   return (
     <>
@@ -261,7 +286,6 @@ function DetailsPanel({
   onDelete: () => void;
 }) {
   const [editing, setEditing] = useState(false);
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [draft, setDraft] = useState<Draft>(() => leadToDraft(lead));
 
   if (!editing) {
@@ -422,38 +446,14 @@ function DetailsPanel({
         </div>
 
         <div className="flex justify-end items-center pt-5 mt-6 border-t border-base-300/40">
-          {confirmingDelete ? (
-            <div className="flex items-center gap-3">
-              <span className="text-xs opacity-70">
-                Delete <span className="font-medium">{lead.name}</span>? This
-                can&apos;t be undone. Linked reach-outs will be kept but
-                unlinked.
-              </span>
-              <button
-                onClick={() => setConfirmingDelete(false)}
-                disabled={busy}
-                className="btn btn-ghost btn-xs"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={onDelete}
-                disabled={busy}
-                className="btn btn-error btn-xs"
-              >
-                {busy ? "Deleting…" : "Confirm delete"}
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={() => setConfirmingDelete(true)}
-              disabled={busy || editing}
-              className="inline-flex items-center gap-1.5 text-xs font-medium text-error/80 hover:text-error hover:bg-error/10 rounded-md px-2.5 py-1.5 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-              Delete lead
-            </button>
-          )}
+          <button
+            onClick={onDelete}
+            disabled={busy || editing}
+            className="inline-flex items-center gap-1.5 text-xs font-medium text-error/80 hover:text-error hover:bg-error/10 rounded-md px-2.5 py-1.5 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            Delete lead
+          </button>
         </div>
       </div>
     </div>
