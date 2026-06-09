@@ -1011,14 +1011,33 @@ def platform_upsert_lead(payload: dict) -> dict:
         RETURNING "id", (xmax = 0) AS created
         """
     )
+    # Company upsert commits on its own. The founder person-lead is maintained
+    # in a SEPARATE transaction below — critically, NOT in this one: the company
+    # row carries email=founder_email, so inserting a founder person-lead with
+    # the same email would hit the UNIQUE(email) constraint and, once a statement
+    # errors in Postgres, the whole transaction aborts — silently rolling back
+    # the company upsert too (it reported success via RETURNING but never
+    # persisted). Isolating them keeps the company lead safe.
     with get_conn() as conn:
         row = conn.execute(sql, params).fetchone()
-        # Same transaction: surface the founder as an Outreach person-lead.
-        _upsert_founder_person_lead(
-            conn,
-            founder_name=founder_name,
-            founder_email=payload.get("founder_email"),
-            founder_linkedin_url=payload.get("founder_linkedin_url"),
-            company_name=company_name,
+    result = {"lead_id": row.id, "created": bool(row.created)}
+
+    # Surface the founder as an Outreach person-lead. Best-effort, isolated: a
+    # failure here must never undo the company lead. Skip the founder email when
+    # it already lives on the company row (would collide on UNIQUE(email)).
+    company_email = payload.get("founder_email")
+    founder_email_for_person = None  # the company row already holds this address
+    try:
+        with get_conn() as conn2:
+            _upsert_founder_person_lead(
+                conn2,
+                founder_name=founder_name,
+                founder_email=founder_email_for_person,
+                founder_linkedin_url=payload.get("founder_linkedin_url"),
+                company_name=company_name,
+            )
+    except Exception as exc:
+        logger.warning(
+            "founder_person_lead_failed", domain=domain, error=str(exc)
         )
-    return {"lead_id": row.id, "created": bool(row.created)}
+    return result
