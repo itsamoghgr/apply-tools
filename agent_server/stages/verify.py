@@ -318,6 +318,89 @@ class AbstractProvider:
 
 
 # ---------------------------------------------------------------------------
+# Apollo.io People Match
+# ---------------------------------------------------------------------------
+
+
+class ApolloProvider:
+    """Calls Apollo.io's People Match API to find a person's email.
+
+    API shape:
+      POST https://api.apollo.io/api/v1/people/match
+        headers: { "X-Api-Key": <key> }
+        json:    { "name": <full name>, "domain": <company domain>,
+                   "reveal_personal_emails": false }
+      → { person: { email, email_status, ... } }
+
+    Unlike Abstract (validate-only), Apollo *finds* the address from its B2B
+    database, so it is the strongest provider when a name + domain are known.
+    Returns None if key missing, network error, or no person/email found.
+    `email_status` ("verified"/"guessed"/...) maps to the score.
+    """
+
+    _URL = "https://api.apollo.io/api/v1/people/match"
+
+    def __init__(self, api_key: str | None = None, http_client=None):
+        self._key = api_key or CONFIG.apollo_api_key
+        self._http = http_client
+
+    def _post(self, payload: dict, headers: dict) -> dict | None:
+        if self._http is not None:
+            try:
+                resp = self._http.post(self._URL, json=payload, headers=headers)
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as exc:
+                logger.warning("apollo.request_error", error=str(exc))
+                return None
+        import httpx
+
+        try:
+            resp = httpx.post(self._URL, json=payload, headers=headers, timeout=12.0)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as exc:
+            logger.warning("apollo.request_error", error=str(exc))
+            return None
+
+    def find_and_verify(
+        self, domain: str, founder_name: str | None
+    ) -> EmailVerdict | None:
+        if not self._key or not founder_name:
+            return None  # Apollo match needs a name
+
+        data = self._post(
+            {"name": founder_name, "domain": domain, "reveal_personal_emails": False},
+            {"X-Api-Key": self._key, "Content-Type": "application/json"},
+        )
+        if data is None:
+            return None
+        person = data.get("person") or {}
+        email = person.get("email")
+        if not email or "email_not_unlocked" in str(email):
+            return None
+
+        status = (person.get("email_status") or "").lower()
+        # Map Apollo's email_status to a confidence score.
+        _STATUS_MAP = {"verified": 0.95, "likely": 0.7, "guessed": 0.45, "": 0.5}
+        score = _STATUS_MAP.get(status, 0.5)
+
+        logger.info(
+            "apollo.verdict", domain=domain, email=email, status=status, score=score
+        )
+        return EmailVerdict(
+            email=email,
+            score=score,
+            method="apollo",
+            detail={
+                "apollo_email_status": status,
+                "apollo_title": person.get("title"),
+                "apollo_linkedin": person.get("linkedin_url"),
+            },
+        )
+
+
+# ---------------------------------------------------------------------------
 # SMTP fallback (always weak)
 # ---------------------------------------------------------------------------
 
@@ -417,6 +500,8 @@ class WaterfallVerifier(Verifier):
                 clients.append(HunterProvider())
             elif name == "abstract":
                 clients.append(AbstractProvider())
+            elif name == "apollo":
+                clients.append(ApolloProvider())
             else:
                 logger.warning("verify.unknown_provider", name=name)
         return clients

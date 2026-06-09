@@ -75,9 +75,14 @@ class Config:
     )
 
     # Verification waterfall — comma-separated provider order, then SMTP fallback.
-    verify_providers: str = os.environ.get("VERIFY_PROVIDERS", "hunter,abstract")
+    # Apollo finds the address (people match), Hunter finds + verifies, Abstract
+    # validates a guessed address. Order them strongest-first.
+    verify_providers: str = os.environ.get(
+        "VERIFY_PROVIDERS", "apollo,hunter,abstract"
+    )
     hunter_api_key: str | None = os.environ.get("HUNTER_API_KEY") or None
     abstract_api_key: str | None = os.environ.get("ABSTRACT_API_KEY") or None
+    apollo_api_key: str | None = os.environ.get("APOLLO_API_KEY") or None
     smtp_fallback_enabled: bool = (
         os.environ.get("SMTP_FALLBACK_ENABLED", "true").lower() == "true"
     )
