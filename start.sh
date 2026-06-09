@@ -26,6 +26,13 @@ if [ ! -d "$ROOT_DIR/frontend/node_modules" ]; then
   exit 1
 fi
 
+# Free our ports first so a stale process from a previous run doesn't cause
+# "address already in use" / "another dev server is already running". Uses the
+# companion stop.sh; harmless when nothing is running.
+if [ -x "$ROOT_DIR/stop.sh" ]; then
+  "$ROOT_DIR/stop.sh" >/dev/null 2>&1 || true
+fi
+
 trap 'kill 0' EXIT INT TERM
 
 (cd "$ROOT_DIR/backend" && source venv/bin/activate && exec python -m server) &
