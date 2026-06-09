@@ -29,6 +29,14 @@ fi
 trap 'kill 0' EXIT INT TERM
 
 (cd "$ROOT_DIR/backend" && source venv/bin/activate && exec python -m server) &
+
+# Lead-generation agent service (separate uvicorn process on :8001). Optional —
+# only started if its venv exists, so setups that haven't installed it still boot.
+# It runs from the repo root so the `agent_server` package imports resolve.
+if [ -d "$ROOT_DIR/agent_server/venv" ]; then
+  (cd "$ROOT_DIR" && exec "$ROOT_DIR/agent_server/venv/bin/python" -m agent_server.api.main) &
+fi
+
 # Pipe the Next.js dev server through the backend's structlog filter so the
 # frontend's request lines render in the same format as the backend logs.
 # PYTHONPATH lets the filter import `log` from backend/; -u keeps the pipe
