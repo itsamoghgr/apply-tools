@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import re
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -16,6 +15,7 @@ from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 import tracking
+from log import configure_logging, get_logger
 from db import (
     UniqueViolation,
     add_job_application_lead,
@@ -43,8 +43,10 @@ from db import (
 )
 from generate import (
     AI_PROVIDER,
+    EXTRACT_PROVIDER,
     SCORE_PROVIDER,
     answer_application_question,
+    chat_reply,
     extract_jd_from_page,
     generate_application_email,
     generate_cover_letter,
@@ -74,8 +76,8 @@ from mail import (
 )
 
 
-logger = logging.getLogger("coverletter")
-logging.basicConfig(level=logging.INFO)
+configure_logging()
+logger = get_logger(__name__)
 
 app = FastAPI(title="Cover Letter Generator", version="1.1.0")
 
@@ -145,6 +147,16 @@ class AnswerQuestionRequest(BaseModel):
     job_description: str = Field(..., min_length=1, max_length=20000)
     question: str = Field(..., min_length=1, max_length=4000)
     resume_id: str | None = RESUME_ID_FIELD
+
+
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1, max_length=20000)
+
+
+class ChatRequest(BaseModel):
+    # Full transcript in chronological order, ending with the latest user turn.
+    messages: list[ChatMessage] = Field(..., min_length=1, max_length=50)
 
 
 # Resume Builder. `profile` is the structured shape consumed by
@@ -266,20 +278,20 @@ def _to_http_error(exc: Exception, fallback_status: int = 500) -> HTTPException:
         msg = str(exc)
         # Resume-id misses raise FileNotFoundError("Unknown resume_id: ..."); user-fixable -> 400.
         if msg.lower().startswith("unknown resume_id"):
-            logger.warning("Unknown resume_id: %s", exc)
+            logger.warning("unknown_resume_id", error=str(exc))
             return HTTPException(status_code=400, detail=msg)
-        logger.error("Tectonic missing: %s", exc)
+        logger.error("tectonic_missing", error=str(exc))
         return HTTPException(status_code=500, detail=msg)
     if isinstance(exc, LatexCompileError):
-        logger.error("LaTeX compile failed:\n%s", exc)
+        logger.error("latex_compile_failed", error=str(exc))
         return HTTPException(status_code=500, detail=f"LaTeX compile failed: {exc}")
     if isinstance(exc, ValueError):
-        logger.warning("Bad input or bad model output: %s", exc)
+        logger.warning("bad_input_or_model_output", error=str(exc))
         return HTTPException(status_code=400, detail=str(exc))
     if isinstance(exc, RuntimeError):
-        logger.error("Runtime error: %s", exc)
+        logger.error("runtime_error", error=str(exc))
         return HTTPException(status_code=500, detail=str(exc))
-    logger.exception("Unexpected error")
+    logger.exception("unexpected_error")
     return HTTPException(
         status_code=fallback_status,
         detail=f"Unexpected error: {exc.__class__.__name__}: {exc}",
@@ -295,6 +307,7 @@ PROVIDER_LABELS = {
     "anthropic": "Claude",
     "groq": "Groq",
     "nvidia": "NVIDIA NIM",
+    "bedrock": "Claude (Bedrock)",
 }
 
 
@@ -307,6 +320,10 @@ def health() -> dict:
         "provider_label": PROVIDER_LABELS.get(AI_PROVIDER, AI_PROVIDER),
         "score_provider": SCORE_PROVIDER,
         "score_provider_label": PROVIDER_LABELS.get(SCORE_PROVIDER, SCORE_PROVIDER),
+        "extract_provider": EXTRACT_PROVIDER,
+        "extract_provider_label": PROVIDER_LABELS.get(
+            EXTRACT_PROVIDER, EXTRACT_PROVIDER
+        ),
     }
 
 
@@ -403,6 +420,15 @@ def answer_question(req: AnswerQuestionRequest) -> dict[str, str]:
             req.question,
             resume_id=req.resume_id,
         )
+    except Exception as e:
+        raise _to_http_error(e)
+
+
+@app.post("/chat")
+def chat(req: ChatRequest) -> dict[str, str]:
+    """Free-form assistant turn, backed by Bedrock. Returns {'reply': ...}."""
+    try:
+        return chat_reply([m.model_dump() for m in req.messages])
     except Exception as e:
         raise _to_http_error(e)
 
@@ -1073,7 +1099,7 @@ def reach_out_send(row_id: str) -> dict[str, Any]:
     except tracking.TrackingNotConfigured as exc:
         raise HTTPException(status_code=400, detail=str(exc))
     except Exception as exc:
-        logger.exception("Failed to build tracked HTML body")
+        logger.exception("tracked_html_build_failed", reach_out_id=row_id)
         raise HTTPException(status_code=500, detail=f"Tracking failure: {exc}")
 
     try:
@@ -1189,10 +1215,10 @@ def reach_out_aggregates(req: AggregatesRequest) -> dict[str, Any]:
     try:
         res = _sidecar_request("POST", "/aggregates", json={"ids": req.ids})
     except HTTPException as exc:
-        logger.info("Aggregates fetch failed: %s", exc.detail)
+        logger.info("aggregates_fetch_failed", detail=exc.detail)
         return {"aggregates": {}, "warning": exc.detail}
     if res.status_code >= 400:
-        logger.warning("Sidecar returned %s for /aggregates", res.status_code)
+        logger.warning("sidecar_error", endpoint="/aggregates", status=res.status_code)
         return {"aggregates": {}, "warning": res.text}
     return res.json()
 
@@ -1345,3 +1371,29 @@ def mail_send(req: MailSendRequest) -> dict[str, Any]:
 @app.exception_handler(404)
 def _not_found(_request, _exc):
     return JSONResponse(status_code=404, content={"detail": "Not found"})
+
+
+def main() -> None:
+    """Entrypoint used by start.sh.
+
+    Runs uvicorn with our structlog log config so the reloader, error, and
+    access logs all render in the same (structured) format as app events.
+    Env vars: HOST, PORT, RELOAD ("1"/"0"). See log.py for LOG_* / ENV.
+    """
+    import os
+
+    import uvicorn
+
+    from log import build_uvicorn_log_config
+
+    uvicorn.run(
+        "server:app",
+        host=os.getenv("HOST", "127.0.0.1"),
+        port=int(os.getenv("PORT", "8000")),
+        reload=os.getenv("RELOAD", "1") == "1",
+        log_config=build_uvicorn_log_config(),
+    )
+
+
+if __name__ == "__main__":
+    main()

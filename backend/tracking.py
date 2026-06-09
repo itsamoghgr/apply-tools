@@ -22,7 +22,6 @@ Two env vars must match between this process and the sidecar:
 from __future__ import annotations
 
 import html as _html
-import logging
 import os
 import re
 from typing import Tuple
@@ -33,7 +32,9 @@ from lxml import html as lxml_html
 import pytracking
 from pytracking import Configuration
 
-logger = logging.getLogger("coverletter.tracking")
+from log import get_logger
+
+logger = get_logger(__name__)
 
 OPEN_PATH = "track/open/"
 CLICK_PATH = "track/click/"

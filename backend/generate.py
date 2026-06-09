@@ -13,7 +13,6 @@ tool, not a written artifact.
 from __future__ import annotations
 
 import json
-import logging
 import os
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -27,11 +26,12 @@ from openai import OpenAI
 
 from db import fetch_resume, insert_application, list_resume_rows, save_pdf
 from latex_utils import compile_latex, escape_latex
+from log import get_logger
 
 
 load_dotenv()
 
-logger = logging.getLogger("coverletter")
+logger = get_logger(__name__)
 
 BACKEND_DIR = Path(__file__).resolve().parent
 TEMPLATE_PATH = BACKEND_DIR / "template.tex"
@@ -55,6 +55,11 @@ EXTRACT_PROVIDER = os.environ.get("EXTRACT_PROVIDER", "groq").lower()
 # Hard ceiling on a single LLM call. Without this, a slow upstream stalls
 # the popup forever (no client-side timeout in popup.js for /score, /extract-jd).
 LLM_TIMEOUT_SECS = float(os.environ.get("LLM_TIMEOUT_SECS", "45"))
+# Tighter per-hop ceiling for the JD-extract path only. Auto-detect can span
+# several fallback hops (Groq quota-out -> Bedrock -> ...), so each hop must fail
+# fast for the whole chain to finish inside the popup's client timeout. Without
+# this a single slow hop (e.g. NVIDIA NIM) eats the entire budget.
+EXTRACT_TIMEOUT_SECS = float(os.environ.get("EXTRACT_TIMEOUT_SECS", "15"))
 
 # Anthropic (Claude)
 DEFAULT_MODEL = os.environ.get("MODEL", "claude-opus-4-5")
@@ -85,6 +90,10 @@ BEDROCK_MODEL = os.environ.get(
 BEDROCK_EXTRACT_MODEL = os.environ.get(
     "BEDROCK_EXTRACT_MODEL", "meta.llama3-3-70b-instruct-v1:0"
 )
+# The Chat tab is a free-form assistant (plain text, multi-turn), separate
+# from the JSON generation path. Default to the same Sonnet 4.5 profile as
+# generation but allow swapping it independently.
+BEDROCK_CHAT_MODEL = os.environ.get("BEDROCK_CHAT_MODEL", BEDROCK_MODEL)
 BEDROCK_MAX_TOKENS = 4096
 
 # Extract JD (kept separate for backward compat; honours AI_PROVIDER)
@@ -536,10 +545,11 @@ def _call_claude(
     extra_messages: list[dict[str, str]] | None = None,
     model: str | None = None,
     max_tokens: int | None = None,
+    timeout: float = LLM_TIMEOUT_SECS,
 ) -> tuple[dict[str, Any], str]:
     """Single Claude messages.create call, JSON-parsed and key-validated."""
     api_key = _require_api_key()
-    client = Anthropic(api_key=api_key, timeout=LLM_TIMEOUT_SECS)
+    client = Anthropic(api_key=api_key, timeout=timeout)
 
     messages: list[dict[str, Any]] = [{"role": "user", "content": user_message}]
     if extra_messages:
@@ -570,10 +580,11 @@ def _call_groq(
     extra_messages: list[dict[str, str]] | None = None,
     model: str | None = None,
     max_tokens: int | None = None,
+    timeout: float = LLM_TIMEOUT_SECS,
 ) -> tuple[dict[str, Any], str]:
     """Groq chat completion, JSON-parsed and key-validated."""
     api_key = _require_groq_key()
-    client = Groq(api_key=api_key, timeout=LLM_TIMEOUT_SECS)
+    client = Groq(api_key=api_key, timeout=timeout)
 
     msgs: list[dict[str, str]] = [
         {"role": "system", "content": system_prompt},
@@ -606,10 +617,11 @@ def _call_nim(
     extra_messages: list[dict[str, str]] | None = None,
     model: str | None = None,
     max_tokens: int | None = None,
+    timeout: float = LLM_TIMEOUT_SECS,
 ) -> tuple[dict[str, Any], str]:
     """NVIDIA NIM chat completion (OpenAI-compatible), JSON-parsed and key-validated."""
     api_key = _require_nim_key()
-    client = OpenAI(base_url=NIM_BASE_URL, api_key=api_key, timeout=LLM_TIMEOUT_SECS)
+    client = OpenAI(base_url=NIM_BASE_URL, api_key=api_key, timeout=timeout)
 
     msgs: list[dict[str, str]] = [
         {"role": "system", "content": system_prompt},
@@ -642,6 +654,7 @@ def _call_bedrock(
     extra_messages: list[dict[str, str]] | None = None,
     model: str | None = None,
     max_tokens: int | None = None,
+    timeout: float = LLM_TIMEOUT_SECS,
 ) -> tuple[dict[str, Any], str]:
     """AWS Bedrock Converse API call, JSON-parsed and key-validated.
 
@@ -660,8 +673,8 @@ def _call_bedrock(
         "bedrock-runtime",
         region_name=BEDROCK_REGION,
         config=Config(
-            read_timeout=LLM_TIMEOUT_SECS,
-            connect_timeout=min(10.0, LLM_TIMEOUT_SECS),
+            read_timeout=timeout,
+            connect_timeout=min(10.0, timeout),
             retries={"max_attempts": 1},
         ),
     )
@@ -699,8 +712,14 @@ def _dispatch_provider(
     extra_messages: list[dict[str, str]] | None,
     model: str | None,
     max_tokens: int | None,
+    timeout: float,
 ) -> tuple[dict[str, Any], str]:
-    kwargs = dict(extra_messages=extra_messages, model=model, max_tokens=max_tokens)
+    kwargs = dict(
+        extra_messages=extra_messages,
+        model=model,
+        max_tokens=max_tokens,
+        timeout=timeout,
+    )
     if provider == "nvidia":
         return _call_nim(system_prompt, user_message, required_keys, **kwargs)
     if provider == "groq":
@@ -723,11 +742,13 @@ def _dispatch_provider(
 FALLBACK_CHAIN = ("bedrock", "groq", "anthropic", "nvidia")
 
 # JD auto-detect (extract) prefers the cheap/fast Llama providers, in order:
-# Groq (Llama 3.3 70b) first — fast and consistent (~2-3s) — then NVIDIA NIM,
-# then Bedrock, with Anthropic as the final backstop. (NVIDIA's public NIM
-# endpoint swings 3-15s+, so it's the secondary, not the primary.) Used only by
-# extract_jd_from_page, not generation/scoring.
-EXTRACT_FALLBACK_CHAIN = ("groq", "nvidia", "bedrock", "anthropic")
+# Groq (Llama 3.3 70b) first — fast and consistent (~2-3s) — then Bedrock
+# (Llama 3.3 on a reliable endpoint), with Anthropic as the backstop and NVIDIA
+# NIM LAST. NVIDIA's public endpoint frequently times out (>45s), so once Groq's
+# daily quota is exhausted we must NOT fall to it ahead of Bedrock/Anthropic —
+# that dead-ended every auto-detect on a hung hop. This mirrors FALLBACK_CHAIN's
+# ordering rationale. Used only by extract_jd_from_page, not generation/scoring.
+EXTRACT_FALLBACK_CHAIN = ("groq", "bedrock", "anthropic", "nvidia")
 
 # Substrings that mark an exception as "provider is unusable right now"
 # rather than "the request itself is malformed". Lowercased before match.
@@ -777,6 +798,7 @@ def _call_llm(
     model: str | None = None,
     max_tokens: int | None = None,
     fallback_chain: tuple[str, ...] | None = None,
+    timeout: float = LLM_TIMEOUT_SECS,
 ) -> tuple[dict[str, Any], str]:
     """Unified dispatcher: routes to the configured AI provider.
 
@@ -811,6 +833,7 @@ def _call_llm(
                 # caller's model. Every fallback uses its own default.
                 model=model if i == 0 else None,
                 max_tokens=max_tokens,
+                timeout=timeout,
             )
         except Exception as exc:
             last_exc = exc
@@ -825,10 +848,10 @@ def _call_llm(
             if not recoverable or is_last:
                 raise
             logger.warning(
-                "Provider %s failed (%s); falling back to %s",
-                prov,
-                exc,
-                chain[i + 1],
+                "provider_fallback",
+                provider=prov,
+                error=str(exc),
+                next_provider=chain[i + 1],
             )
 
     # Unreachable (loop either returns or raises), but keeps type-checkers happy.
@@ -1116,6 +1139,86 @@ def answer_application_question(
         output=json.dumps({"question": question.strip(), **out}),
     )
     return out
+
+
+# -----------------------------------------------------------------------------
+# Chat: a free-form, multi-turn assistant backed by Bedrock (Converse API).
+# Unlike the generation paths above, this returns plain text — no JSON schema
+# — so it has its own Bedrock call rather than going through _call_llm.
+# -----------------------------------------------------------------------------
+
+CHAT_SYSTEM = (
+    "You are Apply Tools' built-in assistant, helping the user with their job "
+    "search: cover letters, outreach, interview prep, resume questions, and "
+    "general career advice. Be concise, direct, and practical. Use plain text "
+    "(short paragraphs or simple lists); avoid heavy markdown. If you don't "
+    "know something, say so rather than inventing details."
+)
+
+# Keep the request bounded: only the most recent turns are sent to the model.
+CHAT_MAX_HISTORY_MESSAGES = 20
+
+
+def chat_reply(messages: list[dict[str, str]]) -> dict[str, str]:
+    """Generate the assistant's next turn for a chat conversation.
+
+    `messages` is the running transcript as ``[{"role": "user"|"assistant",
+    "content": str}, ...]`` in chronological order, ending with the latest
+    user message. Returns ``{"reply": <assistant text>}``.
+
+    Runs directly on Bedrock (Converse) using BEDROCK_CHAT_MODEL — plain text,
+    no JSON parsing or fallback chain.
+    """
+    if not messages:
+        raise ValueError("messages must not be empty")
+
+    # Trim to the most recent turns and normalise roles. Bedrock's Converse
+    # API requires the first message to be a user turn and roles to alternate,
+    # so we drop any leading assistant messages after trimming.
+    trimmed = messages[-CHAT_MAX_HISTORY_MESSAGES:]
+    while trimmed and trimmed[0].get("role") != "user":
+        trimmed = trimmed[1:]
+    if not trimmed:
+        raise ValueError("conversation must contain a user message")
+    if trimmed[-1].get("role") != "user":
+        raise ValueError("the last message must be from the user")
+
+    converse_messages: list[dict[str, Any]] = []
+    for m in trimmed:
+        role = m.get("role")
+        content = (m.get("content") or "").strip()
+        if role not in ("user", "assistant") or not content:
+            continue
+        converse_messages.append({"role": role, "content": [{"text": content}]})
+
+    import boto3  # local import: optional dep, mirrors _call_bedrock
+    from botocore.config import Config
+
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name=BEDROCK_REGION,
+        config=Config(
+            read_timeout=LLM_TIMEOUT_SECS,
+            connect_timeout=min(10.0, LLM_TIMEOUT_SECS),
+            retries={"max_attempts": 1},
+        ),
+    )
+
+    try:
+        response = client.converse(
+            modelId=BEDROCK_CHAT_MODEL,
+            system=[{"text": CHAT_SYSTEM}],
+            messages=converse_messages,
+            inferenceConfig={"maxTokens": BEDROCK_MAX_TOKENS},
+        )
+    except Exception as exc:
+        raise RuntimeError(f"AWS Bedrock chat request failed: {exc}") from exc
+
+    blocks = response.get("output", {}).get("message", {}).get("content", [])
+    reply = "".join(b.get("text", "") for b in blocks).strip()
+    if not reply:
+        raise RuntimeError("Bedrock returned an empty chat response")
+    return {"reply": reply}
 
 
 VALID_OUTREACH_CHANNELS = ("linkedin_invitation", "linkedin_message", "email")
@@ -1591,6 +1694,9 @@ def extract_jd_from_page(
         model=extract_model,
         max_tokens=EXTRACT_MAX_TOKENS,
         fallback_chain=EXTRACT_FALLBACK_CHAIN,
+        # Tighter per-hop cap so a slow/hung hop fails fast and the chain can
+        # walk Groq -> Bedrock -> ... within the popup's client timeout.
+        timeout=EXTRACT_TIMEOUT_SECS,
     )
 
     missing = {"company", "job_description"} - payload.keys()
@@ -1617,8 +1723,13 @@ def extract_jd_from_page(
     job_role = job_role.strip()
     location = location.strip()
     logger.info(
-        "extract_jd url=%s company_len=%d jd_len=%d role=%r location=%r company=%r",
-        url, len(company), len(jd), job_role[:120], location[:120], company[:200],
+        "extract_jd",
+        url=url,
+        company_len=len(company),
+        jd_len=len(jd),
+        role=job_role[:120],
+        location=location[:120],
+        company=company[:200],
     )
     return {
         "company": company,
