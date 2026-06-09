@@ -5,19 +5,25 @@ const LINKEDIN_INVITE_WARN = 280;
 // Default timeouts (ms). The backend caps a single LLM call at ~45s, so
 // 60s leaves a small buffer for network + cold-start before we abort.
 // /generate is longer because tectonic can take 30s+ on first compile.
-// /extract-jd runs on fast Groq Llama (~0.3-3s); 30s is generous and ensures a
-// slow/hung provider surfaces an error quickly instead of spinning for 60s.
+// /extract-jd runs on fast Groq Llama (~0.3-3s) but can walk a multi-hop
+// fallback chain (Groq quota-out -> Bedrock -> Anthropic) when the primary is
+// down. The backend caps each hop at EXTRACT_TIMEOUT_SECS (~15s), so allow room
+// for a couple of hops + buffer before the client aborts.
 const TIMEOUT_LLM_MS = 60_000;
 const TIMEOUT_GENERATE_MS = 180_000;
-const TIMEOUT_EXTRACT_MS = 30_000;
+const TIMEOUT_EXTRACT_MS = 50_000;
 // Reading the page across all frames (chrome.scripting.executeScript) is
 // normally instant but can hang on pages with many/cross-origin frames. Bound
 // it so "Detecting..." never freezes.
 const TIMEOUT_PAGE_READ_MS = 8_000;
 
 // Populated from GET / at startup. Fallback label is generic so it never
-// reads as a lie if the server is offline.
+// reads as a lie if the server is offline. `_providerLabel` is the generation
+// provider (shown in the health badge); `_extractProviderLabel` is the JD
+// auto-detect provider, which is often different (e.g. generation on Bedrock,
+// auto-detect on Groq). Defaults to the generation label until health resolves.
 let _providerLabel = "AI";
+let _extractProviderLabel = "AI";
 
 // Storage keys. The shared company + JD live in one place; only the truly
 // tab-local fields (intent, outreach profile, question text, tracker
@@ -50,6 +56,7 @@ const STORAGE_KEYS = {
     profile: "lead.profile",
     notes: "lead.notes",
   },
+  chat: { messages: "chat.messages" },
 };
 
 const DEFAULT_RESUME_ID = "default";
@@ -96,6 +103,16 @@ async function checkHealth() {
         const data = await res.json();
         if (data && typeof data.provider_label === "string" && data.provider_label) {
           _providerLabel = data.provider_label;
+          // Default extract label to the generation label, then override if the
+          // backend reports a distinct auto-detect provider.
+          _extractProviderLabel = data.provider_label;
+        }
+        if (
+          data &&
+          typeof data.extract_provider_label === "string" &&
+          data.extract_provider_label
+        ) {
+          _extractProviderLabel = data.extract_provider_label;
         }
       } catch (_e) {
         // older backend without provider_label - keep the fallback.
@@ -289,7 +306,7 @@ sharedJd.addEventListener("input", () => {
 const tabs = document.querySelectorAll(".tab");
 const panels = document.querySelectorAll(".panel");
 // Tabs that don't use the shared JD context (just hide the JD block when active).
-const TABS_WITHOUT_JD = new Set(["outreach", "lead"]);
+const TABS_WITHOUT_JD = new Set(["outreach", "lead", "chat"]);
 const jdContext = $("jdContext");
 
 function activateTab(name) {
@@ -777,10 +794,13 @@ async function runAutoDetect() {
     }
     // Tick an elapsed-seconds counter so a slow provider never looks frozen.
     const startedAt = Date.now();
-    setAutodetectStatus(`Detecting via ${_providerLabel}...`, "working");
+    setAutodetectStatus(`Detecting via ${_extractProviderLabel}...`, "working");
     const ticker = setInterval(() => {
       const secs = Math.round((Date.now() - startedAt) / 1000);
-      setAutodetectStatus(`Detecting via ${_providerLabel}... ${secs}s`, "working");
+      setAutodetectStatus(
+        `Detecting via ${_extractProviderLabel}... ${secs}s`,
+        "working",
+      );
     }, 1000);
     try {
       const res = await fetchWithTimeout(
@@ -805,7 +825,7 @@ async function runAutoDetect() {
       jd = data.job_description || "";
       if (data.job_role) role = data.job_role;
       if (data.location) job_location = data.location;
-      source = _providerLabel;
+      source = _extractProviderLabel;
     } catch (err) {
       setAutodetectStatus(`Failed: ${err.message || err}`, "err");
       autoDetectBtn.disabled = false;
@@ -816,7 +836,7 @@ async function runAutoDetect() {
   }
 
   if (!company && !jd) {
-    const msg = source === _providerLabel
+    const msg = source === _extractProviderLabel
       ? "Page doesn't look like a single job posting. Open the specific posting and try again."
       : "This site is supported but the posting markup looks different - try copy/paste.";
     setAutodetectStatus(msg, "err");
@@ -1787,6 +1807,7 @@ async function restoreAll() {
     STORAGE_KEYS.lead.company,
     STORAGE_KEYS.lead.profile,
     STORAGE_KEYS.lead.notes,
+    STORAGE_KEYS.chat.messages,
   ]);
 
   if (data[STORAGE_KEYS.shared.company]) sharedCompany.value = data[STORAGE_KEYS.shared.company];
@@ -1818,10 +1839,12 @@ async function restoreAll() {
   if (data[STORAGE_KEYS.lead.profile]) leadProfile.value = data[STORAGE_KEYS.lead.profile];
   if (data[STORAGE_KEYS.lead.notes]) leadNotes.value = data[STORAGE_KEYS.lead.notes];
 
+  restoreChat(data[STORAGE_KEYS.chat.messages]);
+
   const activeTab = data[STORAGE_KEYS.activeTab];
   if (
     activeTab &&
-    ["cover", "email", "outreach", "score", "question", "track", "lead"].includes(activeTab)
+    ["cover", "email", "outreach", "score", "question", "track", "lead", "chat"].includes(activeTab)
   ) {
     activateTab(activeTab);
   } else {
@@ -1834,6 +1857,131 @@ async function restoreAll() {
   // If there's already a JD in storage, kick off a score on open.
   if (getSharedJd().length >= 200) scheduleSharedScore();
 }
+
+// ============================================================================
+// Chat tab — free-form assistant backed by Bedrock (POST /chat).
+// ============================================================================
+
+const chatThread = $("chatThread");
+const chatEmpty = $("chatEmpty");
+const chatStatus = $("chatStatus");
+const chatForm = $("chatForm");
+const chatInput = $("chat-input");
+const chatSend = $("chatSend");
+const chatClear = $("chatClear");
+
+// In-memory transcript: [{ role: "user"|"assistant", content }]. Persisted to
+// extension storage so the conversation survives popup close/reopen.
+let chatMessages = [];
+let chatBusy = false;
+
+function persistChat() {
+  storageSet({ [STORAGE_KEYS.chat.messages]: JSON.stringify(chatMessages) });
+}
+
+// Render one message bubble. `pending` marks the in-flight assistant turn so
+// we can replace it in place once the reply (or an error) arrives.
+function appendBubble(role, text, { pending = false } = {}) {
+  if (chatEmpty) chatEmpty.style.display = "none";
+  const el = document.createElement("div");
+  el.className = `chat-msg ${role}` + (pending ? " pending" : "");
+  el.textContent = text;
+  chatThread.appendChild(el);
+  chatThread.scrollTop = chatThread.scrollHeight;
+  return el;
+}
+
+function restoreChat(raw) {
+  if (!raw) return;
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (_e) {
+    return;
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return;
+  chatMessages = parsed.filter(
+    (m) => m && (m.role === "user" || m.role === "assistant") && m.content
+  );
+  for (const m of chatMessages) appendBubble(m.role, m.content);
+}
+
+function autosizeChatInput() {
+  chatInput.style.height = "auto";
+  chatInput.style.height = Math.min(chatInput.scrollHeight, 140) + "px";
+}
+
+async function sendChat() {
+  if (chatBusy) return;
+  const text = chatInput.value.trim();
+  if (!text) return;
+
+  chatBusy = true;
+  chatSend.disabled = true;
+  setStatus(chatStatus, "", "");
+
+  chatMessages.push({ role: "user", content: text });
+  appendBubble("user", text);
+  persistChat();
+
+  chatInput.value = "";
+  autosizeChatInput();
+
+  const pending = appendBubble("assistant", "Thinking…", { pending: true });
+
+  try {
+    const res = await fetchWithTimeout(`${BACKEND}/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ messages: chatMessages }),
+    });
+    if (!res.ok) {
+      const detail = await readErrorDetail(res);
+      throw new Error(detail || `HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    const reply = (data.reply || "").trim();
+    if (!reply) throw new Error("Empty response");
+    pending.classList.remove("pending");
+    pending.textContent = reply;
+    chatMessages.push({ role: "assistant", content: reply });
+    persistChat();
+  } catch (err) {
+    // Drop the failed turn's placeholder and let the user retry. Keep the
+    // user message in the transcript so they don't have to retype it.
+    pending.remove();
+    setStatus(chatStatus, `Failed: ${err.message || err}`, "err");
+  } finally {
+    chatThread.scrollTop = chatThread.scrollHeight;
+    chatBusy = false;
+    chatSend.disabled = false;
+    chatInput.focus();
+  }
+}
+
+chatForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  sendChat();
+});
+
+// Enter sends; Shift+Enter inserts a newline.
+chatInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendChat();
+  }
+});
+
+chatInput.addEventListener("input", autosizeChatInput);
+
+chatClear.addEventListener("click", () => {
+  chatMessages = [];
+  persistChat();
+  chatThread.querySelectorAll(".chat-msg").forEach((el) => el.remove());
+  if (chatEmpty) chatEmpty.style.display = "";
+  setStatus(chatStatus, "", "");
+  chatInput.focus();
+});
 
 document.addEventListener("DOMContentLoaded", () => {
   wireAutosize();

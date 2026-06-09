@@ -91,6 +91,9 @@
       <button type="button" class="tab" role="tab" data-tab="lead" aria-selected="false">
         Lead
       </button>
+      <button type="button" class="tab" role="tab" data-tab="chat" aria-selected="false">
+        Chat
+      </button>
     </nav>
 
     <!-- ============ Cover Letter tab ============ -->
@@ -393,6 +396,31 @@
         <button type="button" id="leadSubmit" class="btn-primary">Save lead</button>
       </div>
       <div id="leadStatus" class="status" role="status" aria-live="polite"></div>
+    </section>
+
+    <!-- ============ Chat tab ============ -->
+    <section class="panel" data-panel="chat">
+      <div class="chat-thread" id="chatThread" aria-live="polite">
+        <div class="chat-empty" id="chatEmpty">
+          Ask anything about your job search — cover letters, outreach,
+          interview prep, or career questions.
+        </div>
+      </div>
+      <div id="chatStatus" class="status" role="status" aria-live="polite"></div>
+      <form class="chat-input-row" id="chatForm">
+        <textarea
+          id="chat-input"
+          class="chat-input"
+          placeholder="Message…"
+          rows="1"
+          maxlength="20000"
+          autocomplete="off"
+        ></textarea>
+        <button type="submit" id="chatSend" class="btn-primary chat-send">Send</button>
+      </form>
+      <div class="chat-actions">
+        <button type="button" id="chatClear" class="btn-mini">Clear chat</button>
+      </div>
     </section>
 
     <script src="popup.js"></script>
