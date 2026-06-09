@@ -1,6 +1,8 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { toast } from "sonner";
 import {
   Search,
   ExternalLink,
@@ -9,6 +11,7 @@ import {
   ArrowUpDown,
   Globe,
   Building2,
+  Trash2,
 } from "lucide-react";
 import { relativeTime } from "@/lib/time";
 import HuntPanel from "./HuntPanel";
@@ -45,12 +48,57 @@ export default function DiscoveredCompanies({
 }: {
   companies: CompanyLead[];
 }) {
+  const router = useRouter();
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortKey>("confidence");
   const [conf, setConf] = useState<ConfFilter>("all");
+  // Optimistic removal: hide deleted ids immediately, reconcile on refresh.
+  const [removed, setRemoved] = useState<Set<string>>(new Set());
+  const [deleting, setDeleting] = useState<string | null>(null);
+
+  async function deleteCompany(c: CompanyLead) {
+    if (deleting) return;
+    if (
+      !confirm(
+        `Delete "${c.companyName ?? c.domain}"? It won't be surfaced by future hunts.`
+      )
+    )
+      return;
+    setDeleting(c.id);
+    setRemoved((prev) => new Set(prev).add(c.id)); // optimistic
+    try {
+      // 1. Remove the company lead from the platform.
+      const res = await fetch(`/api/proxy/leads/${c.id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}));
+        throw new Error(d.detail || `HTTP ${res.status}`);
+      }
+      // 2. Remember the domain as dropped so future hunts skip it. Best-effort:
+      //    if the agent server is down, the delete still stands.
+      if (c.domain) {
+        fetch(`/api/agent/api/v1/seen/drop`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ domain: c.domain, reason: "user_deleted" }),
+        }).catch(() => {});
+      }
+      toast.success(`Deleted ${c.companyName ?? c.domain}`);
+      router.refresh();
+    } catch (e) {
+      // Roll back the optimistic removal.
+      setRemoved((prev) => {
+        const next = new Set(prev);
+        next.delete(c.id);
+        return next;
+      });
+      toast.error(`Could not delete: ${(e as Error).message}`);
+    } finally {
+      setDeleting(null);
+    }
+  }
 
   const filtered = useMemo(() => {
-    let rows = companies;
+    let rows = companies.filter((c) => !removed.has(c.id));
 
     if (conf !== "all") {
       rows = rows.filter(
@@ -82,7 +130,7 @@ export default function DiscoveredCompanies({
       sorted.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     }
     return sorted;
-  }, [companies, query, sort, conf]);
+  }, [companies, query, sort, conf, removed]);
 
   return (
     <div className="space-y-5">
@@ -257,6 +305,16 @@ export default function DiscoveredCompanies({
                           <Mail className="h-3.5 w-3.5" />
                         </a>
                       )}
+                      <button
+                        type="button"
+                        onClick={() => deleteCompany(c)}
+                        disabled={deleting === c.id}
+                        className="btn btn-ghost btn-xs btn-square text-error/70 hover:text-error hover:bg-error/10"
+                        title="Delete — won't be re-surfaced by future hunts"
+                        aria-label="Delete company"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
                     </div>
                   </td>
                 </tr>

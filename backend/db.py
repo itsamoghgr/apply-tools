@@ -850,6 +850,88 @@ def platform_leads_known_domains(domains: list[str]) -> list[str]:
     return [r.domain for r in rows]
 
 
+def _upsert_founder_person_lead(
+    conn,
+    *,
+    founder_name: str | None,
+    founder_email: str | None,
+    founder_linkedin_url: str | None,
+    company_name: str | None,
+) -> None:
+    """Maintain a person-lead (domain NULL) for a discovered company's founder,
+    so founders flow into the Outreach tab automatically.
+
+    Idempotent across hunt re-runs: matches an existing agent-founder row by
+    LinkedIn URL first, else by (name + company), and updates it; otherwise
+    inserts. Tagged ``source='agent-founder'`` and ``role='Founder'`` so it is
+    distinct from the domain-keyed company row and from hand-added leads. Runs
+    in the SAME transaction/connection as the company upsert.
+    """
+    if not (isinstance(founder_name, str) and founder_name.strip()):
+        return  # nothing to create without at least a name
+    founder_name = founder_name.strip()
+    li = (founder_linkedin_url or "").strip() or None
+    company = (company_name or "").strip() or None
+
+    # Find an existing agent-founder row to update (avoid duplicates on re-run).
+    row = None
+    if li:
+        row = conn.execute(
+            text(
+                "SELECT \"id\" FROM \"Lead\" WHERE \"source\" = 'agent-founder' "
+                'AND "linkedinUrl" = :li LIMIT 1'
+            ),
+            {"li": li},
+        ).fetchone()
+    if row is None:
+        row = conn.execute(
+            text(
+                "SELECT \"id\" FROM \"Lead\" WHERE \"source\" = 'agent-founder' "
+                'AND "name" = :n AND "currentCompany" IS NOT DISTINCT FROM :c '
+                "LIMIT 1"
+            ),
+            {"n": founder_name, "c": company},
+        ).fetchone()
+
+    if row is not None:
+        # Refresh contact details without clobbering existing values with nulls.
+        conn.execute(
+            text(
+                'UPDATE "Lead" SET '
+                '"email" = COALESCE(:email, "email"), '
+                '"linkedinUrl" = COALESCE(:li, "linkedinUrl"), '
+                '"currentCompany" = COALESCE(:c, "currentCompany"), '
+                '"updatedAt" = CURRENT_TIMESTAMP '
+                'WHERE "id" = :id'
+            ),
+            {"email": founder_email, "li": li, "c": company, "id": row.id},
+        )
+        return
+
+    # Insert a fresh person-lead. domain stays NULL so it shows in Outreach.
+    # Email may collide with an existing person-lead (email is UNIQUE); on
+    # conflict we simply skip rather than fail the whole delivery.
+    try:
+        conn.execute(
+            text(
+                'INSERT INTO "Lead" ("id", "name", "email", "linkedinUrl", '
+                '"currentCompany", "role", "source", "updatedAt") VALUES '
+                "(:id, :n, :email, :li, :c, 'Founder', 'agent-founder', "
+                "CURRENT_TIMESTAMP)"
+            ),
+            {
+                "id": secrets.token_urlsafe(12),
+                "n": founder_name,
+                "email": founder_email or None,
+                "li": li,
+                "c": company,
+            },
+        )
+    except IntegrityError:
+        # email already belongs to another lead — leave that one as the truth.
+        pass
+
+
 def platform_upsert_lead(payload: dict) -> dict:
     """Idempotently upsert a verified lead keyed on `domain`.
 
@@ -857,6 +939,10 @@ def platform_upsert_lead(payload: dict) -> dict:
     ``{"lead_id": str, "created": bool}``. ON CONFLICT (domain) updates in
     place — never creates a duplicate. `founderName` also seeds `name` when the
     row is new, since `name` is NOT NULL on the table.
+
+    Side effect: when a founder is present, also maintains a separate person-lead
+    (domain NULL, source 'agent-founder') so the founder appears in the Outreach
+    tab. See :func:`_upsert_founder_person_lead`.
     """
     domain = (payload.get("domain") or "").strip().lower()
     if not domain:
@@ -915,4 +1001,12 @@ def platform_upsert_lead(payload: dict) -> dict:
     )
     with get_conn() as conn:
         row = conn.execute(sql, params).fetchone()
+        # Same transaction: surface the founder as an Outreach person-lead.
+        _upsert_founder_person_lead(
+            conn,
+            founder_name=founder_name,
+            founder_email=payload.get("founder_email"),
+            founder_linkedin_url=payload.get("founder_linkedin_url"),
+            company_name=company_name,
+        )
     return {"lead_id": row.id, "created": bool(row.created)}

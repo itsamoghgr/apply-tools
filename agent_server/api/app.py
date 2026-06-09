@@ -19,9 +19,10 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from agent_server.config import CONFIG
-from agent_server.db.agent_db import create_job, get_job
+from agent_server.db.agent_db import create_job, get_job, seen_add
 from agent_server.log import configure_logging, get_logger
 from agent_server.orchestrator.runner import launch_pipeline
+from agent_server.stages.normalize import normalize_domain
 
 # Configure structlog at import time (idempotent).
 configure_logging()
@@ -144,6 +145,30 @@ def get_hunt(job_id: str) -> Any:
         updated_at=row.get("updated_at"),
         finished_at=row.get("finished_at"),
     )
+
+
+class DropRequest(BaseModel):
+    """Body for POST /api/v1/seen/drop."""
+
+    domain: str = Field(..., min_length=1, description="Domain to mark as dropped.")
+    reason: str | None = Field(default=None, description="Why it was dropped.")
+
+
+@app.post(
+    "/api/v1/seen/drop",
+    summary="Mark a domain as dropped so future hunts skip it",
+)
+def drop_domain(body: DropRequest) -> dict[str, Any]:
+    """Record a domain as 'dropped' in the seen-cache.
+
+    Used when a user deletes a discovered company in the UI — we remember the
+    domain so a later hunt does not re-surface it. Normalises the domain first
+    so it matches what discovery/dedup store.
+    """
+    norm = normalize_domain(body.domain) or body.domain.strip().lower()
+    seen_add(norm, "dropped", reason=body.reason or "user_deleted")
+    logger.info("seen_dropped", domain=norm, reason=body.reason)
+    return {"ok": True, "domain": norm}
 
 
 @app.get("/health", summary="Liveness probe")
