@@ -416,3 +416,23 @@ def audit_add(
                 "now": _utcnow(),
             },
         )
+
+
+def audit_since(job_id: str, after_id: int = 0, limit: int = 200) -> list[dict]:
+    """Return audit_traces for a job with id > after_id, oldest first.
+
+    Backs the SSE live-activity stream: the client polls with the last id it
+    saw, so events are delivered in order, exactly once.
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            text("""
+                SELECT id, stage, event, domain, data, created_at
+                FROM audit_traces
+                WHERE job_id = :job_id AND id > :after_id
+                ORDER BY id ASC
+                LIMIT :limit
+            """),
+            {"job_id": job_id, "after_id": after_id, "limit": limit},
+        ).fetchall()
+    return _rows_to_dicts(rows)
