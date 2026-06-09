@@ -27,6 +27,11 @@ export type CompanyLead = {
   founderName: string | null;
   email: string | null;
   linkedinUrl: string | null;
+  employeeCount: string | null;
+  revenue: string | null;
+  location: string | null;
+  industry: string | null;
+  lastRoundDate: string | null;
   confidence: number | null;
   source: string | null;
   sources: string[];
@@ -126,7 +131,9 @@ export default function DiscoveredCompanies({
           (c.companyName ?? "").toLowerCase().includes(q) ||
           (c.domain ?? "").toLowerCase().includes(q) ||
           (c.founderName ?? "").toLowerCase().includes(q) ||
-          (c.fundingStage ?? "").toLowerCase().includes(q)
+          (c.fundingStage ?? "").toLowerCase().includes(q) ||
+          (c.industry ?? "").toLowerCase().includes(q) ||
+          (c.location ?? "").toLowerCase().includes(q)
       );
     }
 
@@ -225,6 +232,9 @@ export default function DiscoveredCompanies({
               <tr className="text-xs uppercase tracking-wide opacity-60">
                 <th>Company</th>
                 <th>Funding</th>
+                <th>Industry</th>
+                <th>Employees</th>
+                <th>Location</th>
                 <th>Founder</th>
                 <th>Confidence</th>
                 <th>Contact</th>
@@ -272,10 +282,43 @@ export default function DiscoveredCompanies({
                             {c.fundingAmount}
                           </span>
                         )}
+                        {c.lastRoundDate && (
+                          <span className="text-[11px] opacity-40">
+                            {c.lastRoundDate}
+                          </span>
+                        )}
                       </div>
                     ) : (
                       <span className="text-xs opacity-30">—</span>
                     )}
+                  </td>
+                  <td>
+                    {c.industry ? (
+                      <span className="badge badge-ghost badge-sm whitespace-nowrap">
+                        {c.industry}
+                      </span>
+                    ) : (
+                      <span className="text-xs opacity-30">—</span>
+                    )}
+                  </td>
+                  <td>
+                    <span className="text-xs tabular-nums opacity-70">
+                      {c.employeeCount || "—"}
+                    </span>
+                  </td>
+                  <td>
+                    <span className="text-xs opacity-70 whitespace-nowrap">
+                      {c.revenue ? (
+                        <span title={`Revenue: ${c.revenue}`}>
+                          {c.location || "—"}
+                          <span className="block text-[11px] opacity-50">
+                            {c.revenue}
+                          </span>
+                        </span>
+                      ) : (
+                        c.location || "—"
+                      )}
+                    </span>
                   </td>
                   <td>
                     {c.founderName ? (

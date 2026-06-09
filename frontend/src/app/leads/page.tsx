@@ -93,6 +93,11 @@ export default async function LeadsPage({
     founderName: l.founderName ?? l.name,
     email: l.email,
     linkedinUrl: l.linkedinUrl,
+    employeeCount: l.employeeCount,
+    revenue: l.revenue,
+    location: l.location,
+    industry: l.industry,
+    lastRoundDate: l.lastRoundDate,
     confidence: l.confidence,
     source: l.source,
     sources: Array.isArray(l.sourcesJson)
