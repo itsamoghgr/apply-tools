@@ -216,6 +216,57 @@ async def hunt_events(job_id: str) -> Any:
     )
 
 
+class VerifyEmailRequest(BaseModel):
+    """Body for POST /api/v1/verify/email."""
+
+    domain: str | None = Field(
+        default=None, description="Company root domain (preferred)."
+    )
+    company: str | None = Field(
+        default=None, description="Company name (used to derive a domain if needed)."
+    )
+    founder_name: str | None = Field(
+        default=None, description="Person to find the email for."
+    )
+
+
+@app.post(
+    "/api/v1/verify/email",
+    summary="Find + verify an email on demand (verification waterfall)",
+)
+def verify_email(body: VerifyEmailRequest) -> dict[str, Any]:
+    """Run the email-discovery/verification waterfall for one person+domain.
+
+    Used by the 'Find emails' action in the UI. Returns the best email found and
+    a 0–1 confidence score. Returns email=null (not an error) when nothing is
+    found — the caller decides whether to keep flagging the lead.
+    """
+    from agent_server.stages.verify import WaterfallVerifier
+
+    domain = body.domain and (normalize_domain(body.domain) or body.domain.strip())
+    if not domain and body.company:
+        # Best-effort: turn "Acme Inc" into "acme.com" as a guess.
+        slug = "".join(ch for ch in body.company.lower() if ch.isalnum())
+        domain = f"{slug}.com" if slug else None
+    if not domain:
+        return {"email": None, "score": 0.0, "method": "none", "domain": None}
+
+    verdict = WaterfallVerifier().find_and_verify(domain, body.founder_name)
+    logger.info(
+        "verify_email_ondemand",
+        domain=domain,
+        found=bool(verdict.email),
+        method=verdict.method,
+        score=verdict.score,
+    )
+    return {
+        "email": verdict.email,
+        "score": verdict.score,
+        "method": verdict.method,
+        "domain": domain,
+    }
+
+
 class DropRequest(BaseModel):
     """Body for POST /api/v1/seen/drop."""
 
