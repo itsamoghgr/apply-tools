@@ -117,6 +117,7 @@ export default function LeadsTable({
                 <th className="text-center">Reach‑outs</th>
                 <th className="text-center">Replied</th>
                 <th>Updated</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>
