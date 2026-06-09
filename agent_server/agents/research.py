@@ -29,7 +29,9 @@ from agent_server.log import get_logger
 logger = get_logger(__name__)
 
 # ── constants ──────────────────────────────────────────────────────────────────
-MAX_TOOL_CALLS = 10          # hard cap on LLM-driven tool invocations per run
+MAX_TOOL_CALLS = 16          # hard cap on LLM-driven tool invocations per run
+                             # (thorough mode: founder/funding + 5 company
+                             # attributes each may need its own search)
 _LINKEDIN_RE = re.compile(r"https?://(?:[\w-]+\.)?linkedin\.com/in/([\w%-]+)", re.I)
 
 
@@ -384,7 +386,13 @@ def _do_research(
                 messages + [
                     {
                         "role": "user",
-                        "content": "Please output your best JSON answer now based on what you have found.",
+                        "content": (
+                            "Output your best JSON answer now based on what you have "
+                            "found. Include ALL fields in the schema (funding, founder, "
+                            "founder_linkedin_url, employee_count, revenue, location, "
+                            "industry, last_round_date) — use null only for what you "
+                            "truly couldn't find; fill in any you saw in the results."
+                        ),
                     }
                 ],
                 tools=None,
