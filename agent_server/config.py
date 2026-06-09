@@ -46,8 +46,26 @@ class Config:
     loop_sleep_min_s: float = float(os.environ.get("LOOP_SLEEP_MIN_S", "0.5"))
     loop_sleep_max_s: float = float(os.environ.get("LOOP_SLEEP_MAX_S", "2.0"))
 
-    # LLM (runtime agents)
+    # LLM (runtime agents). Provider is "bedrock" or "anthropic".
+    #   - bedrock  → AWS Bedrock Claude via the standard AWS credential chain
+    #     (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / ~/.aws / IAM role). Uses a
+    #     region-prefixed inference profile id (us.anthropic.claude-*).
+    #   - anthropic → direct Anthropic API with ANTHROPIC_API_KEY.
+    # Defaults to bedrock when AWS creds are present and no direct Anthropic key
+    # is set, mirroring the platform backend's default.
+    llm_provider: str = os.environ.get("AGENT_LLM_PROVIDER", "").lower() or (
+        "bedrock"
+        if (os.environ.get("AWS_ACCESS_KEY_ID") and not os.environ.get("ANTHROPIC_API_KEY"))
+        else "anthropic"
+    )
     anthropic_api_key: str | None = os.environ.get("ANTHROPIC_API_KEY") or None
+    bedrock_region: str = (
+        os.environ.get("BEDROCK_REGION") or os.environ.get("AWS_REGION") or "us-east-1"
+    )
+    bedrock_model: str = os.environ.get(
+        "BEDROCK_MODEL", "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+    )
+    # Model id used when llm_provider == "anthropic" (direct API).
     llm_model: str = os.environ.get("AGENT_LLM_MODEL", "claude-opus-4-8")
 
     # Structured-floor sources
