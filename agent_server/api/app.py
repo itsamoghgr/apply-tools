@@ -232,14 +232,16 @@ class VerifyEmailRequest(BaseModel):
 
 @app.post(
     "/api/v1/verify/email",
-    summary="Find + verify an email on demand (verification waterfall)",
+    summary="Find + verify an email on demand (agentic contact-finder)",
 )
 def verify_email(body: VerifyEmailRequest) -> dict[str, Any]:
-    """Run the email-discovery/verification waterfall for one person+domain.
+    """Find + verify the best work email for one person + domain.
 
-    Used by the 'Find emails' action in the UI. Returns the best email found and
-    a 0–1 confidence score. Returns email=null (not an error) when nothing is
-    found — the caller decides whether to keep flagging the lead.
+    Uses the agentic contact-finder (think/plan/act over web_search +
+    guess_email_patterns + the provider waterfall) when an LLM is configured;
+    falls back to the plain waterfall otherwise. Returns the best email, a 0–1
+    score, the method/source, and the agent's rationale. email=null (not an
+    error) when nothing is found.
     """
     from agent_server.stages.verify import WaterfallVerifier
 
@@ -249,22 +251,39 @@ def verify_email(body: VerifyEmailRequest) -> dict[str, Any]:
         slug = "".join(ch for ch in body.company.lower() if ch.isalnum())
         domain = f"{slug}.com" if slug else None
     if not domain:
-        return {"email": None, "score": 0.0, "method": "none", "domain": None}
+        return {"email": None, "score": 0.0, "method": "none", "domain": None,
+                "rationale": "no domain to search"}
+
+    # Try the agentic finder first; fall back to the deterministic waterfall if
+    # no LLM is configured or the agent errors.
+    try:
+        from agent_server.agents.contact import find_contact
+        from agent_server.agents.deps import AgentDeps
+        from agent_server.agents.llm import AnthropicLLM
+        from agent_server.stages.normalize import normalize_domain as _nd
+        from agent_server.web import fetch_page, search
+
+        deps = AgentDeps(
+            search=search,
+            fetch_page=fetch_page,
+            llm=AnthropicLLM(),
+            audit=lambda *a, **k: None,  # on-demand: no job to attach traces to
+            normalize_domain=_nd,
+        )
+        res = find_contact(domain, body.founder_name, deps)
+        if res.email:
+            logger.info("verify_email_agentic", domain=domain, method=res.method,
+                        score=res.score)
+            return {"email": res.email, "score": res.score, "method": res.method,
+                    "domain": domain, "rationale": res.rationale}
+    except Exception as exc:
+        logger.warning("verify_email_agent_unavailable", domain=domain, error=str(exc))
 
     verdict = WaterfallVerifier().find_and_verify(domain, body.founder_name)
-    logger.info(
-        "verify_email_ondemand",
-        domain=domain,
-        found=bool(verdict.email),
-        method=verdict.method,
-        score=verdict.score,
-    )
-    return {
-        "email": verdict.email,
-        "score": verdict.score,
-        "method": verdict.method,
-        "domain": domain,
-    }
+    logger.info("verify_email_waterfall", domain=domain, found=bool(verdict.email),
+                method=verdict.method, score=verdict.score)
+    return {"email": verdict.email, "score": verdict.score, "method": verdict.method,
+            "domain": domain, "rationale": "deterministic waterfall"}
 
 
 class DropRequest(BaseModel):
