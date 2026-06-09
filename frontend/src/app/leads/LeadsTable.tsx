@@ -1,7 +1,9 @@
 "use client";
 
 import { useState, useMemo } from "react";
-import { Plus, Search } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { toast } from "sonner";
+import { Plus, Search, MailSearch, Loader2 } from "lucide-react";
 import LeadsRow from "./LeadsRow";
 import AddLeadForm from "./AddLeadForm";
 
@@ -36,8 +38,59 @@ export default function LeadsTable({
   leads: Lead[];
   total: number;
 }) {
+  const router = useRouter();
   const [query, setQuery] = useState("");
   const [adding, setAdding] = useState(false);
+  const [finding, setFinding] = useState(false);
+
+  // Leads with no email but something to work from (LinkedIn or a company).
+  const missingEmail = useMemo(
+    () => leads.filter((l) => !l.email && (l.currentCompany || l.linkedinUrl)),
+    [leads]
+  );
+
+  // Bulk "Find emails": run the agent's verification waterfall for each lead
+  // missing an email, then patch any address found back onto the lead.
+  async function findEmails() {
+    if (finding || missingEmail.length === 0) return;
+    setFinding(true);
+    let found = 0;
+    try {
+      for (const l of missingEmail) {
+        try {
+          const res = await fetch(`/api/agent/api/v1/verify/email`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              company: l.currentCompany,
+              founder_name: l.name,
+            }),
+          });
+          if (!res.ok) continue;
+          const v = await res.json();
+          if (v.email) {
+            // Persist the discovered email on the lead.
+            await fetch(`/api/proxy/leads/${l.id}`, {
+              method: "PATCH",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ email: v.email }),
+            });
+            found += 1;
+          }
+        } catch {
+          /* skip this lead, keep going */
+        }
+      }
+      if (found > 0) {
+        toast.success(`Found ${found} email${found === 1 ? "" : "s"}.`);
+        router.refresh();
+      } else {
+        toast(`No new emails found for ${missingEmail.length} lead(s).`);
+      }
+    } finally {
+      setFinding(false);
+    }
+  }
 
   const filtered = useMemo(() => {
     if (!query.trim()) return leads;
@@ -75,6 +128,22 @@ export default function LeadsTable({
             </button>
           )}
         </div>
+        {missingEmail.length > 0 && (
+          <button
+            type="button"
+            onClick={findEmails}
+            disabled={finding}
+            className="btn btn-outline btn-sm gap-1.5 shrink-0"
+            title={`Find emails for ${missingEmail.length} lead(s) missing one`}
+          >
+            {finding ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <MailSearch className="h-4 w-4" />
+            )}
+            {finding ? "Finding…" : `Find emails (${missingEmail.length})`}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => setAdding(true)}

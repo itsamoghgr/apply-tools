@@ -3,7 +3,14 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Pencil, ExternalLink, Trash2, Mail, Send } from "lucide-react";
+import {
+  Pencil,
+  ExternalLink,
+  Trash2,
+  Mail,
+  Send,
+  AlertTriangle,
+} from "lucide-react";
 import type { Lead } from "./LeadsTable";
 import { relativeTime } from "@/lib/time";
 
@@ -163,11 +170,27 @@ export default function LeadsRow({ slNo, lead }: { slNo: number; lead: Lead }) {
       >
         <td className="opacity-40 text-xs tabular-nums">{slNo}</td>
         <td className="font-medium">
-          <EditableText
-            value={local.name}
-            onSave={(v) => patch("name", v || lead.name)}
-            className={cellInput}
-          />
+          <div className="flex items-center gap-1.5">
+            <EditableText
+              value={local.name}
+              onSave={(v) => patch("name", v || lead.name)}
+              className={cellInput}
+            />
+            {/* Flag only the actionable case: no email yet. */}
+            {!local.email && (
+              <span
+                title={
+                  local.linkedinUrl
+                    ? "No email — has LinkedIn. Try Find emails."
+                    : "No email or LinkedIn — needs a contact method."
+                }
+                className="shrink-0"
+                style={{ color: local.linkedinUrl ? "#b87f3c" : "#c0504d" }}
+              >
+                <AlertTriangle className="h-3.5 w-3.5" />
+              </span>
+            )}
+          </div>
         </td>
         <td>
           <EmailCell

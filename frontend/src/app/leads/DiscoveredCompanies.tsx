@@ -16,6 +16,7 @@ import {
 import { relativeTime } from "@/lib/time";
 import HuntPanel from "./HuntPanel";
 import ConfidenceBadge, { confidenceTier } from "./ConfidenceBadge";
+import ContactBadge from "./ContactBadge";
 
 export type CompanyLead = {
   id: string;
@@ -226,6 +227,7 @@ export default function DiscoveredCompanies({
                 <th>Funding</th>
                 <th>Founder</th>
                 <th>Confidence</th>
+                <th>Contact</th>
                 <th>Source</th>
                 <th className="text-right">Found</th>
                 <th></th>
@@ -284,6 +286,9 @@ export default function DiscoveredCompanies({
                   </td>
                   <td>
                     <ConfidenceBadge value={c.confidence} showLabel />
+                  </td>
+                  <td>
+                    <ContactBadge email={c.email} linkedinUrl={c.linkedinUrl} />
                   </td>
                   <td>
                     <span className="text-xs opacity-60">
