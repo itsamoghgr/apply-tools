@@ -121,8 +121,25 @@ model Lead {
   reachOuts       ReachOut[]
   applications    JobApplicationLead[]
 
+  // Company-lead fields populated by the lead-generation agent service
+  // (agent_server/, port 8001). Added via agent_server/db/platform_migration.sql;
+  // mirrored here so Prisma stays in sync. `domain` carries a DB-level partial
+  // UNIQUE index (WHERE domain IS NOT NULL) that Prisma can't express, so it is
+  // a plain indexed column here — the upsert dedup is enforced by that index.
+  domain          String?
+  companyName     String?
+  fundingStage    String?
+  fundingAmount   String?
+  founderName     String?
+  confidence      Float?
+  source          String?
+  sourcesJson     Json?
+
   @@index([createdAt])
   @@index([replied])
+  // NOTE: `domain` already has a DB-level partial UNIQUE index from
+  // agent_server/db/platform_migration.sql (WHERE domain IS NOT NULL); we don't
+  // redeclare it here to avoid Prisma drift against that out-of-band index.
 }
 
 model Setting {
