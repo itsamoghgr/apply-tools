@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { Plus, Search, MailSearch, Loader2 } from "lucide-react";
 import LeadsRow from "./LeadsRow";
 import AddLeadForm from "./AddLeadForm";
+import FindEmailsProgress, { type FindRow } from "./FindEmailsProgress";
 
 export type LeadReachOut = {
   id: string;
@@ -43,13 +44,7 @@ export default function LeadsTable({
   const [adding, setAdding] = useState(false);
   const [finding, setFinding] = useState(false);
 
-  // Live progress for the bulk Find-emails run.
-  type FindRow = {
-    name: string;
-    status: "pending" | "searching" | "found" | "miss";
-    email?: string;
-    method?: string;
-  };
+  // Live progress for the bulk Find-emails run (FindRow type from the panel).
   const [progress, setProgress] = useState<{
     done: number;
     total: number;
@@ -122,6 +117,9 @@ export default function LeadsTable({
       }
     } finally {
       setFinding(false);
+      // Leave the completed panel up briefly so the user sees the summary,
+      // then auto-dismiss.
+      setTimeout(() => setProgress(null), 6000);
     }
   }
 
@@ -200,54 +198,7 @@ export default function LeadsTable({
 
       {/* Live Find-emails progress: the contact agent works one lead at a time. */}
       {progress && (
-        <div className="rounded-xl border border-base-300/60 bg-base-200/30">
-          <div className="flex items-center justify-between px-3.5 py-2 border-b border-base-300/40">
-            <span className="text-xs font-medium flex items-center gap-1.5">
-              <MailSearch className="h-3.5 w-3.5 opacity-60" />
-              Finding emails — the agent searches, guesses patterns &amp; verifies
-            </span>
-            <span className="text-xs font-mono tabular-nums opacity-60">
-              {progress.done}/{progress.total}
-            </span>
-          </div>
-          <progress
-            className="progress progress-primary w-full h-1 rounded-none"
-            value={progress.done}
-            max={progress.total}
-          />
-          <div className="max-h-48 overflow-y-auto px-3.5 py-2 space-y-1 text-xs">
-            {progress.rows.map((r, i) => (
-              <div key={i} className="flex items-center gap-2">
-                <span className="w-4 shrink-0 text-center">
-                  {r.status === "found"
-                    ? "✓"
-                    : r.status === "miss"
-                      ? "—"
-                      : r.status === "searching"
-                        ? "⋯"
-                        : ""}
-                </span>
-                <span className="font-medium truncate max-w-[180px]">
-                  {r.name}
-                </span>
-                {r.status === "searching" && (
-                  <span className="opacity-50">searching…</span>
-                )}
-                {r.status === "found" && (
-                  <span className="text-success truncate">
-                    {r.email}
-                    {r.method ? (
-                      <span className="opacity-50"> · {r.method}</span>
-                    ) : null}
-                  </span>
-                )}
-                {r.status === "miss" && (
-                  <span className="opacity-40">no email found</span>
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
+        <FindEmailsProgress progress={progress} finding={finding} />
       )}
 
       {filtered.length === 0 ? (
