@@ -151,6 +151,7 @@ def update_job(job_id: str, **fields) -> None:
     allowed = {
         "status", "verified_count", "candidates_total",
         "candidates_processed", "stop_reason", "error", "finished_at",
+        "skipped_count",
     }
     updates = {k: v for k, v in fields.items() if k in allowed}
     if not updates:

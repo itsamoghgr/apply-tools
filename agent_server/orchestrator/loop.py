@@ -28,12 +28,14 @@ from typing import Callable
 from agent_server.config import CONFIG
 from agent_server.contracts.records import (
     CandidateCompany,
+    FitVerdict,
     ResearchResult,
     VerifiedLead,
 )
 from agent_server.db.agent_db import (
     add_checkpoint,
     audit_add,
+    seen_add,
     update_job,
 )
 from agent_server.log import get_logger
@@ -58,16 +60,18 @@ class Stages:
     Phase 1, real agents in Phase 3) are provided by the runner.
 
     Signatures (see CONTRACTS.md §8):
-      discover(job_id, query_hint, target)   -> list[CandidateCompany]
-      dedup(job_id, candidates)              -> list[CandidateCompany]
-      research(job_id, candidate)            -> ResearchResult
-      verify(job_id, research_result)        -> VerifiedLead
-      deliver(job_id, verified_lead, dry_run) -> None
+      discover(job_id, query_hint, target)        -> list[CandidateCompany]
+      dedup(job_id, candidates)                   -> list[CandidateCompany]
+      fit_gate(job_id, candidate, fit_criteria)   -> FitVerdict
+      research(job_id, candidate, fit_criteria)   -> ResearchResult
+      verify(job_id, research_result)             -> VerifiedLead
+      deliver(job_id, verified_lead, dry_run)     -> None
     """
 
     discover: Callable[[str, str, int], list[CandidateCompany]]
     dedup: Callable[[str, list[CandidateCompany]], list[CandidateCompany]]
-    research: Callable[[str, CandidateCompany], ResearchResult]
+    fit_gate: Callable[[str, CandidateCompany, str], FitVerdict]
+    research: Callable[[str, CandidateCompany, str], ResearchResult]
     verify: Callable[[str, ResearchResult], VerifiedLead]
     deliver: Callable[[str, VerifiedLead, bool], None]
 
@@ -84,6 +88,7 @@ def run_pipeline(
     target: int,
     dry_run: bool,
     stages: Stages,
+    fit_criteria: str = "",
 ) -> None:
     """Drive the full lead-generation pipeline for one job.
 
@@ -156,6 +161,7 @@ def run_pipeline(
         # Phase 3: iterate survivors with cursor
         # ------------------------------------------------------------------
         verified_count = 0
+        skipped_count = 0
         stop_reason: str | None = None
 
         for cursor, candidate in enumerate(survivors):
@@ -176,8 +182,46 @@ def run_pipeline(
             )
 
             try:
+                # -- fit gate (cheap pre-filter) --
+                # Score the candidate against the user's ICP BEFORE the expensive
+                # deep-research pass. On FAIL: record the domain in the seen-cache
+                # (so future hunts never re-surface it), audit the skip, bump the
+                # skipped counter, and move on WITHOUT researching or saving it.
+                # The gate never raises; with empty fit_criteria it passes through.
+                verdict: FitVerdict = stages.fit_gate(job_id, candidate, fit_criteria)
+                if not verdict.passed:
+                    seen_add(domain, "skipped", reason=f"fit:{verdict.score:.2f}", job_id=job_id)
+                    audit_add(
+                        job_id,
+                        "fit",
+                        "skipped",
+                        {
+                            "domain": domain,
+                            "score": verdict.score,
+                            "reason": verdict.reason,
+                        },
+                        domain=domain,
+                    )
+                    skipped_count += 1
+                    update_job(
+                        job_id,
+                        candidates_processed=cursor + 1,
+                        skipped_count=skipped_count,
+                    )
+                    loop_log.info("fit_skipped", domain=domain, score=verdict.score)
+                    continue
+                audit_add(
+                    job_id,
+                    "fit",
+                    "passed",
+                    {"domain": domain, "score": verdict.score, "reason": verdict.reason},
+                    domain=domain,
+                )
+
                 # -- research --
-                research_result: ResearchResult = stages.research(job_id, candidate)
+                research_result: ResearchResult = stages.research(
+                    job_id, candidate, fit_criteria
+                )
                 audit_add(
                     job_id,
                     "research",
@@ -263,6 +307,7 @@ def run_pipeline(
             "pipeline_done",
             stop_reason=stop_reason,
             verified_count=verified_count,
+            skipped_count=skipped_count,
             candidates_total=candidates_total,
         )
         audit_add(
@@ -272,6 +317,7 @@ def run_pipeline(
             {
                 "stop_reason": stop_reason,
                 "verified_count": verified_count,
+                "skipped_count": skipped_count,
                 "candidates_total": candidates_total,
             },
         )
@@ -280,6 +326,7 @@ def run_pipeline(
             job_id,
             status="succeeded",
             verified_count=verified_count,
+            skipped_count=skipped_count,
             stop_reason=stop_reason,
             finished_at=_utcnow(),
         )

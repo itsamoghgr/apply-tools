@@ -158,7 +158,7 @@ class TestApiLiveDb:
         from agent_server.orchestrator.loop import run_pipeline
         from agent_server.orchestrator.runner import build_stub_stages
 
-        def sync_pipeline(job_id, *, query_hint, target, dry_run):
+        def sync_pipeline(job_id, *, query_hint, target, dry_run, fit_criteria=""):
             """Run the pipeline synchronously (no threading) in the same call."""
             with monkeypatch.context() as mp:
                 mp.setattr(_time, "sleep", lambda _: None)

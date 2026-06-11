@@ -18,6 +18,7 @@ from agent_server.agents.llm import AnthropicLLM
 from agent_server.agents.research import run_research
 from agent_server.contracts.records import (
     CandidateCompany,
+    FitVerdict,
     PlatformUpsertRequest,
     ResearchResult,
     VerifiedLead,
@@ -31,6 +32,7 @@ from agent_server.log import get_logger
 from agent_server.orchestrator.loop import Stages, run_pipeline
 from agent_server.stages.dedup import dedup as _real_dedup
 from agent_server.stages.deliver import deliver as _real_deliver
+from agent_server.stages.fit_gate import run_fit_gate
 from agent_server.stages.normalize import normalize_domain
 from agent_server.stages.verify import verify as _real_verify
 from agent_server.web import fetch_page, search
@@ -91,9 +93,22 @@ def _stub_dedup(
     return result
 
 
+def _stub_fit_gate(
+    job_id: str,
+    candidate: CandidateCompany,
+    fit_criteria: str,
+) -> FitVerdict:
+    """Always-pass fit gate for the stub bundle — never skips a candidate.
+
+    Keeps the stubbed pipeline behaving exactly as before the gate existed.
+    """
+    return FitVerdict(passed=True, score=1.0, reason="stub_pass")
+
+
 def _stub_research(
     job_id: str,
     candidate: CandidateCompany,
+    fit_criteria: str = "",
 ) -> ResearchResult:
     """Echo the candidate back with a fake founder name.
 
@@ -194,6 +209,7 @@ def build_stub_stages() -> Stages:
     return Stages(
         discover=_stub_discover,
         dedup=_stub_dedup,
+        fit_gate=_stub_fit_gate,
         research=_stub_research,
         verify=_stub_verify,
         deliver=_stub_deliver,
@@ -235,12 +251,18 @@ def build_stages(job_id: str) -> Stages:
     def discover(jid: str, query_hint: str, target: int) -> list[CandidateCompany]:
         return run_discovery(jid, query_hint=query_hint, target=target, deps=deps)
 
-    def research(jid: str, candidate: CandidateCompany) -> ResearchResult:
-        return run_research(jid, candidate, deps)
+    def fit_gate(jid: str, candidate: CandidateCompany, fit_criteria: str) -> FitVerdict:
+        return run_fit_gate(jid, candidate, fit_criteria, deps=deps)
+
+    def research(
+        jid: str, candidate: CandidateCompany, fit_criteria: str = ""
+    ) -> ResearchResult:
+        return run_research(jid, candidate, deps, fit_criteria)
 
     return Stages(
         discover=discover,
         dedup=_real_dedup,
+        fit_gate=fit_gate,
         research=research,
         verify=_real_verify,
         deliver=_real_deliver,
@@ -258,11 +280,13 @@ def launch_pipeline(
     query_hint: str,
     target: int,
     dry_run: bool,
+    fit_criteria: str = "",
 ) -> None:
     """Entry point for FastAPI BackgroundTasks.
 
-    Builds the stage bundle and delegates to run_pipeline.  Errors are
-    already caught inside run_pipeline (job marked failed); this function
+    Builds the stage bundle and delegates to run_pipeline.  `fit_criteria` is the
+    user's ICP for the cheap fit gate (empty → pass-through, no skipping). Errors
+    are already caught inside run_pipeline (job marked failed); this function
     never raises.
     """
     logger.info(
@@ -271,6 +295,7 @@ def launch_pipeline(
         target=target,
         dry_run=dry_run,
         query_hint=query_hint,
+        has_fit_criteria=bool(fit_criteria and fit_criteria.strip()),
     )
     stages = build_stages(job_id)
     run_pipeline(
@@ -279,4 +304,5 @@ def launch_pipeline(
         target=target,
         dry_run=dry_run,
         stages=stages,
+        fit_criteria=fit_criteria,
     )

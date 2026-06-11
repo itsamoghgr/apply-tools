@@ -23,15 +23,17 @@ import re
 from typing import Any
 
 from agent_server.agents.deps import AgentDeps
+from agent_server.config import CONFIG
 from agent_server.contracts.records import CandidateCompany, ResearchResult
 from agent_server.log import get_logger
 
 logger = get_logger(__name__)
 
 # ── constants ──────────────────────────────────────────────────────────────────
-MAX_TOOL_CALLS = 16          # hard cap on LLM-driven tool invocations per run
-                             # (thorough mode: founder/funding + 5 company
-                             # attributes each may need its own search)
+MAX_TOOL_CALLS = CONFIG.deep_research_tool_budget   # hard cap on LLM-driven tool
+                             # invocations per run (deep mode: founder/funding +
+                             # company attributes + qualitative brief each may
+                             # need its own search). Default 20.
 _LINKEDIN_RE = re.compile(r"https?://(?:[\w-]+\.)?linkedin\.com/in/([\w%-]+)", re.I)
 
 
@@ -86,10 +88,13 @@ You are a thorough company-research agent. Find as much as you can about a start
 ONLY from search result snippets or URLs (never by fetching a LinkedIn page).
 3. Company attributes: employee count, estimated revenue/ARR, HQ location, industry, \
 and the date of the most recent funding round.
+4. Deep facts: a short qualitative brief, the founding year, total capital raised \
+to date, notable investors, key competitors, and other key people.
 
 Work thoroughly: run SEPARATE targeted searches for the attributes you don't yet have, \
 e.g. "[company] number of employees", "[company] headquarters location", \
-"[company] revenue ARR", "[company] industry", "[company] latest funding round date". \
+"[company] revenue ARR", "[company] industry", "[company] latest funding round date", \
+"[company] investors", "[company] competitors", "[company] founded year". \
 Read non-LinkedIn pages (news, Crunchbase-style summaries, the company about/team page) \
 to extract facts. Prefer recent, credible sources.
 
@@ -105,6 +110,12 @@ object — and ONLY a JSON object — in this exact shape:
   "location": "<string or null>",
   "industry": "<string or null>",
   "last_round_date": "<string or null>",
+  "brief": "<2-4 sentence qualitative summary, or null>",
+  "founding_year": "<string or null>",
+  "total_raised": "<string or null>",
+  "investors": ["<investor1>", "<investor2>"],
+  "competitors": ["<competitor1>"],
+  "key_people": ["<name — role>"],
   "sources": ["<url1>", "<url2>"]
 }
 
@@ -118,7 +129,11 @@ snippet or result URL.  null if not found.
 - location: HQ city/region, e.g. "San Francisco, CA" or "London, UK".
 - industry: short sector tag, e.g. "Developer tools", "Fintech", "Robotics".
 - last_round_date: month/year of the most recent round, e.g. "2024-09" or "Sep 2024".
-- Use null for anything you cannot find — never guess or fabricate.
+- brief: a concise 2-4 sentence summary of what the company does and why it matters.
+- founding_year: the year founded, e.g. "2021".  null if not found.
+- total_raised: cumulative capital raised, e.g. "$18M".  null if not found.
+- investors / competitors / key_people: short lists of names (empty list if none found).
+- Use null (or an empty list) for anything you cannot find — never guess or fabricate.
 - sources: list of URLs you actually read or searched.
 - Output ONLY the JSON object — no markdown fences, no extra prose.
 """
@@ -142,6 +157,18 @@ def _extract_linkedin_from_snippets(search_results: list[Any]) -> str | None:
         if m:
             return m.group(0)
     return None
+
+
+def _coerce_str_list(value: Any) -> list[str]:
+    """Coerce an LLM list field into a clean list of non-empty strings.
+
+    Accepts a real list, or a single string (wrapped). Returns [] otherwise.
+    """
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if v and str(v).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
 
 
 def _parse_llm_json(text: str) -> dict:
@@ -170,8 +197,12 @@ def run_research(
     job_id: str,
     candidate: CandidateCompany,
     deps: AgentDeps,
+    fit_criteria: str = "",
 ) -> ResearchResult:
     """Research a single candidate company; return a ResearchResult.
+
+    `fit_criteria` is the user's ICP; when non-empty a fit-scoring pass over the
+    accumulated facts produces an authoritative `fit_score`/`fit_reason`.
 
     Never raises — returns a partial result on any error.
     """
@@ -179,7 +210,7 @@ def run_research(
     log.info("research_start", name=candidate.name)
 
     try:
-        return _do_research(job_id, candidate, deps, log)
+        return _do_research(job_id, candidate, deps, log, fit_criteria)
     except Exception as exc:  # noqa: BLE001
         log.exception("research_fatal_error", error=str(exc))
         deps.audit("research", "fatal_error", {"domain": candidate.domain, "error": str(exc)})
@@ -198,6 +229,7 @@ def _do_research(
     candidate: CandidateCompany,
     deps: AgentDeps,
     log: Any,
+    fit_criteria: str = "",
 ) -> ResearchResult:
     """Core research logic — may raise; callers catch."""
 
@@ -231,6 +263,12 @@ def _do_research(
     result_location: str | None = None
     result_industry: str | None = None
     result_last_round_date: str | None = None
+    result_brief: str | None = None
+    result_founding_year: str | None = None
+    result_total_raised: str | None = None
+    result_investors: list[str] = []
+    result_competitors: list[str] = []
+    result_key_people: list[str] = []
     sources: list[str] = []
 
     # ── TOOL-USE LOOP ───────────────────────────────────────────────────────
@@ -245,16 +283,21 @@ def _do_research(
             "2. Their LinkedIn URL — from search snippets/URLs ONLY; never fetch a "
             "LinkedIn page.\n"
             "3. Company attributes via targeted searches: employee count, revenue/ARR, "
-            "HQ location, industry, and the most recent funding round date.\n\n"
+            "HQ location, industry, and the most recent funding round date.\n"
+            "4. Deep facts: a short qualitative brief, founding year, total capital "
+            "raised, notable investors, key competitors, and other key people.\n\n"
             "Use web_search and fetch_page tools as needed. "
             "When done, output ONLY a JSON object:\n"
             '{"founder_name": "<string or null>", "founder_linkedin_url": "<url or null>", '
             '"employee_count": "<string or null>", "revenue": "<string or null>", '
             '"location": "<string or null>", "industry": "<string or null>", '
-            '"last_round_date": "<string or null>", "sources": ["<url1>"]}\n\n'
+            '"last_round_date": "<string or null>", "brief": "<2-4 sentences or null>", '
+            '"founding_year": "<string or null>", "total_raised": "<string or null>", '
+            '"investors": ["<investor>"], "competitors": ["<competitor>"], '
+            '"key_people": ["<name — role>"], "sources": ["<url1>"]}\n\n'
             "Rules: founder_linkedin_url must be a real linkedin.com/in/<slug> URL "
-            "seen in a search snippet or URL. Use null for anything not found; never "
-            "fabricate. Output ONLY the JSON — no fences, no prose."
+            "seen in a search snippet or URL. Use null (or an empty list) for anything "
+            "not found; never fabricate. Output ONLY the JSON — no fences, no prose."
         )
 
     initial_message = {
@@ -321,6 +364,18 @@ def _do_research(
             result_industry = parsed.get("industry") or result_industry
             result_last_round_date = (
                 parsed.get("last_round_date") or result_last_round_date
+            )
+
+            # Deep-research fields (best-effort; null/empty when not found).
+            result_brief = parsed.get("brief") or result_brief
+            result_founding_year = parsed.get("founding_year") or result_founding_year
+            result_total_raised = parsed.get("total_raised") or result_total_raised
+            result_investors = _coerce_str_list(parsed.get("investors")) or result_investors
+            result_competitors = (
+                _coerce_str_list(parsed.get("competitors")) or result_competitors
+            )
+            result_key_people = (
+                _coerce_str_list(parsed.get("key_people")) or result_key_people
             )
 
             parsed_sources = parsed.get("sources") or []
@@ -413,6 +468,16 @@ def _do_research(
             result_location = result_location or parsed.get("location")
             result_industry = result_industry or parsed.get("industry")
             result_last_round_date = result_last_round_date or parsed.get("last_round_date")
+            result_brief = result_brief or parsed.get("brief")
+            result_founding_year = result_founding_year or parsed.get("founding_year")
+            result_total_raised = result_total_raised or parsed.get("total_raised")
+            result_investors = result_investors or _coerce_str_list(parsed.get("investors"))
+            result_competitors = (
+                result_competitors or _coerce_str_list(parsed.get("competitors"))
+            )
+            result_key_people = (
+                result_key_people or _coerce_str_list(parsed.get("key_people"))
+            )
         except Exception as exc:  # noqa: BLE001
             log.warning("research_cap_summary_failed", error=str(exc))
 
@@ -505,6 +570,60 @@ def _do_research(
         except Exception as exc:  # noqa: BLE001
             log.warning("research_attributes_failed", error=str(exc))
 
+    # ── Fit-scoring pass (authoritative) ─────────────────────────────────────
+    # When the user supplied an ICP (fit_criteria), score the assembled facts
+    # against it in ONE extra LLM call. This REUSES everything already gathered —
+    # it does NOT re-search. The cheap fit gate (stages/fit_gate.py) is a coarse
+    # pre-filter; this is the authoritative score over the full research.
+    result_fit_score: float | None = None
+    result_fit_reason: str | None = None
+    if fit_criteria and fit_criteria.strip():
+        try:
+            facts = {
+                "name": candidate.name,
+                "domain": candidate.domain,
+                "brief": result_brief,
+                "funding_stage": result_funding_stage,
+                "funding_amount": result_funding_amount,
+                "total_raised": result_total_raised,
+                "founding_year": result_founding_year,
+                "employee_count": result_employee_count,
+                "revenue": result_revenue,
+                "location": result_location,
+                "industry": result_industry,
+                "investors": result_investors,
+                "competitors": result_competitors,
+            }
+            fit_sys = (
+                "Score how well a company fits the user's Ideal Customer Profile "
+                "(ICP), based ONLY on the facts provided. Output ONLY a JSON object: "
+                '{"fit_score": <float 0.0-1.0>, "fit_reason": "<one short sentence>"}. '
+                "1.0 = strong obvious fit, 0.0 = clearly off-target; use the middle "
+                "when plausible but thin. Do not fabricate facts."
+            )
+            fit_msg = [{
+                "role": "user",
+                "content": (
+                    f"ICP:\n{fit_criteria.strip()}\n\nCompany facts:\n"
+                    + json.dumps(facts, default=str)
+                ),
+            }]
+            fit_resp = deps.llm.complete(fit_sys, fit_msg, tools=None)
+            fp = _parse_llm_json(fit_resp.get("text", ""))
+            raw = fp.get("fit_score")
+            try:
+                result_fit_score = max(0.0, min(1.0, float(raw)))
+            except (TypeError, ValueError):
+                result_fit_score = None
+            result_fit_reason = (fp.get("fit_reason") or None) if result_fit_score is not None else None
+            deps.audit("research", "fit_pass", {
+                "domain": candidate.domain,
+                "fit_score": result_fit_score,
+            })
+            log.info("research_fit", domain=candidate.domain, fit_score=result_fit_score)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("research_fit_failed", error=str(exc))
+
     # Deduplicate sources
     seen_sources: set[str] = set()
     unique_sources: list[str] = []
@@ -525,6 +644,14 @@ def _do_research(
         location=result_location,
         industry=result_industry,
         last_round_date=result_last_round_date,
+        brief=result_brief,
+        founding_year=result_founding_year,
+        total_raised=result_total_raised,
+        investors=result_investors,
+        competitors=result_competitors,
+        key_people=result_key_people,
+        fit_score=result_fit_score,
+        fit_reason=result_fit_reason,
         sources=unique_sources,
         used_shortcut=used_shortcut,
     )

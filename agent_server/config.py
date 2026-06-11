@@ -46,6 +46,13 @@ class Config:
     loop_sleep_min_s: float = float(os.environ.get("LOOP_SLEEP_MIN_S", "0.5"))
     loop_sleep_max_s: float = float(os.environ.get("LOOP_SLEEP_MAX_S", "2.0"))
 
+    # Fit gate + deep research. The cheap fit gate scores a discovered company
+    # against the user's ICP (fit_criteria); a candidate PASSES when its score is
+    # >= fit_threshold, otherwise it is SKIPPED before any deep research runs.
+    # deep_research_tool_budget caps the research agent's LLM-driven tool calls.
+    fit_threshold: float = float(os.environ.get("FIT_THRESHOLD", "0.4"))
+    deep_research_tool_budget: int = _int("DEEP_RESEARCH_TOOL_BUDGET", 20)
+
     # LLM (runtime agents). Provider is "bedrock" or "anthropic".
     #   - bedrock  → AWS Bedrock Claude via the standard AWS credential chain
     #     (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / ~/.aws / IAM role). Uses a
@@ -86,6 +93,25 @@ class Config:
     smtp_fallback_enabled: bool = (
         os.environ.get("SMTP_FALLBACK_ENABLED", "true").lower() == "true"
     )
+
+    # Roster ("find people at a company") role filter. High-signal hiring/leader
+    # titles only — comma-separated, ROSTER_ROLES-overridable. Matched as
+    # case-insensitive substrings against a person's title/position (see
+    # `roster_role_keywords`).
+    roster_roles: str = os.environ.get(
+        "ROSTER_ROLES",
+        "recruiter,talent,recruiting,sourcer,people,hr,hiring manager,"
+        "head of engineering,vp engineering,engineering manager,cto,"
+        "director of engineering,founder",
+    )
+
+    @property
+    def roster_role_keywords(self) -> frozenset[str]:
+        """`roster_roles` as a lowercased keyword set for substring matching."""
+        return frozenset(
+            kw for kw in (p.strip().lower() for p in self.roster_roles.split(","))
+            if kw
+        )
 
 
 CONFIG = Config()

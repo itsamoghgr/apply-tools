@@ -26,7 +26,8 @@ ORCHESTRATOR (deterministic code loop — NOT an LLM)
    1. discovery agent (agentic)  -> List[CandidateCompany]
    2. dedup (deterministic)      -> survivors
    3. for each survivor, until count==50 or list exhausted:
-        research agent (agentic) -> ResearchResult
+        fit gate (cheap, 1 LLM)  -> FitVerdict; FAIL → seen_add(skipped)+continue
+        research agent (agentic) -> ResearchResult (+brief, fit_score, …)
         verification (det.)      -> VerifiedLead (with confidence score)
         delivery (det., outbox)  -> upsert to PLATFORM via API
         count++, sleep(random short)
@@ -55,12 +56,36 @@ Emitted keyed by `domain`. Noisy extraction expected.
 
 ### 1.2 ResearchResult  (output of research, input to verification)
 `domain, name, funding_stage?, funding_amount?, founder_name?,
-founder_linkedin_url? (PUBLIC SNIPPETS ONLY), sources[], used_shortcut`.
+founder_linkedin_url? (PUBLIC SNIPPETS ONLY),
+employee_count?, revenue?, location?, industry?, last_round_date?,
+brief?, founding_year?, total_raised?, investors[], competitors[], key_people[],
+fit_score?, fit_reason?, sources[], used_shortcut`.
 
 ### 1.3 VerifiedLead  (output of verification, input to delivery)
 `domain, name, funding_stage?, funding_amount?, founder_name?,
-founder_linkedin_url?, founder_email?, confidence (0–1 SCORE, never bool),
-verification_detail{}, sources[]`. Delivery sends regardless; platform stores score.
+founder_linkedin_url?, founder_email?, employee_count?, revenue?, location?,
+industry?, last_round_date?, brief?, founding_year?, total_raised?, investors[],
+competitors[], key_people[], fit_score?, fit_reason?,
+confidence (0–1 SCORE, never bool), verification_detail{}, sources[]`.
+Delivery sends regardless; platform stores score.
+
+### 1.4 FitVerdict  (cheap fit-gate decision, produced BEFORE research)
+`passed: bool, score: float (0–1), reason: str`. Produced by
+`agent_server.stages.fit_gate.run_fit_gate`. `passed=False` → the orchestrator
+SKIPS the company: records `seen_add(domain,"skipped",reason="fit:<score>")` +
+audits `fit/skipped`, bumps `jobs.skipped_count`, and NEVER saves it. The gate
+NEVER raises — on any error it fails OPEN (`passed=True`). With empty
+`fit_criteria` it returns pass-through (`passed=True, reason="no_criteria"`, no
+LLM call).
+
+**Deep-research fields** (added on ResearchResult / VerifiedLead /
+PlatformUpsertRequest, ALL optional so partial research never breaks the
+pipeline): `brief: str|None`, `founding_year: str|None`, `total_raised: str|None`,
+`investors: list[str]=[]`, `competitors: list[str]=[]`, `key_people: list[str]=[]`,
+`fit_score: float|None`, `fit_reason: str|None`. On the platform `Lead` table
+these map to `brief, foundingYear, totalRaised, investorsJson, competitorsJson,
+keyPeopleJson, fitScore, fitReason` (applied OUT-OF-BAND via
+`agent_server/db/deep_research_migration.sql`).
 
 ---
 
@@ -128,13 +153,16 @@ psycopg v3, mirroring `backend/db.py` connection style but pointing at
 
 Owner: API & orchestrator agent. FastAPI (`agent_server/api/app.py`).
 
-- **POST /api/v1/hunt** body `{target_count?, query_hint?, dry_run?}` →
-  **202** `{job_id, status:"pending"}` IMMEDIATELY; pipeline runs as background
-  task. `dry_run=true` → outbox only, no platform push.
-- **GET /api/v1/hunt/{job_id}** → `{job_id,status,verified_count,target_count,
-  candidates_total,candidates_processed,stop_reason,created_at,updated_at,
-  finished_at}`. 404 if unknown.
+- **POST /api/v1/hunt** body `{target_count?, query_hint?, fit_criteria?, dry_run?}`
+  → **202** `{job_id, status:"pending"}` IMMEDIATELY; pipeline runs as background
+  task. `dry_run=true` → outbox only, no platform push. `fit_criteria` is the ICP
+  for the cheap fit gate (defaults to `query_hint`; both empty → pass-through, no
+  skipping).
+- **GET /api/v1/hunt/{job_id}** → `{job_id,status,verified_count,skipped_count,
+  target_count,candidates_total,candidates_processed,stop_reason,created_at,
+  updated_at,finished_at}`. 404 if unknown.
 - **GET /health** → `{"status":"ok"}` (also accept HEAD).
+- **POST /api/v1/companies/roster** body `{domain?, company?, roles?:[...]}` → `{domain, company, people:[{name,title,email,score,method}], count}`. Role-filtered roster (Hunter enumerate, name-free) + open-web-first per-person email; never 500s — empty roster `{...,"people":[],"count":0}` on no domain/no people. *(Added post-freeze, same precedent as verify/email & seen/drop below.)*
 
 ---
 
@@ -177,8 +205,16 @@ LLM agents (Anthropic `claude-*`) with the shared web tools as their toolset, in
 
 ```python
 def run_discovery(job_id, *, query_hint, target, deps: AgentDeps) -> list[CandidateCompany]
-def run_research(job_id, candidate: CandidateCompany, deps: AgentDeps) -> ResearchResult
+def run_research(job_id, candidate: CandidateCompany, deps: AgentDeps, fit_criteria: str = "") -> ResearchResult
+# Cheap fit gate (stages/fit_gate.py) — runs BEFORE research; never raises (fails open):
+def run_fit_gate(job_id, candidate: CandidateCompany, fit_criteria: str, *, deps: AgentDeps) -> FitVerdict
 ```
+
+Deep research = the existing extraction PLUS, in the SAME run (no double-search),
+a qualitative `brief`, structured `founding_year/total_raised/investors/
+competitors/key_people`, and an authoritative `fit_score/fit_reason` scored
+against `fit_criteria` over the already-accumulated evidence (~1–2 extra LLM
+calls). `MAX_TOOL_CALLS = CONFIG.deep_research_tool_budget` (default 20).
 
 `AgentDeps` (frozen, `agents/deps.py`): `search, fetch_page, llm (LLMClient),
 audit(stage,event,data), normalize_domain`.
