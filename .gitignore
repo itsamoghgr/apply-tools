@@ -26,6 +26,10 @@ backend/venv/
 # Local SQLite DB + generated PDFs
 data/
 
+# Local personal data export (never commit)
+job_tracker_app_data.xlsx
+*.xlsx
+
 # Node / Next.js
 node_modules/
 .next/
