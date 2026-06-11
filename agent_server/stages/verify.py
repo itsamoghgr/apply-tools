@@ -180,6 +180,31 @@ class HunterProvider:
                 logger.warning("hunter.request_error", url=url, error=str(exc))
                 return None
 
+    def list_people(self, domain: str, *, limit: int = 50) -> list[dict]:
+        """Enumerate people who work at `domain` via Hunter domain-search.
+
+        Name-FREE: no `full_name` filter, so Hunter returns the whole roster it
+        knows for the domain. This is the CHEAP way to get the people list
+        (names + titles); per-person email-finding is done elsewhere by the
+        open-web-first contact agent — NOT trusted from this call.
+
+        Returns the raw email entries (value, first_name, last_name, position,
+        confidence, ...). Returns [] (mirroring the None-on-error guards of
+        find_and_verify) if: no API key, network error / non-2xx, or no people.
+        """
+        if not self._key:
+            return []
+        params: dict = {"domain": domain, "api_key": self._key, "limit": str(limit)}
+        data = self._get(f"{self._BASE}/domain-search", params)
+        if data is None:
+            return []
+        emails = data.get("data", {}).get("emails", []) or []
+        if not emails:
+            logger.debug("hunter.no_people", domain=domain)
+            return []
+        logger.info("hunter.list_people", domain=domain, count=len(emails))
+        return emails
+
     def find_and_verify(
         self, domain: str, founder_name: str | None
     ) -> EmailVerdict | None:
@@ -688,6 +713,14 @@ def verify(
         location=rr.location,
         industry=rr.industry,
         last_round_date=rr.last_round_date,
+        brief=rr.brief,
+        founding_year=rr.founding_year,
+        total_raised=rr.total_raised,
+        investors=rr.investors,
+        competitors=rr.competitors,
+        key_people=rr.key_people,
+        fit_score=rr.fit_score,
+        fit_reason=rr.fit_reason,
         confidence=confidence,
         verification_detail=verification_detail,
         sources=rr.sources,

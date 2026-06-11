@@ -56,6 +56,14 @@ class HuntRequest(BaseModel):
         default="",
         description="Optional free-text hint passed to the discovery agent.",
     )
+    fit_criteria: str = Field(
+        default="",
+        description=(
+            "Optional ICP for the cheap fit gate; low-fit companies are skipped "
+            "before deep research. Defaults to query_hint; if both are empty the "
+            "gate degrades to pass-through (no skipping)."
+        ),
+    )
     dry_run: bool = Field(
         default=False,
         description="If true, leads go to the outbox only — no platform push.",
@@ -75,6 +83,7 @@ class JobStatus(BaseModel):
     job_id: str
     status: str
     verified_count: int | None
+    skipped_count: int | None
     target_count: int | None
     candidates_total: int | None
     candidates_processed: int | None
@@ -118,6 +127,8 @@ def start_hunt(
         query_hint=body.query_hint,
         target=body.target_count,
         dry_run=body.dry_run,
+        # Default the ICP to query_hint; if BOTH are empty the gate is pass-through.
+        fit_criteria=body.fit_criteria or body.query_hint,
     )
 
     return HuntAccepted(job_id=job_id, status="pending")
@@ -140,6 +151,7 @@ def get_hunt(job_id: str) -> Any:
         job_id=row["id"],
         status=row["status"],
         verified_count=row.get("verified_count"),
+        skipped_count=row.get("skipped_count"),
         target_count=row.get("target_count"),
         candidates_total=row.get("candidates_total"),
         candidates_processed=row.get("candidates_processed"),
@@ -192,6 +204,7 @@ async def hunt_events(job_id: str) -> Any:
             status = {
                 "status": job["status"],
                 "verified_count": job.get("verified_count"),
+                "skipped_count": job.get("skipped_count"),
                 "target_count": job.get("target_count"),
                 "candidates_total": job.get("candidates_total"),
                 "candidates_processed": job.get("candidates_processed"),
@@ -284,6 +297,73 @@ def verify_email(body: VerifyEmailRequest) -> dict[str, Any]:
                 method=verdict.method, score=verdict.score)
     return {"email": verdict.email, "score": verdict.score, "method": verdict.method,
             "domain": domain, "rationale": "deterministic waterfall"}
+
+
+class RosterRequest(BaseModel):
+    """Body for POST /api/v1/companies/roster."""
+
+    domain: str | None = Field(
+        default=None, description="Company root domain (preferred)."
+    )
+    company: str | None = Field(
+        default=None, description="Company name (used to derive a domain if needed)."
+    )
+    roles: list[str] | None = Field(
+        default=None,
+        description="Optional role-keyword override; defaults to CONFIG.roster_roles.",
+    )
+
+
+@app.post(
+    "/api/v1/companies/roster",
+    summary="Find a role-filtered roster of people at a company (+ their emails)",
+)
+def companies_roster(body: RosterRequest) -> dict[str, Any]:
+    """Enumerate a ROLE-FILTERED roster of people at a company and find each
+    person's verified work email.
+
+    Enumeration is cheap (Hunter domain-search, name-free); per-person email
+    discovery uses the OPEN-WEB-FIRST contact agent (web → pattern → free SMTP,
+    paid providers last). Never 500s on a miss — returns an empty roster when no
+    domain can be resolved or no matching people are found.
+    """
+    domain = body.domain and (normalize_domain(body.domain) or body.domain.strip())
+    if not domain and body.company:
+        slug = "".join(ch for ch in body.company.lower() if ch.isalnum())
+        domain = f"{slug}.com" if slug else None
+    if not domain:
+        return {"domain": None, "company": body.company, "people": [], "count": 0}
+
+    try:
+        from agent_server.agents.roster import find_roster
+
+        res = find_roster(domain, body.company, roles=body.roles)
+        people = [
+            {
+                "name": p.name,
+                "title": p.title,
+                "email": p.email,
+                "score": p.score,
+                "method": p.method,
+            }
+            for p in res.people
+        ]
+    except Exception as exc:  # find_roster never raises, but never 500 regardless
+        logger.warning("companies_roster_error", domain=domain, error=str(exc))
+        people = []
+
+    logger.info(
+        "companies_roster",
+        domain=domain,
+        count=len(people),
+        with_email=sum(1 for p in people if p.get("email")),
+    )
+    return {
+        "domain": domain,
+        "company": body.company,
+        "people": people,
+        "count": len(people),
+    }
 
 
 class DropRequest(BaseModel):

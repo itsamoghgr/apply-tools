@@ -22,6 +22,7 @@ import pytest
 
 from agent_server.contracts.records import (
     CandidateCompany,
+    FitVerdict,
     ResearchResult,
     VerifiedLead,
 )
@@ -55,7 +56,16 @@ def _fake_dedup(job_id: str, candidates: list[CandidateCompany]) -> list[Candida
     return candidates  # pass-through
 
 
-def _fake_research(job_id: str, candidate: CandidateCompany) -> ResearchResult:
+def _fake_fit_gate(
+    job_id: str, candidate: CandidateCompany, fit_criteria: str
+) -> FitVerdict:
+    """Always-pass fit gate (no skipping) for the baseline pipeline tests."""
+    return FitVerdict(passed=True, score=1.0, reason="test_pass")
+
+
+def _fake_research(
+    job_id: str, candidate: CandidateCompany, fit_criteria: str = ""
+) -> ResearchResult:
     return ResearchResult(
         domain=candidate.domain,
         name=candidate.name,
@@ -82,6 +92,7 @@ def _make_fake_stages(n_candidates: int) -> Stages:
     return Stages(
         discover=_fake_discover(n_candidates),
         dedup=_fake_dedup,
+        fit_gate=_fake_fit_gate,
         research=_fake_research,
         verify=_fake_verify,
         deliver=_fake_deliver,
@@ -113,9 +124,18 @@ class TestRunPipelineNoDb:
         def fake_audit_add(*args, **kwargs):
             pass
 
+        # Collector for fit-gate skips written to the seen-cache.
+        self.seen_skips: list[dict] = []
+
+        def fake_seen_add(domain, outcome, *, reason=None, job_id=None):
+            self.seen_skips.append(
+                {"domain": domain, "outcome": outcome, "reason": reason}
+            )
+
         monkeypatch.setattr(loop_mod, "update_job", fake_update_job)
         monkeypatch.setattr(loop_mod, "add_checkpoint", fake_add_checkpoint)
         monkeypatch.setattr(loop_mod, "audit_add", fake_audit_add)
+        monkeypatch.setattr(loop_mod, "seen_add", fake_seen_add)
 
         # Also suppress the sleep so tests run instantly.
         import time
@@ -239,7 +259,9 @@ class TestRunPipelineNoDb:
 
         call_count = {"n": 0}
 
-        def flaky_research(job_id: str, candidate: CandidateCompany) -> ResearchResult:
+        def flaky_research(
+            job_id: str, candidate: CandidateCompany, fit_criteria: str = ""
+        ) -> ResearchResult:
             call_count["n"] += 1
             if call_count["n"] == fail_at:
                 raise RuntimeError("simulated research failure")
@@ -248,6 +270,7 @@ class TestRunPipelineNoDb:
         stages = Stages(
             discover=_fake_discover(10),
             dedup=_fake_dedup,
+            fit_gate=_fake_fit_gate,
             research=flaky_research,
             verify=_fake_verify,
             deliver=_fake_deliver,
@@ -259,6 +282,52 @@ class TestRunPipelineNoDb:
         assert self.job_state["verified_count"] == 9
         assert self.job_state["stop_reason"] == "exhausted"
         assert len(_deliveries) == 9
+
+    # ----------------------------------------------------------------
+    # Fit gate skip path
+    # ----------------------------------------------------------------
+
+    def test_fit_gate_skip_records_seen_and_skips_research(self):
+        """A failing fit gate skips the company: it is recorded in the seen-cache
+        with outcome='skipped', never researched/verified/delivered, and counted
+        in skipped_count."""
+        from agent_server.contracts.records import ResearchResult
+        from agent_server.orchestrator.loop import run_pipeline
+
+        researched: list[str] = []
+
+        def gate(job_id, candidate, fit_criteria):
+            # Skip every even-indexed domain (co-2, co-4 of 5 candidates).
+            n = int(candidate.domain.split("-")[1].split(".")[0])
+            passed = n % 2 == 1
+            return FitVerdict(passed=passed, score=0.1 if not passed else 0.9,
+                              reason="test")
+
+        def tracking_research(job_id, candidate, fit_criteria=""):
+            researched.append(candidate.domain)
+            return ResearchResult(domain=candidate.domain, name=candidate.name)
+
+        stages = Stages(
+            discover=_fake_discover(5),
+            dedup=_fake_dedup,
+            fit_gate=gate,
+            research=tracking_research,
+            verify=_fake_verify,
+            deliver=_fake_deliver,
+        )
+
+        run_pipeline("job-fit", query_hint="x", target=50, dry_run=False,
+                     fit_criteria="ICP", stages=stages)
+
+        # co-2 and co-4 were skipped -> 2 skips recorded in the seen-cache.
+        assert self.job_state["skipped_count"] == 2
+        assert all(s["outcome"] == "skipped" for s in self.seen_skips)
+        assert {s["domain"] for s in self.seen_skips} == {"co-2.test", "co-4.test"}
+        # Skipped domains are NEVER researched; the 3 passing ones are.
+        assert "co-2.test" not in researched
+        assert "co-4.test" not in researched
+        assert self.job_state["verified_count"] == 3
+        assert len(_deliveries) == 3
 
     # ----------------------------------------------------------------
     # dry_run propagation
@@ -276,6 +345,7 @@ class TestRunPipelineNoDb:
         stages = Stages(
             discover=_fake_discover(5),
             dedup=_fake_dedup,
+            fit_gate=_fake_fit_gate,
             research=_fake_research,
             verify=_fake_verify,
             deliver=capturing_deliver,
