@@ -140,6 +140,18 @@ model Lead {
   source          String?
   sourcesJson     Json?
 
+  // Deep-research fields populated by the lead-generation agent service.
+  // Added OUT-OF-BAND via agent_server/db/deep_research_migration.sql; mirrored
+  // here so Prisma stays in sync (NOT applied via prisma migrate).
+  brief           String?
+  foundingYear    String?
+  totalRaised     String?
+  investorsJson   Json?
+  competitorsJson Json?
+  keyPeopleJson   Json?
+  fitScore        Float?
+  fitReason       String?
+
   @@index([createdAt])
   @@index([replied])
   // NOTE: `domain` already has a DB-level partial UNIQUE index from
@@ -173,4 +185,62 @@ model ResumeProfile {
   updatedAt  DateTime @updatedAt
 
   @@index([updatedAt])
+}
+
+// ── Master Profile ────────────────────────────────────────────────────────────
+// A singleton-ish record (id = "me") that stores the user's canonical work
+// history. Separate from ResumeProfile, which is a per-document builder draft.
+model Profile {
+  id          String       @id
+  fullName    String?
+  email       String?
+  phone       String?
+  location    String?
+  linkedin    String?
+  github      String?
+  portfolio   String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  experiences Experience[]
+  projects    Project[]
+  skills      Skill[]
+}
+
+model Experience {
+  id        String   @id
+  profileId String
+  profile   Profile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  company   String
+  title     String
+  location  String?
+  startDate String?
+  endDate   String?
+  bullets   String[] @default([])
+  order     Int      @default(0)
+
+  @@index([profileId, order])
+}
+
+model Project {
+  id        String   @id
+  profileId String
+  profile   Profile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  name      String
+  date      String?
+  link      String?
+  bullets   String[] @default([])
+  order     Int      @default(0)
+
+  @@index([profileId, order])
+}
+
+model Skill {
+  id        String   @id
+  profileId String
+  profile   Profile  @relation(fields: [profileId], references: [id], onDelete: Cascade)
+  category  String
+  items     String[] @default([])
+  order     Int      @default(0)
+
+  @@index([profileId, order])
 }

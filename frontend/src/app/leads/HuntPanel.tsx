@@ -8,6 +8,7 @@ import { Radar, Loader2, Square, Terminal } from "lucide-react";
 type JobStatus = {
   status: "pending" | "running" | "succeeded" | "failed" | "stopped";
   verified_count: number | null;
+  skipped_count: number | null;
   target_count: number | null;
   candidates_total: number | null;
   candidates_processed: number | null;
@@ -49,6 +50,10 @@ function describe(a: Activity): string | null {
       return `Found ${d.total ?? d.raw_count ?? "?"} candidate companies`;
     case "dedup.done":
       return `Deduplicated → ${d.survivors ?? "?"} to research`;
+    case "fit.skipped":
+      return `↳${dom}: skipped — low fit`;
+    case "fit.passed":
+      return `↳${dom}: passed fit gate`;
     case "loop.iteration_start":
       return `Researching${dom}…`;
     case "research.shortcut_taken":
@@ -82,6 +87,7 @@ export default function HuntPanel() {
   const router = useRouter();
   const [target, setTarget] = useState(10);
   const [hint, setHint] = useState("");
+  const [fitCriteria, setFitCriteria] = useState("");
   const [job, setJob] = useState<JobStatus | null>(null);
   const [log, setLog] = useState<{ id: number; text: string }[]>([]);
   const [starting, setStarting] = useState(false);
@@ -159,6 +165,7 @@ export default function HuntPanel() {
         body: JSON.stringify({
           target_count: target,
           query_hint: hint.trim() || undefined,
+          fit_criteria: fitCriteria.trim() || undefined,
         }),
       });
       if (!res.ok) {
@@ -169,6 +176,7 @@ export default function HuntPanel() {
       setJob({
         status: data.status ?? "pending",
         verified_count: 0,
+        skipped_count: 0,
         target_count: target,
         candidates_total: null,
         candidates_processed: 0,
@@ -255,6 +263,25 @@ export default function HuntPanel() {
           </button>
         </div>
 
+        {/* ICP / fit criteria — companies that don't match are skipped before
+            the (expensive) deep research, so this gates spend. */}
+        <label className="form-control">
+          <span className="label-text text-xs opacity-60 mb-1">
+            Who&apos;s a good lead for you? (ICP)
+          </span>
+          <textarea
+            value={fitCriteria}
+            disabled={!!active}
+            onChange={(e) => setFitCriteria(e.target.value)}
+            rows={2}
+            placeholder="e.g. seed–Series A B2B SaaS in the US, 5–50 people, hiring engineers"
+            className="textarea textarea-bordered textarea-sm w-full resize-y"
+          />
+          <span className="label-text-alt text-[11px] opacity-45 mt-1">
+            Leave blank to skip fit filtering.
+          </span>
+        </label>
+
         {job && (
           <div className="space-y-2">
             <div className="flex items-center justify-between text-xs">
@@ -279,6 +306,9 @@ export default function HuntPanel() {
               </span>
               <span className="font-mono tabular-nums opacity-70">
                 {job.verified_count}/{job.target_count} verified
+                {(job.skipped_count ?? 0) > 0 && (
+                  <span className="opacity-50"> · {job.skipped_count} skipped</span>
+                )}
               </span>
             </div>
             <progress

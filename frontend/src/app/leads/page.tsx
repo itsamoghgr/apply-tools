@@ -103,6 +103,21 @@ export default async function LeadsPage({
     sources: Array.isArray(l.sourcesJson)
       ? (l.sourcesJson as unknown[]).map(String)
       : [],
+    // Deep-research fields (older rows predate these → null/empty arrays).
+    brief: l.brief,
+    foundingYear: l.foundingYear,
+    totalRaised: l.totalRaised,
+    investors: Array.isArray(l.investorsJson)
+      ? (l.investorsJson as unknown[]).map(String)
+      : [],
+    competitors: Array.isArray(l.competitorsJson)
+      ? (l.competitorsJson as unknown[]).map(String)
+      : [],
+    keyPeople: Array.isArray(l.keyPeopleJson)
+      ? (l.keyPeopleJson as unknown[]).map(String)
+      : [],
+    fitScore: l.fitScore,
+    fitReason: l.fitReason,
     updatedAt: l.updatedAt.toISOString(),
   }));
 
@@ -135,7 +150,7 @@ export default async function LeadsPage({
                 : "text-base-content/60 hover:text-base-content hover:bg-base-300/40"
             }`}
           >
-            Outreach
+            People
             <span className="badge badge-xs badge-ghost font-mono tabular-nums">
               {outreachCount}
             </span>

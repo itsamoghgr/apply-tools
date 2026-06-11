@@ -16,6 +16,7 @@ import {
   Users,
   Mail,
   FilePlus2,
+  User,
 } from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
 import { LOGO_LOCKUP_INNER } from "./logoLockupInner";
@@ -229,13 +230,26 @@ function SidebarContents({
         </ul>
       </nav>
 
-      {/* Footer: theme toggle + collapse button */}
+      {/* Footer: profile + theme toggle + collapse button */}
       <div
         className={[
           "border-t border-base-300 px-2 py-2 flex items-center gap-1",
           collapsed ? "flex-col" : "",
         ].join(" ")}
       >
+        <Link
+          href="/profile"
+          title="Profile"
+          aria-label="Profile"
+          className={[
+            "btn btn-ghost btn-sm btn-circle transition-colors",
+            isActive(pathname, { href: "/profile", label: "Profile", icon: User })
+              ? "text-primary bg-primary/15"
+              : "",
+          ].join(" ")}
+        >
+          <User className="h-[18px] w-[18px]" />
+        </Link>
         <div className={collapsed ? "" : "ml-1"}>
           <ThemeToggle />
         </div>

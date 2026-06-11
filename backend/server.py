@@ -708,6 +708,7 @@ class LeadCreateRequest(BaseModel):
     replied: bool = False
     repliedAt: str | None = Field(default=None, max_length=40)
     notes: str | None = Field(default=None, max_length=10000)
+    source: str | None = Field(default=None, max_length=100)
 
 
 class LeadPatchRequest(BaseModel):
@@ -827,6 +828,15 @@ class LeadUpsertRequest(BaseModel):
     location: str | None = Field(default=None, max_length=200)
     industry: str | None = Field(default=None, max_length=200)
     last_round_date: str | None = Field(default=None, max_length=100)
+    # Deep-research fields (all optional).
+    brief: str | None = Field(default=None, max_length=4000)
+    founding_year: str | None = Field(default=None, max_length=20)
+    total_raised: str | None = Field(default=None, max_length=100)
+    investors: list[str] = Field(default_factory=list, max_length=100)
+    competitors: list[str] = Field(default_factory=list, max_length=100)
+    key_people: list[str] = Field(default_factory=list, max_length=100)
+    fit_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    fit_reason: str | None = Field(default=None, max_length=2000)
     confidence: float = Field(..., ge=0.0, le=1.0)
     source: str | None = Field(default="agent-server", max_length=100)
     sources: list[str] = Field(default_factory=list, max_length=100)
