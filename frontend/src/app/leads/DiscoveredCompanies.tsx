@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import {
@@ -12,11 +12,18 @@ import {
   Globe,
   Building2,
   Trash2,
+  Users,
+  Info,
 } from "lucide-react";
 import { relativeTime } from "@/lib/time";
 import HuntPanel from "./HuntPanel";
 import ConfidenceBadge, { confidenceTier } from "./ConfidenceBadge";
+import FitBadge from "./FitBadge";
 import ContactBadge from "./ContactBadge";
+import CompanyRoster from "./CompanyRoster";
+
+// Number of <th> columns in the table — the roster/detail panels span all of them.
+const COLUMN_COUNT = 12;
 
 export type CompanyLead = {
   id: string;
@@ -35,10 +42,19 @@ export type CompanyLead = {
   confidence: number | null;
   source: string | null;
   sources: string[];
+  // Deep-research fields — null/empty on rows hunted before the fit-gate upgrade.
+  brief: string | null;
+  foundingYear: string | null;
+  totalRaised: string | null;
+  investors: string[];
+  competitors: string[];
+  keyPeople: string[];
+  fitScore: number | null;
+  fitReason: string | null;
   updatedAt: string;
 };
 
-type SortKey = "confidence" | "company" | "recent";
+type SortKey = "confidence" | "fit" | "company" | "recent";
 type ConfFilter = "all" | "high" | "medium" | "low";
 
 const SOURCE_LABEL: Record<string, string> = {
@@ -60,6 +76,19 @@ export default function DiscoveredCompanies({
   const [conf, setConf] = useState<ConfFilter>("all");
   // Optimistic removal: hide deleted ids immediately, reconcile on refresh.
   const [removed, setRemoved] = useState<Set<string>>(new Set());
+  // Which company's roster panel is expanded (one at a time). The panel finds
+  // people at the company and saves each as a lead.
+  const [rosterId, setRosterId] = useState<string | null>(null);
+  // Which company's deep-research detail panel is expanded (one at a time).
+  const [detailId, setDetailId] = useState<string | null>(null);
+
+  function toggleRoster(id: string) {
+    setRosterId((cur) => (cur === id ? null : id));
+  }
+
+  function toggleDetail(id: string) {
+    setDetailId((cur) => (cur === id ? null : id));
+  }
 
   function hide(id: string, on: boolean) {
     setRemoved((prev) => {
@@ -140,6 +169,8 @@ export default function DiscoveredCompanies({
     const sorted = [...rows];
     if (sort === "confidence") {
       sorted.sort((a, b) => (b.confidence ?? -1) - (a.confidence ?? -1));
+    } else if (sort === "fit") {
+      sorted.sort((a, b) => (b.fitScore ?? -1) - (a.fitScore ?? -1));
     } else if (sort === "company") {
       sorted.sort((a, b) =>
         (a.companyName ?? a.domain ?? "").localeCompare(
@@ -209,6 +240,7 @@ export default function DiscoveredCompanies({
             className="bg-transparent border-0 outline-none text-sm pr-1"
           >
             <option value="confidence">Confidence</option>
+            <option value="fit">Best fit</option>
             <option value="company">Company A–Z</option>
             <option value="recent">Most recent</option>
           </select>
@@ -237,6 +269,7 @@ export default function DiscoveredCompanies({
                 <th>Location</th>
                 <th>Founder</th>
                 <th>Confidence</th>
+                <th>Fit</th>
                 <th>Contact</th>
                 <th>Source</th>
                 <th className="text-right">Found</th>
@@ -245,7 +278,8 @@ export default function DiscoveredCompanies({
             </thead>
             <tbody>
               {filtered.map((c) => (
-                <tr key={c.id} className="hover:bg-base-200/40 transition-colors">
+                <Fragment key={c.id}>
+                <tr className="hover:bg-base-200/40 transition-colors">
                   <td>
                     <div className="flex items-center gap-2.5">
                       <span className="grid place-items-center h-8 w-8 rounded-lg bg-base-200 text-base-content/50 shrink-0">
@@ -331,6 +365,9 @@ export default function DiscoveredCompanies({
                     <ConfidenceBadge value={c.confidence} showLabel />
                   </td>
                   <td>
+                    <FitBadge value={c.fitScore} reason={c.fitReason} />
+                  </td>
+                  <td>
                     <ContactBadge email={c.email} linkedinUrl={c.linkedinUrl} />
                   </td>
                   <td>
@@ -345,6 +382,42 @@ export default function DiscoveredCompanies({
                   </td>
                   <td>
                     <div className="flex items-center justify-end gap-1">
+                      {(c.brief ||
+                        c.foundingYear ||
+                        c.totalRaised ||
+                        c.investors.length > 0 ||
+                        c.competitors.length > 0 ||
+                        c.keyPeople.length > 0 ||
+                        c.fitReason) && (
+                        <button
+                          type="button"
+                          onClick={() => toggleDetail(c.id)}
+                          className={`btn btn-ghost btn-xs btn-square ${
+                            detailId === c.id
+                              ? "bg-primary/10 text-primary"
+                              : ""
+                          }`}
+                          title="Deep-research brief & details"
+                          aria-label="Show research details"
+                          aria-expanded={detailId === c.id}
+                        >
+                          <Info className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => toggleRoster(c.id)}
+                        className={`btn btn-ghost btn-xs btn-square ${
+                          rosterId === c.id
+                            ? "bg-primary/10 text-primary"
+                            : ""
+                        }`}
+                        title="Find people — recruiters & eng leadership"
+                        aria-label="Find people at this company"
+                        aria-expanded={rosterId === c.id}
+                      >
+                        <Users className="h-3.5 w-3.5" />
+                      </button>
                       {c.linkedinUrl && (
                         <a
                           href={c.linkedinUrl}
@@ -377,6 +450,80 @@ export default function DiscoveredCompanies({
                     </div>
                   </td>
                 </tr>
+                {detailId === c.id && (
+                  <tr className="bg-base-200/30">
+                    <td colSpan={COLUMN_COUNT} className="p-0">
+                      <div className="px-5 py-4 space-y-3 border-t border-base-300/50">
+                        {/* Fit reasoning from the gate */}
+                        {c.fitReason && (
+                          <p className="text-xs opacity-70 leading-relaxed">
+                            <span className="font-medium opacity-90">
+                              Why it fits:
+                            </span>{" "}
+                            {c.fitReason}
+                          </p>
+                        )}
+                        {/* Qualitative deep-research brief */}
+                        {c.brief && (
+                          <p className="text-sm opacity-80 leading-relaxed whitespace-pre-line max-w-3xl">
+                            {c.brief}
+                          </p>
+                        )}
+                        {/* Structured research facts (each null-guarded) */}
+                        <div className="flex flex-wrap gap-x-8 gap-y-2 text-xs">
+                          {c.foundingYear && (
+                            <div>
+                              <span className="opacity-50">Founded</span>
+                              <div className="opacity-80 tabular-nums">
+                                {c.foundingYear}
+                              </div>
+                            </div>
+                          )}
+                          {c.totalRaised && (
+                            <div>
+                              <span className="opacity-50">Total raised</span>
+                              <div className="opacity-80 tabular-nums">
+                                {c.totalRaised}
+                              </div>
+                            </div>
+                          )}
+                          {c.investors.length > 0 && (
+                            <div className="min-w-0">
+                              <span className="opacity-50">Investors</span>
+                              <div className="opacity-80">
+                                {c.investors.join(", ")}
+                              </div>
+                            </div>
+                          )}
+                          {c.competitors.length > 0 && (
+                            <div className="min-w-0">
+                              <span className="opacity-50">Competitors</span>
+                              <div className="opacity-80">
+                                {c.competitors.join(", ")}
+                              </div>
+                            </div>
+                          )}
+                          {c.keyPeople.length > 0 && (
+                            <div className="min-w-0">
+                              <span className="opacity-50">Key people</span>
+                              <div className="opacity-80">
+                                {c.keyPeople.join(", ")}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                {rosterId === c.id && (
+                  <CompanyRoster
+                    domain={c.domain}
+                    company={c.companyName ?? c.domain}
+                    colSpan={COLUMN_COUNT}
+                  />
+                )}
+                </Fragment>
               ))}
             </tbody>
           </table>

@@ -136,12 +136,17 @@ export default function ApplicationsTable({
   apps,
   resumes,
   total,
+  slNoById,
   query: serverQuery,
   status,
 }: {
   apps: App[];
   resumes: { id: string; label: string }[];
   total: number;
+  // Server-computed true Sl No per application id, ranked against the full
+  // status-scoped ordering (newest = total, decreasing). Stable across the
+  // capped browse view, load-all, and narrowed searches.
+  slNoById: Record<string, number>;
   // The query the server actually filtered by (mirrors the `q` URL param).
   query: string;
   // Active status tab, preserved when we rewrite the URL on search.
@@ -182,13 +187,12 @@ export default function ApplicationsTable({
   // Server already filtered; render what we were given.
   const filtered = apps;
 
-  // Stable slot numbers based on the original (pre-group) server order, so
-  // the "Sl" column doesn't reshuffle when a row jumps date groups.
-  const slNoById = useMemo(() => {
-    const m = new Map<string, number>();
-    apps.forEach((a, idx) => m.set(a.id, apps.length - idx));
-    return m;
-  }, [apps]);
+  // Sl numbers come from the server (`slNoById`), which ranks each application
+  // against the FULL status-scoped ordering — so a row reads its true Sl No
+  // regardless of how many rows are loaded (the default browse caps at
+  // PAGE_SIZE) or whether a search has narrowed the set to a non-contiguous
+  // subset. (Previously the client used `apps.length - idx`, which made the
+  // newest row read 200 in the capped browse view instead of its real number.)
 
   // Group filtered rows by date bucket. Each group's rows are already in
   // appliedDate-desc order because the server sorts that way and `filter`
@@ -299,7 +303,7 @@ export default function ApplicationsTable({
                 {g.apps.map((a) => (
                   <ApplicationsRow
                     key={a.id}
-                    slNo={slNoById.get(a.id) ?? 0}
+                    slNo={slNoById[a.id] ?? 0}
                     resumes={resumes}
                     app={a}
                   />

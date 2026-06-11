@@ -66,7 +66,7 @@ export default async function ApplicationsPage({
   // Once searching, return all matches regardless of the browse cap.
   const limited = !showAll && !query;
 
-  const [apps, resumes, total] = await Promise.all([
+  const [apps, resumes, total, orderedIds] = await Promise.all([
     prisma.jobApplication.findMany({
       where,
       // Sort by appliedDate so the user-controlled date drives the row's
@@ -120,7 +120,23 @@ export default async function ApplicationsPage({
     // Header badge / "X of Y" denominator: count the status scope, not the
     // search-narrowed set, so the number reflects the dataset being searched.
     prisma.jobApplication.count({ where: statusWhere }),
+    // Full status-scoped ordering (ids only) so each row gets a TRUE Sl No
+    // ranked against every application — stable whether the browse view is
+    // capped at PAGE_SIZE, fully loaded, or narrowed by a non-contiguous
+    // search. Same sort key as the rows so ranks line up with row order.
+    prisma.jobApplication.findMany({
+      where: statusWhere,
+      orderBy: [{ appliedDate: "desc" }, { createdAt: "desc" }],
+      select: { id: true },
+    }),
   ]);
+
+  // Newest application is #total; each subsequent row in the desc ordering is
+  // one less. Build id -> Sl No once for O(1) lookup in the table.
+  const slNoById: Record<string, number> = {};
+  orderedIds.forEach((row, idx) => {
+    slNoById[row.id] = total - idx;
+  });
 
   // Only the browse window can be truncated; a search returns all its matches.
   const truncated = limited && total > apps.length;
@@ -238,6 +254,7 @@ export default async function ApplicationsPage({
         apps={serialised}
         resumes={resumes}
         total={total}
+        slNoById={slNoById}
         query={query}
         status={status}
       />

@@ -137,6 +137,23 @@ def _g(d: dict[str, Any], key: str, default: str = "") -> str:
     return v.strip() if isinstance(v, str) else default
 
 
+def _href_url(url: str) -> str:
+    """Normalise a user-entered URL into a value safe for ``\\href{...}``.
+
+    Two things make a header link non-clickable in the exported PDF:
+      1. No scheme — a user typing ``linkedin.com/in/me`` (or ``www.…``) yields a
+         *relative* target that PDF viewers won't open. We prepend ``https://``
+         when no scheme is present (``mailto:``/``http``/``https`` are left as-is).
+      2. Unescaped specials — inside ``\\href``'s first arg, ``%`` and ``#`` are
+         still LaTeX-active and corrupt the link (or the compile). We backslash
+         them; other URL chars are literal in the verbatim-ish href argument.
+    """
+    url = url.strip()
+    if url and not re.match(r"^(https?:|mailto:)", url, re.I):
+        url = "https://" + url.lstrip("/")
+    return url.replace("\\", "\\\\").replace("%", "\\%").replace("#", "\\#")
+
+
 def _contact_line(header: dict[str, Any]) -> str:
     """Build the header contact line with hyperlinks, matching the DS-9 layout.
 
@@ -159,7 +176,7 @@ def _contact_line(header: dict[str, Any]) -> str:
     ):
         url = _g(header, key)
         if url:
-            parts.append(f"\\href{{{url}}}{{\\underline{{{label}}}}}")
+            parts.append(f"\\href{{{_href_url(url)}}}{{\\underline{{{label}}}}}")
     location = _g(header, "location")
     if location:
         parts.append(escape_latex(location))

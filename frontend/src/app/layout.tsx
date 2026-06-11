@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Inter } from "next/font/google";
 import { Geist_Mono } from "next/font/google";
 import { Fraunces } from "next/font/google";
+import Script from "next/script";
 import { Toaster } from "sonner";
 import "./globals.css";
 import { Sidebar } from "../components/Sidebar";
@@ -49,10 +50,14 @@ export default function RootLayout({
       className={`${inter.variable} ${geistMono.variable} ${fraunces.variable} h-full antialiased`}
       suppressHydrationWarning
     >
-      <head>
-        <script dangerouslySetInnerHTML={{ __html: initScript }} />
-      </head>
       <body className="min-h-full bg-base-100 text-base-content">
+        {/* Pre-paint theme + sidebar width so they don't flicker. Rendered via
+            next/script (beforeInteractive) so Next injects it into the document
+            instead of React warning about a raw <script> tag in the tree. */}
+        <Script id="theme-init" strategy="beforeInteractive">
+          {initScript}
+        </Script>
+
         <Sidebar />
 
         {/* Main column shifts right of the desktop sidebar; full-width on mobile.

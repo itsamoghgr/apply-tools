@@ -528,9 +528,11 @@ LEAD_INSERT_COLUMNS = (
     "replied",
     "repliedAt",
     "notes",
+    "source",
 )
 
-LEAD_PATCH_COLUMNS = LEAD_INSERT_COLUMNS
+# `source` is set at create time only (e.g. 'roster'); it is not user-patchable.
+LEAD_PATCH_COLUMNS = tuple(c for c in LEAD_INSERT_COLUMNS if c != "source")
 
 
 def _clean_lead_value(col: str, value):
@@ -969,6 +971,15 @@ def platform_upsert_lead(payload: dict) -> dict:
         "location": payload.get("location"),
         "industry": payload.get("industry"),
         "lastRoundDate": payload.get("last_round_date"),
+        # Deep-research fields.
+        "brief": payload.get("brief"),
+        "foundingYear": payload.get("founding_year"),
+        "totalRaised": payload.get("total_raised"),
+        "investorsJson": json.dumps(payload.get("investors") or []),
+        "competitorsJson": json.dumps(payload.get("competitors") or []),
+        "keyPeopleJson": json.dumps(payload.get("key_people") or []),
+        "fitScore": payload.get("fit_score"),
+        "fitReason": payload.get("fit_reason"),
         "confidence": payload.get("confidence"),
         "source": payload.get("source") or "agent-server",
         "sourcesJson": json.dumps(sources),
@@ -983,13 +994,18 @@ def platform_upsert_lead(payload: dict) -> dict:
         INSERT INTO "Lead" (
             "id", "name", "email", "linkedinUrl", "domain", "companyName",
             "fundingStage", "fundingAmount", "founderName", "employeeCount",
-            "revenue", "location", "industry", "lastRoundDate", "confidence",
-            "source", "sourcesJson", "updatedAt"
+            "revenue", "location", "industry", "lastRoundDate",
+            "brief", "foundingYear", "totalRaised", "investorsJson",
+            "competitorsJson", "keyPeopleJson", "fitScore", "fitReason",
+            "confidence", "source", "sourcesJson", "updatedAt"
         ) VALUES (
             :id, :name, :email, :linkedinUrl, :domain, :companyName,
             :fundingStage, :fundingAmount, :founderName, :employeeCount,
-            :revenue, :location, :industry, :lastRoundDate, :confidence,
-            :source, CAST(:sourcesJson AS jsonb), CURRENT_TIMESTAMP
+            :revenue, :location, :industry, :lastRoundDate,
+            :brief, :foundingYear, :totalRaised, CAST(:investorsJson AS jsonb),
+            CAST(:competitorsJson AS jsonb), CAST(:keyPeopleJson AS jsonb),
+            :fitScore, :fitReason,
+            :confidence, :source, CAST(:sourcesJson AS jsonb), CURRENT_TIMESTAMP
         )
         ON CONFLICT ("domain") WHERE "domain" IS NOT NULL
         DO UPDATE SET
@@ -1004,6 +1020,14 @@ def platform_upsert_lead(payload: dict) -> dict:
             "location"      = COALESCE(EXCLUDED."location", "Lead"."location"),
             "industry"      = COALESCE(EXCLUDED."industry", "Lead"."industry"),
             "lastRoundDate" = COALESCE(EXCLUDED."lastRoundDate", "Lead"."lastRoundDate"),
+            "foundingYear"  = COALESCE(EXCLUDED."foundingYear", "Lead"."foundingYear"),
+            "totalRaised"   = COALESCE(EXCLUDED."totalRaised", "Lead"."totalRaised"),
+            "investorsJson"   = COALESCE(EXCLUDED."investorsJson", "Lead"."investorsJson"),
+            "competitorsJson" = COALESCE(EXCLUDED."competitorsJson", "Lead"."competitorsJson"),
+            "keyPeopleJson"   = COALESCE(EXCLUDED."keyPeopleJson", "Lead"."keyPeopleJson"),
+            "brief"         = EXCLUDED."brief",
+            "fitScore"      = EXCLUDED."fitScore",
+            "fitReason"     = EXCLUDED."fitReason",
             "confidence"    = EXCLUDED."confidence",
             "source"        = EXCLUDED."source",
             "sourcesJson"   = EXCLUDED."sourcesJson",
