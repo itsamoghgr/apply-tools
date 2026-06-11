@@ -1646,7 +1646,16 @@ def score_jd_fit_all(
 # JD extractor (used by the popup's auto-detect button when site selectors miss).
 # -----------------------------------------------------------------------------
 
-EXTRACT_JD_MAX_PAGE_TEXT = 40000
+# Cap the scraped page text before sending it to the extractor. The binding
+# constraint is the PRIMARY extract provider's token budget: Groq's free tier
+# caps at 12000 tokens/min (TPM), and the whole request (system prompt + wrapper
+# + page text) must fit under it or Groq hard-rejects with a 413 — which it did
+# at 40000 chars (~14.8k tokens), making the primary provider 413 on EVERY
+# auto-detect and forcing the slow Bedrock/Anthropic fallback each time. At
+# ~3.3-4 chars/token for noisy scraped text, 24000 chars ≈ 6-7k tokens of page
+# text, leaving comfortable headroom under 12k TPM. A real job posting's content
+# is well under this; the rest is nav/footer noise we don't need anyway.
+EXTRACT_JD_MAX_PAGE_TEXT = int(os.environ.get("EXTRACT_JD_MAX_PAGE_TEXT", "24000"))
 
 
 def extract_jd_from_page(

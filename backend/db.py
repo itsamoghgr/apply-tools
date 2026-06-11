@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 import secrets
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -527,9 +528,11 @@ LEAD_INSERT_COLUMNS = (
     "replied",
     "repliedAt",
     "notes",
+    "source",
 )
 
-LEAD_PATCH_COLUMNS = LEAD_INSERT_COLUMNS
+# `source` is set at create time only (e.g. 'roster'); it is not user-patchable.
+LEAD_PATCH_COLUMNS = tuple(c for c in LEAD_INSERT_COLUMNS if c != "source")
 
 
 def _clean_lead_value(col: str, value):
@@ -816,3 +819,249 @@ def insert_application(
         # log is unavailable.
         logger.warning("application_log_failed", mode=mode, error=str(exc))
     return app_id
+
+
+# -----------------------------------------------------------------------------
+# Domain-keyed lead intake (used by the lead-generation agent service).
+#
+# The agent server (agent_server/, port 8001) discovers + verifies startups and
+# pushes clean leads here over HTTP. These two helpers back the two new
+# endpoints (POST /api/v1/leads/exists, POST /api/v1/leads/upsert). They key on
+# the normalised root `domain` column added by platform_migration.sql, with a
+# partial UNIQUE index (domain WHERE domain IS NOT NULL).
+# -----------------------------------------------------------------------------
+
+
+def platform_leads_known_domains(domains: list[str]) -> list[str]:
+    """Return the subset of `domains` already present on some Lead row.
+
+    Used by the agent's dedup stage to avoid re-researching anything the
+    platform already has. Case-insensitive on the stored domain.
+    """
+    wanted = [d.strip().lower() for d in domains if isinstance(d, str) and d.strip()]
+    if not wanted:
+        return []
+    with get_conn() as conn:
+        rows = conn.execute(
+            text(
+                'SELECT DISTINCT "domain" FROM "Lead" '
+                'WHERE "domain" = ANY(:domains) AND "domain" IS NOT NULL'
+            ),
+            {"domains": wanted},
+        ).fetchall()
+    return [r.domain for r in rows]
+
+
+def _upsert_founder_person_lead(
+    conn,
+    *,
+    founder_name: str | None,
+    founder_email: str | None,
+    founder_linkedin_url: str | None,
+    company_name: str | None,
+) -> None:
+    """Maintain a person-lead (domain NULL) for a discovered company's founder,
+    so founders flow into the Outreach tab automatically.
+
+    Idempotent across hunt re-runs: matches an existing agent-founder row by
+    LinkedIn URL first, else by (name + company), and updates it; otherwise
+    inserts. Tagged ``source='agent-founder'`` and ``role='Founder'`` so it is
+    distinct from the domain-keyed company row and from hand-added leads. Runs
+    in the SAME transaction/connection as the company upsert.
+    """
+    if not (isinstance(founder_name, str) and founder_name.strip()):
+        return  # nothing to create without at least a name
+    founder_name = founder_name.strip()
+    li = (founder_linkedin_url or "").strip() or None
+    company = (company_name or "").strip() or None
+
+    # Find an existing agent-founder row to update (avoid duplicates on re-run).
+    row = None
+    if li:
+        row = conn.execute(
+            text(
+                "SELECT \"id\" FROM \"Lead\" WHERE \"source\" = 'agent-founder' "
+                'AND "linkedinUrl" = :li LIMIT 1'
+            ),
+            {"li": li},
+        ).fetchone()
+    if row is None:
+        row = conn.execute(
+            text(
+                "SELECT \"id\" FROM \"Lead\" WHERE \"source\" = 'agent-founder' "
+                'AND "name" = :n AND "currentCompany" IS NOT DISTINCT FROM :c '
+                "LIMIT 1"
+            ),
+            {"n": founder_name, "c": company},
+        ).fetchone()
+
+    if row is not None:
+        # Refresh contact details without clobbering existing values with nulls.
+        conn.execute(
+            text(
+                'UPDATE "Lead" SET '
+                '"email" = COALESCE(:email, "email"), '
+                '"linkedinUrl" = COALESCE(:li, "linkedinUrl"), '
+                '"currentCompany" = COALESCE(:c, "currentCompany"), '
+                '"updatedAt" = CURRENT_TIMESTAMP '
+                'WHERE "id" = :id'
+            ),
+            {"email": founder_email, "li": li, "c": company, "id": row.id},
+        )
+        return
+
+    # Insert a fresh person-lead. domain stays NULL so it shows in Outreach.
+    # Email may collide with an existing person-lead (email is UNIQUE); on
+    # conflict we simply skip rather than fail the whole delivery.
+    try:
+        conn.execute(
+            text(
+                'INSERT INTO "Lead" ("id", "name", "email", "linkedinUrl", '
+                '"currentCompany", "role", "source", "updatedAt") VALUES '
+                "(:id, :n, :email, :li, :c, 'Founder', 'agent-founder', "
+                "CURRENT_TIMESTAMP)"
+            ),
+            {
+                "id": secrets.token_urlsafe(12),
+                "n": founder_name,
+                "email": founder_email or None,
+                "li": li,
+                "c": company,
+            },
+        )
+    except IntegrityError:
+        # email already belongs to another lead — leave that one as the truth.
+        pass
+
+
+def platform_upsert_lead(payload: dict) -> dict:
+    """Idempotently upsert a verified lead keyed on `domain`.
+
+    `payload` is the agent's PlatformUpsertRequest shape (snake_case). Returns
+    ``{"lead_id": str, "created": bool}``. ON CONFLICT (domain) updates in
+    place — never creates a duplicate. `founderName` also seeds `name` when the
+    row is new, since `name` is NOT NULL on the table.
+
+    Side effect: when a founder is present, also maintains a separate person-lead
+    (domain NULL, source 'agent-founder') so the founder appears in the Outreach
+    tab. See :func:`_upsert_founder_person_lead`.
+    """
+    domain = (payload.get("domain") or "").strip().lower()
+    if not domain:
+        raise ValueError("domain is required for a domain-keyed upsert")
+
+    company_name = payload.get("company_name")
+    founder_name = payload.get("founder_name")
+    # `name` is NOT NULL; fall back to founder, then company, then the domain.
+    name = founder_name or company_name or domain
+    sources = payload.get("sources") or []
+
+    params = {
+        "id": secrets.token_urlsafe(12),
+        "name": name,
+        "email": payload.get("founder_email"),
+        "linkedinUrl": payload.get("founder_linkedin_url"),
+        "domain": domain,
+        "companyName": company_name,
+        "fundingStage": payload.get("funding_stage"),
+        "fundingAmount": payload.get("funding_amount"),
+        "founderName": founder_name,
+        "employeeCount": payload.get("employee_count"),
+        "revenue": payload.get("revenue"),
+        "location": payload.get("location"),
+        "industry": payload.get("industry"),
+        "lastRoundDate": payload.get("last_round_date"),
+        # Deep-research fields.
+        "brief": payload.get("brief"),
+        "foundingYear": payload.get("founding_year"),
+        "totalRaised": payload.get("total_raised"),
+        "investorsJson": json.dumps(payload.get("investors") or []),
+        "competitorsJson": json.dumps(payload.get("competitors") or []),
+        "keyPeopleJson": json.dumps(payload.get("key_people") or []),
+        "fitScore": payload.get("fit_score"),
+        "fitReason": payload.get("fit_reason"),
+        "confidence": payload.get("confidence"),
+        "source": payload.get("source") or "agent-server",
+        "sourcesJson": json.dumps(sources),
+    }
+
+    # The conflict target must repeat the partial index predicate. On update we
+    # refresh the agent-sourced columns and bump updatedAt, but we do NOT clobber
+    # an existing human-edited `name`/`email` with nulls — COALESCE keeps the old
+    # value when the incoming one is null.
+    sql = text(
+        """
+        INSERT INTO "Lead" (
+            "id", "name", "email", "linkedinUrl", "domain", "companyName",
+            "fundingStage", "fundingAmount", "founderName", "employeeCount",
+            "revenue", "location", "industry", "lastRoundDate",
+            "brief", "foundingYear", "totalRaised", "investorsJson",
+            "competitorsJson", "keyPeopleJson", "fitScore", "fitReason",
+            "confidence", "source", "sourcesJson", "updatedAt"
+        ) VALUES (
+            :id, :name, :email, :linkedinUrl, :domain, :companyName,
+            :fundingStage, :fundingAmount, :founderName, :employeeCount,
+            :revenue, :location, :industry, :lastRoundDate,
+            :brief, :foundingYear, :totalRaised, CAST(:investorsJson AS jsonb),
+            CAST(:competitorsJson AS jsonb), CAST(:keyPeopleJson AS jsonb),
+            :fitScore, :fitReason,
+            :confidence, :source, CAST(:sourcesJson AS jsonb), CURRENT_TIMESTAMP
+        )
+        ON CONFLICT ("domain") WHERE "domain" IS NOT NULL
+        DO UPDATE SET
+            "email"         = COALESCE(EXCLUDED."email", "Lead"."email"),
+            "linkedinUrl"   = COALESCE(EXCLUDED."linkedinUrl", "Lead"."linkedinUrl"),
+            "companyName"   = COALESCE(EXCLUDED."companyName", "Lead"."companyName"),
+            "fundingStage"  = COALESCE(EXCLUDED."fundingStage", "Lead"."fundingStage"),
+            "fundingAmount" = COALESCE(EXCLUDED."fundingAmount", "Lead"."fundingAmount"),
+            "founderName"   = COALESCE(EXCLUDED."founderName", "Lead"."founderName"),
+            "employeeCount" = COALESCE(EXCLUDED."employeeCount", "Lead"."employeeCount"),
+            "revenue"       = COALESCE(EXCLUDED."revenue", "Lead"."revenue"),
+            "location"      = COALESCE(EXCLUDED."location", "Lead"."location"),
+            "industry"      = COALESCE(EXCLUDED."industry", "Lead"."industry"),
+            "lastRoundDate" = COALESCE(EXCLUDED."lastRoundDate", "Lead"."lastRoundDate"),
+            "foundingYear"  = COALESCE(EXCLUDED."foundingYear", "Lead"."foundingYear"),
+            "totalRaised"   = COALESCE(EXCLUDED."totalRaised", "Lead"."totalRaised"),
+            "investorsJson"   = COALESCE(EXCLUDED."investorsJson", "Lead"."investorsJson"),
+            "competitorsJson" = COALESCE(EXCLUDED."competitorsJson", "Lead"."competitorsJson"),
+            "keyPeopleJson"   = COALESCE(EXCLUDED."keyPeopleJson", "Lead"."keyPeopleJson"),
+            "brief"         = EXCLUDED."brief",
+            "fitScore"      = EXCLUDED."fitScore",
+            "fitReason"     = EXCLUDED."fitReason",
+            "confidence"    = EXCLUDED."confidence",
+            "source"        = EXCLUDED."source",
+            "sourcesJson"   = EXCLUDED."sourcesJson",
+            "updatedAt"     = CURRENT_TIMESTAMP
+        RETURNING "id", (xmax = 0) AS created
+        """
+    )
+    # Company upsert commits on its own. The founder person-lead is maintained
+    # in a SEPARATE transaction below — critically, NOT in this one: the company
+    # row carries email=founder_email, so inserting a founder person-lead with
+    # the same email would hit the UNIQUE(email) constraint and, once a statement
+    # errors in Postgres, the whole transaction aborts — silently rolling back
+    # the company upsert too (it reported success via RETURNING but never
+    # persisted). Isolating them keeps the company lead safe.
+    with get_conn() as conn:
+        row = conn.execute(sql, params).fetchone()
+    result = {"lead_id": row.id, "created": bool(row.created)}
+
+    # Surface the founder as an Outreach person-lead. Best-effort, isolated: a
+    # failure here must never undo the company lead. Skip the founder email when
+    # it already lives on the company row (would collide on UNIQUE(email)).
+    company_email = payload.get("founder_email")
+    founder_email_for_person = None  # the company row already holds this address
+    try:
+        with get_conn() as conn2:
+            _upsert_founder_person_lead(
+                conn2,
+                founder_name=founder_name,
+                founder_email=founder_email_for_person,
+                founder_linkedin_url=payload.get("founder_linkedin_url"),
+                company_name=company_name,
+            )
+    except Exception as exc:
+        logger.warning(
+            "founder_person_lead_failed", domain=domain, error=str(exc)
+        )
+    return result

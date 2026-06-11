@@ -1,9 +1,12 @@
 "use client";
 
 import { useState, useMemo } from "react";
-import { Plus, Search } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { toast } from "sonner";
+import { Plus, Search, MailSearch, Loader2 } from "lucide-react";
 import LeadsRow from "./LeadsRow";
 import AddLeadForm from "./AddLeadForm";
+import FindEmailsProgress, { type FindRow } from "./FindEmailsProgress";
 
 export type LeadReachOut = {
   id: string;
@@ -36,8 +39,89 @@ export default function LeadsTable({
   leads: Lead[];
   total: number;
 }) {
+  const router = useRouter();
   const [query, setQuery] = useState("");
   const [adding, setAdding] = useState(false);
+  const [finding, setFinding] = useState(false);
+
+  // Live progress for the bulk Find-emails run (FindRow type from the panel).
+  const [progress, setProgress] = useState<{
+    done: number;
+    total: number;
+    rows: FindRow[];
+  } | null>(null);
+
+  // Leads with no email but something to work from (LinkedIn or a company).
+  const missingEmail = useMemo(
+    () => leads.filter((l) => !l.email && (l.currentCompany || l.linkedinUrl)),
+    [leads]
+  );
+
+  // Bulk "Find emails": run the agentic contact-finder for each lead missing an
+  // email, patch any address found, and stream per-lead progress to the UI.
+  async function findEmails() {
+    if (finding || missingEmail.length === 0) return;
+    setFinding(true);
+    const rows: FindRow[] = missingEmail.map((l) => ({
+      name: l.name,
+      status: "pending",
+    }));
+    setProgress({ done: 0, total: missingEmail.length, rows });
+    let found = 0;
+
+    const update = (i: number, patch: Partial<FindRow>) =>
+      setProgress((p) =>
+        p
+          ? {
+              ...p,
+              rows: p.rows.map((r, idx) => (idx === i ? { ...r, ...patch } : r)),
+            }
+          : p
+      );
+
+    try {
+      for (let i = 0; i < missingEmail.length; i++) {
+        const l = missingEmail[i];
+        update(i, { status: "searching" });
+        try {
+          const res = await fetch(`/api/agent/api/v1/verify/email`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              company: l.currentCompany,
+              founder_name: l.name,
+            }),
+          });
+          const v = res.ok ? await res.json() : {};
+          if (v.email) {
+            await fetch(`/api/proxy/leads/${l.id}`, {
+              method: "PATCH",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ email: v.email }),
+            });
+            found += 1;
+            update(i, { status: "found", email: v.email, method: v.method });
+          } else {
+            update(i, { status: "miss" });
+          }
+        } catch {
+          update(i, { status: "miss" });
+        }
+        setProgress((p) => (p ? { ...p, done: p.done + 1 } : p));
+      }
+      if (found > 0) {
+        toast.success(`Found ${found} email${found === 1 ? "" : "s"}.`);
+        router.refresh();
+      } else {
+        toast(`No new emails found for ${missingEmail.length} lead(s).`);
+      }
+    } finally {
+      setFinding(false);
+      // Leave the completed panel up briefly so the user sees the summary,
+      // then auto-dismiss.
+      setTimeout(() => setProgress(null), 6000);
+    }
+  }
 
   const filtered = useMemo(() => {
     if (!query.trim()) return leads;
@@ -75,6 +159,24 @@ export default function LeadsTable({
             </button>
           )}
         </div>
+        {missingEmail.length > 0 && (
+          <button
+            type="button"
+            onClick={findEmails}
+            disabled={finding}
+            className="btn btn-outline btn-sm gap-1.5 shrink-0"
+            title={`Find emails for ${missingEmail.length} lead(s) missing one`}
+          >
+            {finding ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <MailSearch className="h-4 w-4" />
+            )}
+            {finding && progress
+              ? `Finding ${progress.done}/${progress.total}…`
+              : `Find emails (${missingEmail.length})`}
+          </button>
+        )}
         <button
           type="button"
           onClick={() => setAdding(true)}
@@ -93,6 +195,11 @@ export default function LeadsTable({
       )}
 
       {adding && <AddLeadForm onClose={() => setAdding(false)} />}
+
+      {/* Live Find-emails progress: the contact agent works one lead at a time. */}
+      {progress && (
+        <FindEmailsProgress progress={progress} finding={finding} />
+      )}
 
       {filtered.length === 0 ? (
         <div className="glass-card p-12 text-center">
@@ -117,6 +224,7 @@ export default function LeadsTable({
                 <th className="text-center">Reach‑outs</th>
                 <th className="text-center">Replied</th>
                 <th>Updated</th>
+                <th></th>
               </tr>
             </thead>
             <tbody>

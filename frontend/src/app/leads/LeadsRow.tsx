@@ -3,7 +3,14 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
-import { Pencil, ExternalLink, Trash2, Mail, Send } from "lucide-react";
+import {
+  Pencil,
+  ExternalLink,
+  Trash2,
+  Mail,
+  Send,
+  AlertTriangle,
+} from "lucide-react";
 import type { Lead } from "./LeadsTable";
 import { relativeTime } from "@/lib/time";
 
@@ -35,6 +42,7 @@ export default function LeadsRow({ slNo, lead }: { slNo: number; lead: Lead }) {
   const [busy, setBusy] = useState(false);
   const [local, setLocal] = useState(lead);
   const [open, setOpen] = useState(false);
+  const [deleted, setDeleted] = useState(false);
 
   async function patch(
     field: keyof Lead,
@@ -98,19 +106,40 @@ export default function LeadsRow({ slNo, lead }: { slNo: number; lead: Lead }) {
     }
   }
 
-  async function onDelete() {
-    setBusy(true);
-    try {
-      const res = await fetch(`/api/proxy/leads/${lead.id}`, {
-        method: "DELETE",
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      toast.success(`Deleted ${lead.name}`);
-      startTransition(() => router.refresh());
-    } catch (e) {
-      toast.error(`Delete failed: ${(e as Error).message}`);
-      setBusy(false);
-    }
+  // Gmail-style delete: hide the row immediately and show an Undo toast. The
+  // DELETE fires only after the grace window, so Undo cancels it with no
+  // network round-trip — matching the Discovered-companies tab.
+  function onDelete() {
+    setOpen(false);
+    setDeleted(true);
+    let undone = false;
+
+    const timer = setTimeout(async () => {
+      if (undone) return;
+      try {
+        const res = await fetch(`/api/proxy/leads/${lead.id}`, {
+          method: "DELETE",
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        startTransition(() => router.refresh());
+      } catch (e) {
+        setDeleted(false); // restore on failure
+        toast.error(`Delete failed: ${(e as Error).message}`);
+      }
+    }, 4500);
+
+    toast(`Deleted ${lead.name}`, {
+      description: "Linked reach-outs are kept but unlinked.",
+      duration: 4500,
+      action: {
+        label: "Undo",
+        onClick: () => {
+          undone = true;
+          clearTimeout(timer);
+          setDeleted(false);
+        },
+      },
+    });
   }
 
   const cellInput =
@@ -118,6 +147,9 @@ export default function LeadsRow({ slNo, lead }: { slNo: number; lead: Lead }) {
 
   const sentCount = local.reachOuts.filter((r) => r.status === "sent").length;
   const totalReachOuts = local.reachOuts.length;
+
+  // Optimistically hidden while a delete is pending (Undo restores it).
+  if (deleted) return null;
 
   return (
     <>
@@ -138,11 +170,27 @@ export default function LeadsRow({ slNo, lead }: { slNo: number; lead: Lead }) {
       >
         <td className="opacity-40 text-xs tabular-nums">{slNo}</td>
         <td className="font-medium">
-          <EditableText
-            value={local.name}
-            onSave={(v) => patch("name", v || lead.name)}
-            className={cellInput}
-          />
+          <div className="flex items-center gap-1.5">
+            <EditableText
+              value={local.name}
+              onSave={(v) => patch("name", v || lead.name)}
+              className={cellInput}
+            />
+            {/* Flag only the actionable case: no email yet. */}
+            {!local.email && (
+              <span
+                title={
+                  local.linkedinUrl
+                    ? "No email — has LinkedIn. Try Find emails."
+                    : "No email or LinkedIn — needs a contact method."
+                }
+                className="shrink-0"
+                style={{ color: local.linkedinUrl ? "#b87f3c" : "#c0504d" }}
+              >
+                <AlertTriangle className="h-3.5 w-3.5" />
+              </span>
+            )}
+          </div>
         </td>
         <td>
           <EmailCell
@@ -204,16 +252,26 @@ export default function LeadsRow({ slNo, lead }: { slNo: number; lead: Lead }) {
             {relativeTime(new Date(local.updatedAt))}
           </span>
         </td>
+        <td className="text-right">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation(); // don't toggle the row open
+              onDelete();
+            }}
+            disabled={busy}
+            className="btn btn-ghost btn-xs btn-square text-error/60 hover:text-error hover:bg-error/10"
+            title="Delete lead"
+            aria-label="Delete lead"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+          </button>
+        </td>
       </tr>
       {open && (
         <tr className="bg-base-200/40">
-          <td colSpan={9} className="p-0 border-t border-base-300/40">
-            <DetailsPanel
-              lead={local}
-              busy={busy}
-              onSaveMany={patchMany}
-              onDelete={onDelete}
-            />
+          <td colSpan={10} className="p-0 border-t border-base-300/40">
+            <DetailsPanel lead={local} busy={busy} onSaveMany={patchMany} />
           </td>
         </tr>
       )}
@@ -253,15 +311,12 @@ function DetailsPanel({
   lead,
   busy,
   onSaveMany,
-  onDelete,
 }: {
   lead: Lead;
   busy: boolean;
   onSaveMany: (updates: Partial<Lead>) => Promise<boolean>;
-  onDelete: () => void;
 }) {
   const [editing, setEditing] = useState(false);
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [draft, setDraft] = useState<Draft>(() => leadToDraft(lead));
 
   if (!editing) {
@@ -418,41 +473,6 @@ function DetailsPanel({
                 {new Date(lead.repliedAt).toLocaleString()}
               </span>
             </Section>
-          )}
-        </div>
-
-        <div className="flex justify-end items-center pt-5 mt-6 border-t border-base-300/40">
-          {confirmingDelete ? (
-            <div className="flex items-center gap-3">
-              <span className="text-xs opacity-70">
-                Delete <span className="font-medium">{lead.name}</span>? This
-                can&apos;t be undone. Linked reach-outs will be kept but
-                unlinked.
-              </span>
-              <button
-                onClick={() => setConfirmingDelete(false)}
-                disabled={busy}
-                className="btn btn-ghost btn-xs"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={onDelete}
-                disabled={busy}
-                className="btn btn-error btn-xs"
-              >
-                {busy ? "Deleting…" : "Confirm delete"}
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={() => setConfirmingDelete(true)}
-              disabled={busy || editing}
-              className="inline-flex items-center gap-1.5 text-xs font-medium text-error/80 hover:text-error hover:bg-error/10 rounded-md px-2.5 py-1.5 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed"
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-              Delete lead
-            </button>
           )}
         </div>
       </div>

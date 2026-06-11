@@ -1,0 +1,173 @@
+"""FROZEN stage record shapes (see CONTRACTS.md §1).
+
+These Pydantic v2 models are the records passed BETWEEN pipeline stages. Every
+sub-agent imports from here. Do not change a field without routing through the
+lead engineer — multiple stages depend on each shape.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class CandidateCompany(BaseModel):
+    """Output of discovery, input to dedup. Keyed by normalized `domain`.
+
+    Noisy extraction from freeform articles is expected; dedup + verification
+    clean it up downstream.
+    """
+
+    name: str
+    domain: str  # NORMALIZED root domain, e.g. "acme.com"
+    source: str  # "open_web" | "yc_oss" | "product_hunt" | "rss"
+    source_url: str | None = None
+    # Structured-floor enrichment — research may SHORTCUT on these:
+    funding_stage: str | None = None
+    funding_amount: str | None = None
+    description: str | None = None
+    discovered_at: datetime = Field(default_factory=_utcnow)
+
+
+class FitVerdict(BaseModel):
+    """Cheap fit-gate decision for a discovered company.
+
+    Produced BEFORE deep research by `agent_server.stages.fit_gate.run_fit_gate`.
+    `passed=False` means SKIP the company (record in seen-cache, never save).
+    The gate NEVER raises — on any error it fails OPEN (passed=True).
+    """
+
+    passed: bool
+    score: float  # 0.0–1.0 fit against the user's ICP / fit_criteria
+    reason: str   # short human-readable explanation ("no_criteria", "fit:0.71", …)
+
+
+class ResearchResult(BaseModel):
+    """Output of the research agent, input to verification."""
+
+    domain: str
+    name: str
+    funding_stage: str | None = None
+    funding_amount: str | None = None
+    founder_name: str | None = None
+    # From PUBLIC SEARCH SNIPPETS ONLY; the profile page is never read.
+    founder_linkedin_url: str | None = None
+    # Richer company attributes (best-effort; thorough research fills these).
+    employee_count: str | None = None   # e.g. "11-50", "~200"
+    revenue: str | None = None          # e.g. "$10M ARR" (often null for startups)
+    location: str | None = None         # HQ city/region, e.g. "San Francisco, CA"
+    industry: str | None = None         # e.g. "Developer tools", "Fintech"
+    last_round_date: str | None = None  # most recent round, e.g. "2024-09"
+    # Deep-research fields (best-effort; ALL optional so partial research never
+    # breaks the pipeline). A qualitative brief + structured facts + an
+    # authoritative fit score scored against the user's ICP.
+    brief: str | None = None            # 2-4 sentence qualitative summary
+    founding_year: str | None = None    # e.g. "2021"
+    total_raised: str | None = None     # cumulative funding, e.g. "$18M"
+    investors: list[str] = Field(default_factory=list)
+    competitors: list[str] = Field(default_factory=list)
+    key_people: list[str] = Field(default_factory=list)
+    fit_score: float | None = None      # 0–1 authoritative fit vs. fit_criteria
+    fit_reason: str | None = None       # why this fit score
+    sources: list[str] = Field(default_factory=list)
+    used_shortcut: bool = False
+
+
+class VerifiedLead(BaseModel):
+    """Output of verification, input to delivery.
+
+    `confidence` is a continuous 0.0–1.0 SCORE, never a bool. Delivery sends
+    regardless; the platform records the score.
+    """
+
+    domain: str
+    name: str
+    funding_stage: str | None = None
+    funding_amount: str | None = None
+    founder_name: str | None = None
+    founder_linkedin_url: str | None = None
+    founder_email: str | None = None
+    employee_count: str | None = None
+    revenue: str | None = None
+    location: str | None = None
+    industry: str | None = None
+    last_round_date: str | None = None
+    # Deep-research fields (carried through verification unchanged; all optional).
+    brief: str | None = None
+    founding_year: str | None = None
+    total_raised: str | None = None
+    investors: list[str] = Field(default_factory=list)
+    competitors: list[str] = Field(default_factory=list)
+    key_people: list[str] = Field(default_factory=list)
+    fit_score: float | None = None
+    fit_reason: str | None = None
+    confidence: float
+    verification_detail: dict[str, Any] = Field(default_factory=dict)
+    sources: list[str] = Field(default_factory=list)
+
+
+class PlatformUpsertRequest(BaseModel):
+    """Body the agent server POSTs to the platform /api/v1/leads/upsert.
+
+    Idempotent, keyed on `domain` (ON CONFLICT (domain) DO UPDATE).
+    """
+
+    domain: str
+    company_name: str
+    funding_stage: str | None = None
+    funding_amount: str | None = None
+    founder_name: str | None = None
+    founder_linkedin_url: str | None = None
+    founder_email: str | None = None
+    employee_count: str | None = None
+    revenue: str | None = None
+    location: str | None = None
+    industry: str | None = None
+    last_round_date: str | None = None
+    # Deep-research fields (all optional; default None / empty).
+    brief: str | None = None
+    founding_year: str | None = None
+    total_raised: str | None = None
+    investors: list[str] = Field(default_factory=list)
+    competitors: list[str] = Field(default_factory=list)
+    key_people: list[str] = Field(default_factory=list)
+    fit_score: float | None = None
+    fit_reason: str | None = None
+    confidence: float
+    source: str = "agent-server"
+    sources: list[str] = Field(default_factory=list)
+
+    @classmethod
+    def from_verified(cls, lead: VerifiedLead) -> "PlatformUpsertRequest":
+        return cls(
+            domain=lead.domain,
+            company_name=lead.name,
+            funding_stage=lead.funding_stage,
+            funding_amount=lead.funding_amount,
+            founder_name=lead.founder_name,
+            founder_linkedin_url=lead.founder_linkedin_url,
+            founder_email=lead.founder_email,
+            employee_count=lead.employee_count,
+            revenue=lead.revenue,
+            location=lead.location,
+            industry=lead.industry,
+            last_round_date=lead.last_round_date,
+            brief=lead.brief,
+            founding_year=lead.founding_year,
+            total_raised=lead.total_raised,
+            investors=lead.investors,
+            competitors=lead.competitors,
+            key_people=lead.key_people,
+            fit_score=lead.fit_score,
+            fit_reason=lead.fit_reason,
+            confidence=lead.confidence,
+            # Cap sources — thorough research can accumulate 100+ URLs, which the
+            # platform rejects (max 100). Keep the first 50 (most relevant).
+            sources=lead.sources[:50],
+        )
