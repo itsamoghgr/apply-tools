@@ -1,11 +1,11 @@
 #!/bin/bash
-# Stop every process the application starts: the platform backend (:8000), the
-# lead-generation agent server (:8001), and the Next.js frontend (:3000/:3001).
+# Stop every process the application starts: the platform backend (:8001), the
+# lead-generation agent server (:8002), and the Next.js frontend (:3001).
 # Safe to run anytime; it only targets this app's ports and process names.
 set -u
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-PORTS=(8000 8001 3000 3001)
+PORTS=(8001 8002 3000 3001)
 # Process-name patterns this app launches (covers strays not bound to a port,
 # e.g. a reloader child or a frontend started on a bumped port).
 PATTERNS=(

@@ -824,7 +824,7 @@ def insert_application(
 # -----------------------------------------------------------------------------
 # Domain-keyed lead intake (used by the lead-generation agent service).
 #
-# The agent server (agent_server/, port 8001) discovers + verifies startups and
+# The agent server (agent_server/, port 8002) discovers + verifies startups and
 # pushes clean leads here over HTTP. These two helpers back the two new
 # endpoints (POST /api/v1/leads/exists, POST /api/v1/leads/upsert). They key on
 # the normalised root `domain` column added by platform_migration.sql, with a

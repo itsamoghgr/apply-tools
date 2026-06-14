@@ -37,7 +37,7 @@ trap 'kill 0' EXIT INT TERM
 
 (cd "$ROOT_DIR/backend" && source venv/bin/activate && exec python -m server) &
 
-# Lead-generation agent service (separate uvicorn process on :8001). Optional —
+# Lead-generation agent service (separate uvicorn process on :8002). Optional —
 # only started if its venv exists, so setups that haven't installed it still boot.
 # It runs from the repo root so the `agent_server` package imports resolve.
 if [ -d "$ROOT_DIR/agent_server/venv" ]; then

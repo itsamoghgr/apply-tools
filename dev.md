@@ -7,7 +7,7 @@ A personal browser extension that generates tailored, LaTeX-compiled PDF cover l
 ## Stack at a glance
 
 - **Frontend:** Browser extension (Manifest V3, vanilla JS)
-- **Backend:** Local Python (FastAPI) on `localhost:8000`
+- **Backend:** Local Python (FastAPI) on `localhost:8001`
 - **LLM:** Claude API (Anthropic SDK)
 - **LaTeX:** Tectonic (single-binary compiler)
 - **Source of truth:** Your `.tex` template + your resume text
@@ -178,10 +178,10 @@ Use Claude's `response_format` or just instruct "respond with JSON only, no mark
 #!/bin/bash
 cd "$(dirname "$0")/backend"
 source venv/bin/activate
-uvicorn server:app --host 127.0.0.1 --port 8000 --reload
+uvicorn server:app --host 127.0.0.1 --port 8001 --reload
 ```
 
-**Done when:** `./start.sh` boots the server and `curl -X POST localhost:8000/generate -H 'Content-Type: application/json' -d '{"company":"Anthropic","job_description":"..."}' --output test.pdf` works.
+**Done when:** `./start.sh` boots the server and `curl -X POST localhost:8001/generate -H 'Content-Type: application/json' -d '{"company":"Anthropic","job_description":"..."}' --output test.pdf` works.
 
 ---
 
@@ -189,18 +189,18 @@ uvicorn server:app --host 127.0.0.1 --port 8000 --reload
 
 The frontend. Keep it dumb — it's a thin client.
 
-**`manifest.json`** — Manifest V3, permissions: `["storage"]` (just for remembering API endpoint if needed), `host_permissions: ["http://localhost:8000/*"]`.
+**`manifest.json`** — Manifest V3, permissions: `["storage"]` (just for remembering API endpoint if needed), `host_permissions: ["http://localhost:8001/*"]`.
 
 **`popup.html`** — Two fields and a button:
 - Input: company name (one-liner)
 - Textarea: job description (large, scrollable)
 - Button: "Generate"
 - Status area: shows "Generating…", "Done!", or error messages
-- Optional: a small status dot showing if `localhost:8000` is reachable
+- Optional: a small status dot showing if `localhost:8001` is reachable
 
 **`popup.js`** — On Generate click:
 1. Disable button, show "Generating… (this takes ~15s)"
-2. `fetch('http://localhost:8000/generate', {method:'POST', body: JSON.stringify({company, job_description})})`
+2. `fetch('http://localhost:8001/generate', {method:'POST', body: JSON.stringify({company, job_description})})`
 3. Get the PDF blob
 4. Trigger a download via `chrome.downloads.download({url: blobUrl, filename: 'CoverLetter_<company>.pdf', saveAs: false})`
 5. Show success, re-enable button

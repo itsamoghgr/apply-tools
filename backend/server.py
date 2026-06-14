@@ -796,7 +796,7 @@ def leads_delete(lead_id: str) -> dict[str, bool]:
 # -----------------------------------------------------------------------------
 # Domain-keyed lead intake for the lead-generation agent service.
 #
-# The agent server (separate process, port 8001) discovers + verifies startups
+# The agent server (separate process, port 8002) discovers + verifies startups
 # and pushes clean verified leads here. Two endpoints, both keyed on the
 # normalised root `domain`. Optional shared-secret auth via X-Agent-Token; when
 # PLATFORM_API_TOKEN is unset, the endpoints accept unauthenticated calls
@@ -1232,7 +1232,7 @@ def reach_out_delete(row_id: str) -> dict[str, bool]:
 # /track/open and /track/click run on the deployed sidecar (see
 # tracking-sidecar/) which is reachable from mail clients on the public
 # internet. The dashboard reads back through these proxy routes so it can
-# stay on localhost:8000 and not need the sidecar's bearer token in the
+# stay on localhost:8001 and not need the sidecar's bearer token in the
 # browser.
 # -----------------------------------------------------------------------------
 
@@ -1472,7 +1472,7 @@ def main() -> None:
     uvicorn.run(
         "server:app",
         host=os.getenv("HOST", "127.0.0.1"),
-        port=int(os.getenv("PORT", "8000")),
+        port=int(os.getenv("PORT", "8001")),
         reload=os.getenv("RELOAD", "1") == "1",
         log_config=build_uvicorn_log_config(),
     )

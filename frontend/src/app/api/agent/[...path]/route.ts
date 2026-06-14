@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
-// Proxy to the lead-generation AGENT server (separate process, default :8001),
-// distinct from the platform backend proxy (/api/proxy → :8000). Lets the
+// Proxy to the lead-generation AGENT server (separate process, default :8002),
+// distinct from the platform backend proxy (/api/proxy → :8001). Lets the
 // browser trigger hunts and poll job status without CORS or a hardcoded host.
-const AGENT_URL = process.env.AGENT_URL ?? "http://127.0.0.1:8001";
+const AGENT_URL = process.env.AGENT_URL ?? "http://127.0.0.1:8002";
 
 export const dynamic = "force-dynamic";
 

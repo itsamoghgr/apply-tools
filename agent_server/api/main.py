@@ -4,7 +4,7 @@ Run with:
     python -m agent_server.api.main
 
 Or via uvicorn directly:
-    uvicorn agent_server.api.app:app --host 0.0.0.0 --port 8001
+    uvicorn agent_server.api.app:app --host 0.0.0.0 --port 8002
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect, useRef, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import ApplicationsRow from "./ApplicationsRow";
 
@@ -158,11 +158,24 @@ export default function ApplicationsTable({
   // not just the loaded browse window.
   const [query, setQuery] = useState(serverQuery);
 
+  // The debounced navigation re-runs the (heavy) server render. Wrapping it
+  // in a transition keeps the *current* UI mounted and interactive while the
+  // new tree streams in — so the search input never loses focus and the page
+  // doesn't flash/reset on each keystroke. `isPending` drives a subtle
+  // searching indicator instead.
+  const [isPending, startTransition] = useTransition();
+
   // Keep the input in sync if the server query changes underneath us
-  // (e.g. back/forward navigation).
+  // (e.g. back/forward navigation). Guarded so we don't clobber what the user
+  // is actively typing: only adopt the server value when the input still
+  // reflects the previously-committed query (i.e. it's a real external nav).
+  const lastCommittedRef = useRef(serverQuery);
   useEffect(() => {
-    setQuery(serverQuery);
-  }, [serverQuery]);
+    if (query === lastCommittedRef.current) {
+      setQuery(serverQuery);
+    }
+    lastCommittedRef.current = serverQuery;
+  }, [serverQuery]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Push the debounced query into the URL. Searching server-side means we
   // navigate rather than filter in memory; status is preserved, and `all`
@@ -177,7 +190,11 @@ export default function ApplicationsTable({
       if (status !== "all") params.set("status", status);
       if (next) params.set("q", next);
       const qs = params.toString();
-      router.replace(qs ? `/applications?${qs}` : "/applications");
+      startTransition(() => {
+        router.replace(qs ? `/applications?${qs}` : "/applications", {
+          scroll: false,
+        });
+      });
     }, 300);
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -240,6 +257,12 @@ export default function ApplicationsTable({
           className="flex-1 bg-transparent border-0 outline-none focus:outline-none focus:ring-0 focus:border-0 shadow-none text-sm placeholder:opacity-40"
           id="applications-search"
         />
+        {isPending && (
+          <span
+            className="h-3.5 w-3.5 shrink-0 rounded-full border-2 border-base-content/20 border-t-primary animate-spin"
+            aria-hidden
+          />
+        )}
         {query && (
           <button
             onClick={() => setQuery("")}

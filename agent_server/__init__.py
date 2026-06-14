@@ -1,6 +1,6 @@
 """Lead-generation agent service.
 
-A standalone uvicorn process (port 8001) that discovers startups by reading the
+A standalone uvicorn process (port 8002) that discovers startups by reading the
 open web, researches funding + founder, verifies, and pushes clean verified leads
 to the platform backend. Stops after 50 verified leads.
 
