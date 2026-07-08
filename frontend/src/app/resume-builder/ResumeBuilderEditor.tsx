@@ -15,6 +15,7 @@ import {
   Gauge,
   Loader2,
   Eye,
+  EyeOff,
 } from "lucide-react";
 import {
   DndContext,
@@ -33,7 +34,7 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { saveResumeProfile, deleteResumeProfile } from "./actions";
+import { saveResumeProfile, deleteResumeProfile, setResumeProfileActive } from "./actions";
 import Modal from "./Modal";
 import BoldEditor from "./BoldEditor";
 import {
@@ -373,14 +374,18 @@ export default function ResumeBuilderEditor({
   id,
   initialName,
   initialProfile,
+  initialActive,
 }: {
   id: string;
   initialName: string;
   initialProfile: ResumeProfileData;
+  initialActive: boolean;
 }) {
   const [name, setName] = useState(initialName);
   const [profile, setProfile] = useState<ResumeProfileData>(initialProfile);
   const [dirty, setDirty] = useState(false);
+  const [active, setActive] = useState(initialActive);
+  const [togglingActive, startToggleActive] = useTransition();
   const [saving, startSave] = useTransition();
   const [exporting, setExporting] = useState(false);
   const [previewing, setPreviewing] = useState(false);
@@ -396,6 +401,7 @@ export default function ResumeBuilderEditor({
   // Stable client-side IDs for the reorderable entry lists (see useStableIds).
   const eduIds = useStableIds(profile.education.length);
   const expIds = useStableIds(profile.experience.length);
+  const skillIds = useStableIds(profile.skills.length);
   const projIds = useStableIds(profile.projects.length);
 
   // single mutator that flags dirty state
@@ -411,6 +417,23 @@ export default function ResumeBuilderEditor({
     update((p) => {
       p.header[key] = val;
       return p;
+    });
+  }
+
+  // Toggle whether this resume appears in the applications / reach-out / AI
+  // pickers. Optimistic: flip immediately, revert on failure.
+  function toggleActive() {
+    if (togglingActive) return;
+    const next = !active;
+    setActive(next);
+    startToggleActive(async () => {
+      const res = await setResumeProfileActive(id, next);
+      if (res.ok) {
+        toast.success(next ? "Active in pickers" : "Hidden from pickers");
+      } else {
+        setActive(!next);
+        toast.error(res.error);
+      }
     });
   }
 
@@ -559,6 +582,10 @@ export default function ResumeBuilderEditor({
     update((p) => ({ ...p, experience: arrayMove(p.experience, from, to) }));
     expIds.reorder(from, to);
   }
+  function moveSkill(from: number, to: number) {
+    update((p) => ({ ...p, skills: arrayMove(p.skills, from, to) }));
+    skillIds.reorder(from, to);
+  }
   function moveProject(from: number, to: number) {
     update((p) => ({ ...p, projects: arrayMove(p.projects, from, to) }));
     projIds.reorder(from, to);
@@ -614,6 +641,26 @@ export default function ResumeBuilderEditor({
             <Eye className="h-4 w-4" />
           )}
           Preview
+        </button>
+        <button
+          type="button"
+          onClick={toggleActive}
+          disabled={togglingActive}
+          title={
+            active
+              ? "This resume is selectable in the applications, reach-out, and AI pickers. Click to hide it."
+              : "This resume is hidden from the pickers. Click to make it selectable."
+          }
+          className={`btn btn-sm gap-1.5 ${active ? "btn-success btn-outline" : "btn-ghost"}`}
+        >
+          {togglingActive ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : active ? (
+            <Eye className="h-4 w-4" />
+          ) : (
+            <EyeOff className="h-4 w-4" />
+          )}
+          {active ? "Active" : "Inactive"}
         </button>
         <button
           type="button"
@@ -755,9 +802,15 @@ export default function ResumeBuilderEditor({
         }
       >
         {profile.skills.length === 0 && <Empty label="No skill categories yet." />}
-        <div className="space-y-3">
-          {profile.skills.map((s, i) => (
-            <div key={i} className="flex items-start gap-2">
+        <SortableList
+          id="dnd-skills"
+          items={profile.skills}
+          ids={skillIds.ids}
+          onMove={moveSkill}
+          className="space-y-3"
+          renderItem={(s, i) => (
+            <div className="flex items-center gap-2">
+              <DragHandle className="opacity-30 hover:opacity-70" label="Drag to reorder category" />
               <input
                 value={s.category}
                 onChange={(e) => editSkill(update, i, "category", e.target.value)}
@@ -774,8 +827,8 @@ export default function ResumeBuilderEditor({
                 <Trash2 className="h-3.5 w-3.5" />
               </button>
             </div>
-          ))}
-        </div>
+          )}
+        />
       </SectionCard>
 
       {/* Projects */}

@@ -17,6 +17,12 @@ model Resume {
   applications    Application[]
   jobApplications JobApplication[]
   reachOuts       ReachOut[]
+  // When set, this row is a synced companion of a resume-builder profile.
+  // The builder is the source of truth; saving the profile upserts this row,
+  // and deleting the profile cascades to remove it. Hand-written resumes leave
+  // this null. See resume-builder/actions.ts (syncCompanionResume).
+  resumeProfileId String?          @unique
+  resumeProfile   ResumeProfile?   @relation(fields: [resumeProfileId], references: [id], onDelete: Cascade)
 }
 
 model Application {
@@ -56,6 +62,12 @@ model JobApplication {
   referral          String?
   referralLinkedin  String?
   jobDescription    String?
+  // One editable cover letter per tracked job. `coverLetter` is the letter body
+  // (plain text, whitelisted \emph/\textbf kept for the PDF render). `coverLetterMeta`
+  // captures {roleTitle, hiringManager, resumeId} from generation so the on-demand
+  // PDF re-renders consistently. Both null until a letter is generated/saved.
+  coverLetter       String?
+  coverLetterMeta   Json?
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
   leads             JobApplicationLead[]
@@ -183,6 +195,9 @@ model ResumeProfile {
   projects   Json     @default("[]")
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
+  // Companion plaintext Resume synced from this profile so it can be selected
+  // in the applications / reach-out / AI pickers. Cascade-deletes with this row.
+  resume     Resume?
 
   @@index([updatedAt])
 }

@@ -115,7 +115,7 @@ VOICE_RULES = """# Voice reference - this is Amogh's actual cover letter for Fai
 
   I'm most excited about the Search or Retailer Products teams. I've worked with GenAI and retrieval systems, and I've built predictive models that drove real business decisions. I'm comfortable going end-to-end: defining the problem, pulling the data, building the model, and communicating the results to people who don't care about the technical details.
 
-  I'm finishing my MS in Data Science at GW this May. Happy to chat if there's a fit."
+  I recently earned my MS in Data Science at GW. Happy to chat if there's a fit."
 
 # Voice rules - non-negotiable
 
@@ -150,7 +150,7 @@ VOICE_RULES = """# Voice reference - this is Amogh's actual cover letter for Fai
 # Mode-specific system prompts.
 # -----------------------------------------------------------------------------
 
-COVER_LETTER_SYSTEM = f"""You are ghostwriting cover letters in the candidate's own voice. The candidate is Amogh Ramagiri, a Data Scientist finishing his MS at GW.
+COVER_LETTER_SYSTEM = f"""You are ghostwriting cover letters in the candidate's own voice. The candidate is Amogh Ramagiri, a Data Scientist with an MS in Data Science from GW.
 
 You will receive: his resume (ground truth about him), a company name, and a job description.
 
@@ -172,7 +172,7 @@ Output schema (all fields required):
 - The opening paragraph names the role and company and gives a one-sentence reason this matters.
 - The middle paragraph(s) cite 2-4 specific resume items mapped to JD priorities.
 - One paragraph shows you understand the company's specific problem space, not just the generic version of the role.
-- The closing paragraph is one or two sentences. Mention finishing the MS at GW this May if relevant. End with a short, casual line.
+- The closing paragraph is one or two sentences. Mention the MS in Data Science from GW if relevant. End with a short, casual line.
 
 # Output format rules for body_paragraphs
 
@@ -184,7 +184,7 @@ Output schema (all fields required):
 """
 
 
-APPLICATION_EMAIL_SYSTEM = f"""You are ghostwriting a job-application email in the candidate's own voice. The candidate is Amogh Ramagiri, a Data Scientist finishing his MS at GW.
+APPLICATION_EMAIL_SYSTEM = f"""You are ghostwriting a job-application email in the candidate's own voice. The candidate is Amogh Ramagiri, a Data Scientist with an MS in Data Science from GW.
 
 You will receive: his resume (ground truth about him), a company name, a job description, and an optional intent note describing what kind of email this should be (e.g. asking for consideration, asking for a referral, asking to be passed to a hiring manager).
 
@@ -214,7 +214,7 @@ Output schema (all fields required):
 """
 
 
-OUTREACH_INVITATION_SYSTEM = f"""You are ghostwriting a LinkedIn connection request note in the candidate's own voice. The candidate is Amogh Ramagiri, a Data Scientist finishing his MS at GW.
+OUTREACH_INVITATION_SYSTEM = f"""You are ghostwriting a LinkedIn connection request note in the candidate's own voice. The candidate is Amogh Ramagiri, a Data Scientist with an MS in Data Science from GW.
 
 You will receive: his resume (ground truth about him), the target person's LinkedIn profile (pasted text), and an optional context note describing the angle ("looking for referral at their company", "wanted to chat about their work in X", etc.).
 
@@ -234,7 +234,7 @@ Output schema (all fields required):
 ## Structure (in this order)
 
 1. **Greeting** — "Hi {{first name}}," using their actual first name from the profile. If the profile has no first name, use "Hi,".
-2. **Who Amogh is** — one short clause introducing him: role + program. e.g. "I'm a Data Scientist finishing my MS at GW" or "DS student at GW wrapping up my MS in May".
+2. **Who Amogh is** — one short clause introducing him: role + program. e.g. "I'm a Data Scientist with an MS from GW" or "I'm a Data Scientist, recently finished my MS in DS at GW".
 3. **Specific anchor** — name ONE concrete thing from their profile: a current role, a company, a project, a domain they work in. Not vague adjectives.
 4. **Soft ask** — short, specific. "Would love to connect to hear how you got into <X>." / "Open to chatting about <Y> if you have a moment." Use the context note to pick the angle when one is given.
 
@@ -243,7 +243,7 @@ Output schema (all fields required):
 - HARD MAXIMUM: 295 characters. If you're at or above 300, you've failed.
 - Target 260-290 characters — don't leave 50+ characters on the table; use them to make the message specific.
 - DO include the greeting. DO NOT include a signoff like "Thanks, Amogh" — connection requests show the sender's name automatically and a signoff wastes the budget.
-- Lead with THEIR work, not Amogh's accomplishments. The intro of Amogh is a one-clause identifier ("I'm a DS finishing my MS at GW"), not a brag. No metrics, no "reduced X by Y%". Save numbers for follow-up messages.
+- Lead with THEIR work, not Amogh's accomplishments. The intro of Amogh is a one-clause identifier ("I'm a DS with an MS from GW"), not a brag. No metrics, no "reduced X by Y%". Save numbers for follow-up messages.
 - Banned filler words: "interesting", "impressive", "complex", "fascinating", "amazing", "great work". They add no information and burn characters.
 - Anchor must be SPECIFIC: name the company, the team, the product, the topic. "your work in revenue management at Holland America Line" is acceptable; "your work in revenue management" alone is weaker; "your interesting work" is forbidden.
 - One thought per sentence. Three sentences max after the greeting.
@@ -251,11 +251,11 @@ Output schema (all fields required):
 
 ## Example shape (for structure only — do not copy phrasing)
 
-"Hi Abbie, I'm a Data Scientist finishing my MS at GW. Saw you're leading revenue management at Holland America Line — I've been working on forecasting and pricing problems and would love to hear how you got into RM."
+"Hi Abbie, I'm a Data Scientist with an MS from GW. Saw you're leading revenue management at Holland America Line — I've been working on forecasting and pricing problems and would love to hear how you got into RM."
 """
 
 
-OUTREACH_LINKEDIN_MESSAGE_SYSTEM = f"""You are ghostwriting a LinkedIn message (DM or InMail) in the candidate's own voice. The candidate is Amogh Ramagiri, a Data Scientist finishing his MS at GW.
+OUTREACH_LINKEDIN_MESSAGE_SYSTEM = f"""You are ghostwriting a LinkedIn message (DM or InMail) in the candidate's own voice. The candidate is Amogh Ramagiri, a Data Scientist with an MS in Data Science from GW.
 
 You will receive: his resume (ground truth about him), the target person's LinkedIn profile (pasted text), and an optional context note describing the angle ("looking for referral at their company", "want to chat about their work", etc.).
 
@@ -280,7 +280,7 @@ Output schema (all fields required):
 """
 
 
-OUTREACH_EMAIL_SYSTEM = f"""You are ghostwriting an outreach email to a specific person, in the candidate's own voice. The candidate is Amogh Ramagiri, a Data Scientist finishing his MS at GW.
+OUTREACH_EMAIL_SYSTEM = f"""You are ghostwriting an outreach email to a specific person, in the candidate's own voice. The candidate is Amogh Ramagiri, a Data Scientist with an MS in Data Science from GW.
 
 You will receive: his resume (ground truth about him), the target person's LinkedIn profile (pasted text), and an optional context note describing the angle.
 
@@ -306,7 +306,7 @@ Output schema (all fields required):
 """
 
 
-ANSWER_QUESTION_SYSTEM = f"""You are answering an application question in the candidate's own voice. The candidate is Amogh Ramagiri, a Data Scientist finishing his MS at GW.
+ANSWER_QUESTION_SYSTEM = f"""You are answering an application question in the candidate's own voice. The candidate is Amogh Ramagiri, a Data Scientist with an MS in Data Science from GW.
 
 You will receive: his resume (ground truth about him), the company name, the job description, and the application question to answer.
 
@@ -334,7 +334,7 @@ Output schema (all fields required):
 """
 
 
-SCORE_SYSTEM = """You are evaluating fit between Amogh Ramagiri's resume and a job description. He's a Data Scientist finishing his MS in Data Science at GW (May 2026), with prior roles at Fulton Bank, Factocart, NCUE, and Wodo. The resume provided is ground truth - do not assume anything not in it.
+SCORE_SYSTEM = """You are evaluating fit between Amogh Ramagiri's resume and a job description. He's a Data Scientist with an MS in Data Science from GW, with prior roles at Fulton Bank, Factocart, NCUE, and Wodo. The resume provided is ground truth - do not assume anything not in it.
 
 Your job is to (1) extract the JD's actual requirements as a rubric, (2) grade the resume against each requirement with evidence, (3) produce a one-line summary. The numeric score is computed automatically from your rubric grades - DO NOT output a score yourself.
 
@@ -1075,6 +1075,35 @@ def generate_cover_letter_text(
         output=json.dumps(out),
     )
     return out
+
+
+def render_cover_letter_pdf(
+    company: str,
+    role_title: str,
+    hiring_manager: str,
+    body: str,
+) -> bytes:
+    """Render a cover-letter PDF from already-generated (and possibly user-edited)
+    text — no LLM call, no audit-log write.
+
+    Powers the "edit the letter, then download a matching PDF" flow: the body may
+    be plain text with the whitelisted \\emph{}/\\textbf{}/\\\\ markup. Everything
+    else LaTeX-special is escaped so a stray character can't break tectonic.
+    """
+    if not company or not company.strip():
+        raise ValueError("company must not be empty")
+    if not body or not body.strip():
+        raise ValueError("cover letter body must not be empty")
+
+    template = TEMPLATE_PATH.read_text(encoding="utf-8")
+    substitutions = {
+        "COMPANY_NAME": escape_latex(company.strip()),
+        "ROLE_TITLE": escape_latex((role_title or "").strip()),
+        "HIRING_MANAGER_OR_TEAM": escape_latex((hiring_manager or "Hiring Team").strip()),
+        "BODY_PARAGRAPHS": _sanitize_cover_body(body.strip()),
+    }
+    tex_source = _substitute(template, substitutions)
+    return compile_latex(tex_source, jobname="cover_letter")
 
 
 def generate_application_email(

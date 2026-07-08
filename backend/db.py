@@ -205,7 +205,13 @@ JOB_APP_COLUMNS = (
     "referral",
     "referralLinkedin",
     "jobDescription",
+    "coverLetter",
 )
+
+# JSONB columns on JobApplication — written with an explicit ::jsonb cast and
+# json.dumps'd, so a Python dict round-trips correctly. Kept separate from the
+# plain-text JOB_APP_COLUMNS above.
+JOB_APP_JSON_COLUMNS = ("coverLetterMeta",)
 
 
 def insert_job_application(fields: dict) -> str:
@@ -229,9 +235,17 @@ def insert_job_application(fields: dict) -> str:
                 v = None
         cleaned[col] = v
 
+    # JSONB columns: serialize dicts; the value gets an explicit ::jsonb cast.
+    json_cols = [c for c in JOB_APP_JSON_COLUMNS if c in fields]
+    for col in json_cols:
+        v = fields[col]
+        cleaned[col] = None if v is None else json.dumps(v)
+
     cols = list(cleaned.keys())
     col_sql = ", ".join(f'"{c}"' for c in cols)
-    bind_sql = ", ".join(f":{c}" for c in cols)
+    bind_sql = ", ".join(
+        f"CAST(:{c} AS jsonb)" if c in json_cols else f":{c}" for c in cols
+    )
 
     with get_conn() as conn:
         conn.execute(
@@ -259,11 +273,21 @@ def update_job_application(app_id: str, fields: dict) -> bool:
             if v == "":
                 v = None
         updates[col] = v
+
+    # JSONB columns: serialize dicts and cast in the SET clause below.
+    json_cols = [c for c in JOB_APP_JSON_COLUMNS if c in fields]
+    for col in json_cols:
+        v = fields[col]
+        updates[col] = None if v is None else json.dumps(v)
+
     if not updates:
         return False
 
+    def _assign(c: str) -> str:
+        return f'"{c}" = CAST(:{c} AS jsonb)' if c in json_cols else f'"{c}" = :{c}'
+
     set_sql = (
-        ", ".join(f'"{c}" = :{c}' for c in updates)
+        ", ".join(_assign(c) for c in updates)
         + ', "updatedAt" = CURRENT_TIMESTAMP'
     )
     params = dict(updates, _id=app_id)

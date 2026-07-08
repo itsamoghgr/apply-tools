@@ -54,6 +54,7 @@ from generate import (
     generate_application_email,
     generate_cover_letter,
     generate_cover_letter_text,
+    render_cover_letter_pdf,
     generate_outreach_message,
     list_resumes,
     score_jd_fit,
@@ -106,6 +107,14 @@ class GenerateRequest(BaseModel):
     company: str = Field(..., min_length=1, max_length=200)
     job_description: str = Field(..., min_length=1, max_length=20000)
     resume_id: str | None = RESUME_ID_FIELD
+
+
+class CoverLetterPdfRequest(BaseModel):
+    # Render a PDF from already-generated (and possibly edited) letter text.
+    company: str = Field(..., min_length=1, max_length=200)
+    role_title: str = Field(default="", max_length=300)
+    hiring_manager: str = Field(default="", max_length=200)
+    body: str = Field(..., min_length=1, max_length=20000)
 
 
 class EmailRequest(BaseModel):
@@ -219,6 +228,13 @@ ALLOWED_INTERVIEW_STATUSES = (
 )
 
 
+class CoverLetterMeta(BaseModel):
+    # Captured at generation so the on-demand PDF render matches the saved letter.
+    roleTitle: str | None = Field(default=None, max_length=300)
+    hiringManager: str | None = Field(default=None, max_length=200)
+    resumeId: str | None = RESUME_ID_FIELD
+
+
 class TrackCreateRequest(BaseModel):
     companyName: str = Field(..., min_length=1, max_length=200)
     jobRole: str | None = Field(default=None, max_length=200)
@@ -238,6 +254,8 @@ class TrackCreateRequest(BaseModel):
     referral: str | None = Field(default=None, max_length=200)
     referralLinkedin: str | None = Field(default=None, max_length=2000)
     jobDescription: str | None = Field(default=None, max_length=40000)
+    coverLetter: str | None = Field(default=None, max_length=20000)
+    coverLetterMeta: CoverLetterMeta | None = None
 
 
 class TrackPatchRequest(BaseModel):
@@ -259,6 +277,8 @@ class TrackPatchRequest(BaseModel):
     referral: str | None = Field(default=None, max_length=200)
     referralLinkedin: str | None = Field(default=None, max_length=2000)
     jobDescription: str | None = Field(default=None, max_length=40000)
+    coverLetter: str | None = Field(default=None, max_length=20000)
+    coverLetterMeta: CoverLetterMeta | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -360,6 +380,25 @@ def cover_text(req: GenerateRequest) -> dict[str, str]:
         )
     except Exception as e:
         raise _to_http_error(e)
+
+
+@app.post("/cover-letter/pdf")
+def cover_letter_pdf(req: CoverLetterPdfRequest) -> Response:
+    # Render a PDF from edited letter text (no LLM, no audit-log row) so the
+    # web-app "Download PDF" always matches the currently-saved letter body.
+    try:
+        pdf_bytes = render_cover_letter_pdf(
+            req.company, req.role_title, req.hiring_manager, req.body
+        )
+    except Exception as e:
+        raise _to_http_error(e)
+
+    filename = f"CoverLetter_{_safe_filename_part(req.company)}.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/email")
