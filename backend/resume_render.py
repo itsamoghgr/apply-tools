@@ -137,6 +137,38 @@ def _g(d: dict[str, Any], key: str, default: str = "") -> str:
     return v.strip() if isinstance(v, str) else default
 
 
+_MONTHS = (
+    "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+
+
+def _endpoint(month: Any, year: Any) -> str:
+    mm = _MONTHS[month] if isinstance(month, int) and 1 <= month <= 12 else ""
+    yy = str(year) if isinstance(year, int) and year else ""
+    return " ".join(p for p in (mm, yy) if p)
+
+
+def _date_range(entry: dict[str, Any]) -> str:
+    """The display date string for an education/experience entry, derived from
+    structured start/end fields (mirrors frontend formatDateRange). Falls back to
+    a literal ``dates`` string when structured fields are absent — e.g. an AI
+    draft that emitted free-text — so those still render.
+    """
+    has_structured = any(
+        k in entry for k in ("startMonth", "startYear", "endYear", "isPresent")
+    )
+    if not has_structured:
+        return _g(entry, "dates")
+    start = _endpoint(entry.get("startMonth"), entry.get("startYear"))
+    end = "Present" if entry.get("isPresent") else _endpoint(
+        entry.get("endMonth"), entry.get("endYear")
+    )
+    if start and end:
+        return f"{start} – {end}"
+    return start or end or ""
+
+
 def _href_url(url: str) -> str:
     """Normalise a user-entered URL into a value safe for ``\\href{...}``.
 
@@ -183,22 +215,37 @@ def _contact_line(header: dict[str, Any]) -> str:
     return " $|$ \n    ".join(parts)
 
 
+# Section emitters. IMPORTANT: each block is self-contained and must NOT carry
+# leading or trailing inter-SECTION spacing — the gap above a section is owned
+# entirely by \sectionsep, inserted by render_resume_tex between blocks. Any
+# \vspace inside a block is strictly INTERNAL layout (between entries/bullets),
+# not a gap to the neighbouring section. This is what makes reordering safe.
+def _summary_section(summary: Any) -> str:
+    text = summary.strip() if isinstance(summary, str) else ""
+    if not text:
+        return ""
+    return (
+        "%-----------SUMMARY-----------\n"
+        "\\section{SUMMARY}\n"
+        f"{sanitize_inline(text)}\n"
+    )
+
+
 def _education_section(education: list[dict[str, Any]]) -> str:
     rows = [e for e in education if _g(e, "school")]
     if not rows:
         return ""
-    out = ["\n%-----------EDUCATION-----------", "\\section{EDUCATION}"]
+    out = ["%-----------EDUCATION-----------", "\\section{EDUCATION}"]
     for e in rows:
         out.append("  \\resumeSubHeadingListStart")
         out.append("    \\resumeSubheading")
         out.append(
-            f"      {{{escape_latex(_g(e, 'school'))}}}{{{escape_latex(_g(e, 'dates'))}}}"
+            f"      {{{escape_latex(_g(e, 'school'))}}}{{{escape_latex(_date_range(e))}}}"
         )
         out.append(
             f"      {{{escape_latex(_g(e, 'degree'))}}}{{{escape_latex(_g(e, 'location'))}}}"
         )
         out.append("  \\resumeSubHeadingListEnd")
-    out.append("\\vspace{-5pt}")
     return "\n".join(out) + "\n"
 
 
@@ -207,14 +254,14 @@ def _experience_section(experience: list[dict[str, Any]]) -> str:
     if not rows:
         return ""
     out = [
-        "\n%-----------PROFESSIONAL EXPERIENCE-----------",
+        "%-----------PROFESSIONAL EXPERIENCE-----------",
         "\\section{PROFESSIONAL EXPERIENCE}",
         "  \\resumeSubHeadingListStart",
     ]
     for x in rows:
         out.append("  \\resumeSubheading")
         out.append(
-            f"      {{{escape_latex(_g(x, 'company'))}}}{{{escape_latex(_g(x, 'dates'))}}}"
+            f"      {{{escape_latex(_g(x, 'company'))}}}{{{escape_latex(_date_range(x))}}}"
         )
         out.append(
             f"      {{{escape_latex(_g(x, 'title'))}}}{{{escape_latex(_g(x, 'location'))}}}"
@@ -227,7 +274,6 @@ def _experience_section(experience: list[dict[str, Any]]) -> str:
             out.append("      \\resumeItemListEnd")
         out.append("\\vspace{1pt}")
     out.append("  \\resumeSubHeadingListEnd")
-    out.append("\\vspace{-5pt}")
     return "\n".join(out) + "\n"
 
 
@@ -236,7 +282,7 @@ def _skills_section(skills: list[dict[str, Any]]) -> str:
     if not rows:
         return ""
     out = [
-        "\n%-----------TECHNICAL SKILLS-----------",
+        "%-----------TECHNICAL SKILLS-----------",
         "\\section{TECHNICAL SKILLS}",
         " \\begin{itemize}[leftmargin=0.15in, label={}]",
         "    \\small{\\item{",
@@ -248,7 +294,6 @@ def _skills_section(skills: list[dict[str, Any]]) -> str:
         out.append("     \\vspace{1pt}")
     out.append("    }}")
     out.append(" \\end{itemize}")
-    out.append(" \\vspace{-12pt}")
     return "\n".join(out) + "\n"
 
 
@@ -257,12 +302,11 @@ def _projects_section(projects: list[dict[str, Any]]) -> str:
     if not rows:
         return ""
     out = [
-        "\n%-----------PROJECTS-----------",
+        "%-----------PROJECTS-----------",
         "\\section{PROJECTS}",
-        "    \\vspace{-5pt}",
         "    \\resumeSubHeadingListStart",
     ]
-    for p in rows:
+    for idx, p in enumerate(rows):
         name = sanitize_inline(_g(p, "name"))
         date = escape_latex(_g(p, "date"))
         out.append("      \\resumeProjectHeading")
@@ -273,22 +317,81 @@ def _projects_section(projects: list[dict[str, Any]]) -> str:
             for b in bullets:
                 out.append(f"            \\resumeItem{{{sanitize_inline(b.strip())}}}")
             out.append("          \\resumeItemListEnd")
-        out.append("          \\vspace{-10pt}")
+        # -10pt tightens the gap BETWEEN entries only. Emitting it after the LAST
+        # entry leaks past the section and tightens whatever section follows,
+        # breaking uniform inter-section spacing — so skip it on the final entry.
+        if idx < len(rows) - 1:
+            out.append("          \\vspace{-10pt}")
     out.append("    \\resumeSubHeadingListEnd")
     return "\n".join(out) + "\n"
+
+
+# Default section order (all visible) when a profile has no stored sectionOrder,
+# mirroring the frontend defaultSectionOrder(). Header renders separately, above.
+_DEFAULT_SECTION_ORDER = ("summary", "education", "experience", "skills", "projects")
+
+
+def _section_order(profile: dict[str, Any]) -> list[tuple[str, bool]]:
+    """[(key, visible), ...] from the profile, defaulting to the full order (all
+    visible) when none is stored. Unknown keys ignored; missing known sections
+    appended visible so a section is never silently dropped."""
+    raw = profile.get("sectionOrder")
+    out: list[tuple[str, bool]] = []
+    seen: set[str] = set()
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, dict):
+                key = item.get("key")
+                if key in _DEFAULT_SECTION_ORDER and key not in seen:
+                    out.append((key, item.get("visible") is not False))
+                    seen.add(key)
+    for key in _DEFAULT_SECTION_ORDER:
+        if key not in seen:
+            out.append((key, True))
+    return out
+
+
+# Per-key LaTeX emitters. Each takes the whole profile and returns "" when empty.
+_SECTION_RENDERERS = {
+    "summary": lambda p: _summary_section(p.get("summary")),
+    "education": lambda p: _education_section(p.get("education") or []),
+    "experience": lambda p: _experience_section(p.get("experience") or []),
+    "skills": lambda p: _skills_section(p.get("skills") or []),
+    "projects": lambda p: _projects_section(p.get("projects") or []),
+}
 
 
 def render_resume_tex(profile: dict[str, Any]) -> str:
     """Render structured `profile` data into a complete .tex source string."""
     template = RESUME_TEMPLATE_PATH.read_text(encoding="utf-8")
     header = profile.get("header") or {}
+
+    # Build the body from the profile's ordered, visibility-aware section list.
+    # Each rendered block is followed by \sectionend (defined in the template),
+    # which normalizes the trailing vertical position — cancelling whatever
+    # negative \vspace the section left (\resumeItemListEnd's -5pt, projects'
+    # -10pt, etc.) and adding ONE fixed gap. That makes the gap above every
+    # section EQUAL regardless of section type or order. The last section's
+    # trailing gap is harmless (page has \raggedbottom).
+    parts: list[str] = []
+    for key, visible in _section_order(profile):
+        if not visible:
+            continue
+        render = _SECTION_RENDERERS.get(key)
+        if render:
+            block = render(profile)
+            if block:
+                # \sectionsep BEFORE each block (including the first) so the gap
+                # above every section — including the first after the header — is
+                # the same. \sectionsep uses \addvspace, which merges rather than
+                # stacks, so a preceding section's residual glue can't double it.
+                parts.append("\\sectionsep\n" + block.rstrip() + "\n")
+    sections = "".join(parts)
+
     substitutions = {
         "FULL_NAME": escape_latex(_g(header, "fullName") or "Your Name"),
         "CONTACT_LINE": _contact_line(header),
-        "EDUCATION_SECTION": _education_section(profile.get("education") or []),
-        "EXPERIENCE_SECTION": _experience_section(profile.get("experience") or []),
-        "SKILLS_SECTION": _skills_section(profile.get("skills") or []),
-        "PROJECTS_SECTION": _projects_section(profile.get("projects") or []),
+        "SECTIONS": sections,
     }
     out = template
     for key, value in substitutions.items():

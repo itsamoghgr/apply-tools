@@ -180,24 +180,30 @@ model Setting {
 // Structured resume authored in the Resume Builder. Sections are stored as
 // JSON so the builder can evolve fields without a migration each time; the
 // backend (resume_render.py) renders this shape to the sb2nov LaTeX template.
-//   header     -> { fullName, phone, email, linkedin, github, portfolio, scholar, location }
-//   education  -> [{ school, dates, degree, location }]
-//   experience -> [{ company, dates, title, location, bullets: string[] }]
-//   skills     -> [{ category, items }]
-//   projects   -> [{ name, date, bullets: string[] }]
+//   header      -> { fullName, phone, email, linkedin, github, portfolio, scholar, location }
+//   summary     -> "" (a short professional-summary paragraph)
+//   education   -> [{ school, dates, degree, location }]
+//   experience  -> [{ company, dates, title, location, bullets: string[] }]
+//   skills      -> [{ category, items }]
+//   projects    -> [{ name, date, bullets: string[] }]
+//   sectionOrder-> [{ key, visible }]  ordered list controlling which sections
+//                  render and in what order. Empty/absent = the default order,
+//                  all visible (so pre-existing resumes render unchanged).
 model ResumeProfile {
-  id         String   @id
-  name       String
-  header     Json     @default("{}")
-  education  Json     @default("[]")
-  experience Json     @default("[]")
-  skills     Json     @default("[]")
-  projects   Json     @default("[]")
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id          String   @id
+  name        String
+  header      Json     @default("{}")
+  summary     Json     @default("\"\"")
+  education   Json     @default("[]")
+  experience  Json     @default("[]")
+  skills      Json     @default("[]")
+  projects    Json     @default("[]")
+  sectionOrder Json    @default("[]")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
   // Companion plaintext Resume synced from this profile so it can be selected
   // in the applications / reach-out / AI pickers. Cascade-deletes with this row.
-  resume     Resume?
+  resume      Resume?
 
   @@index([updatedAt])
 }

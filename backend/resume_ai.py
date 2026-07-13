@@ -237,19 +237,143 @@ def _plain(s: Any) -> str:
     return s.replace("**", "").replace("*", "").strip()
 
 
+_MONTHS = (
+    "", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+
+
+def _date_range(entry: dict[str, Any]) -> str:
+    """Display date string from structured start/end fields, mirroring the
+    frontend formatDateRange (and resume_render._date_range). Falls back to a
+    literal ``dates`` string when structured fields are absent (e.g. AI draft)."""
+    def endpoint(month: Any, year: Any) -> str:
+        mm = _MONTHS[month] if isinstance(month, int) and 1 <= month <= 12 else ""
+        yy = str(year) if isinstance(year, int) and year else ""
+        return " ".join(p for p in (mm, yy) if p)
+
+    if not any(k in entry for k in ("startMonth", "startYear", "endYear", "isPresent")):
+        return _plain(entry.get("dates"))
+    start = endpoint(entry.get("startMonth"), entry.get("startYear"))
+    end = "Present" if entry.get("isPresent") else endpoint(
+        entry.get("endMonth"), entry.get("endYear")
+    )
+    if start and end:
+        return f"{start} – {end}"
+    return start or end or ""
+
+
+# Default section order (all visible) when a profile has no stored sectionOrder.
+# Mirrors defaultSectionOrder() in frontend types.ts.
+_DEFAULT_SECTION_ORDER = ("summary", "education", "experience", "skills", "projects")
+
+
+def _section_order(profile: dict[str, Any]) -> list[tuple[str, bool]]:
+    """Return [(key, visible), ...] from the profile, falling back to the default
+    order (all visible) when none is stored. Unknown keys are ignored and any
+    missing known section is appended visible, so text output never silently
+    drops a section."""
+    raw = profile.get("sectionOrder")
+    out: list[tuple[str, bool]] = []
+    seen: set[str] = set()
+    if isinstance(raw, list):
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            key = item.get("key")
+            if key in _DEFAULT_SECTION_ORDER and key not in seen:
+                out.append((key, item.get("visible") is not False))
+                seen.add(key)
+    for key in _DEFAULT_SECTION_ORDER:
+        if key not in seen:
+            out.append((key, True))
+    return out
+
+
+def _summary_text(p: dict[str, Any]) -> str:
+    s = _plain(p.get("summary"))
+    return f"\nSUMMARY\n{s}" if s else ""
+
+
+def _education_text(p: dict[str, Any]) -> str:
+    rows = [e for e in (p.get("education") or []) if _plain(e.get("school"))]
+    if not rows:
+        return ""
+    lines = ["\nEDUCATION"]
+    for e in rows:
+        head = ", ".join(v for v in (_plain(e.get("degree")), _plain(e.get("school"))) if v)
+        tail = " | ".join(v for v in (_plain(e.get("location")), _date_range(e)) if v)
+        lines.append(f"- {head}{(' (' + tail + ')') if tail else ''}")
+    return "\n".join(lines)
+
+
+def _experience_text(p: dict[str, Any]) -> str:
+    rows = [x for x in (p.get("experience") or []) if _plain(x.get("company"))]
+    if not rows:
+        return ""
+    lines = ["\nPROFESSIONAL EXPERIENCE"]
+    for x in rows:
+        head = " — ".join(v for v in (_plain(x.get("title")), _plain(x.get("company"))) if v)
+        tail = " | ".join(v for v in (_plain(x.get("location")), _date_range(x)) if v)
+        lines.append(f"\n{head}{(' (' + tail + ')') if tail else ''}")
+        for b in x.get("bullets") or []:
+            bt = _plain(b)
+            if bt:
+                lines.append(f"  - {bt}")
+    return "\n".join(lines)
+
+
+def _skills_text(p: dict[str, Any]) -> str:
+    rows = [s for s in (p.get("skills") or []) if _plain(s.get("items"))]
+    if not rows:
+        return ""
+    lines = ["\nTECHNICAL SKILLS"]
+    for s in rows:
+        cat = _plain(s.get("category"))
+        items = _plain(s.get("items"))
+        lines.append(f"- {cat + ': ' if cat else ''}{items}")
+    return "\n".join(lines)
+
+
+def _projects_text(p: dict[str, Any]) -> str:
+    rows = [pr for pr in (p.get("projects") or []) if _plain(pr.get("name"))]
+    if not rows:
+        return ""
+    lines = ["\nPROJECTS"]
+    for pr in rows:
+        nm = _plain(pr.get("name"))
+        dt = _plain(pr.get("date"))
+        lines.append(f"\n{nm}{(' (' + dt + ')') if dt else ''}")
+        for b in pr.get("bullets") or []:
+            bt = _plain(b)
+            if bt:
+                lines.append(f"  - {bt}")
+    return "\n".join(lines)
+
+
+_SECTION_TEXT = {
+    "summary": _summary_text,
+    "education": _education_text,
+    "experience": _experience_text,
+    "skills": _skills_text,
+    "projects": _projects_text,
+}
+
+
 def profile_to_text(profile: dict[str, Any]) -> str:
     """Render an in-memory builder profile to a clean plain-text resume.
 
     Used to score the resume the user is *currently editing* (which may be
     unsaved) against a job description, reusing the same scorer the rest of the
     app uses. Markdown bold/italic markers are stripped so the model reads prose.
+    Sections are emitted in the profile's `sectionOrder`, skipping hidden ones —
+    kept in lockstep with frontend renderText.ts profileToText.
     """
     p = profile or {}
     lines: list[str] = []
 
     header = p.get("header") or {}
-    name = _plain(header.get("fullName")) or "Resume"
-    lines.append(name)
+    lines.append(_plain(header.get("fullName")) or "Resume")
     contact = " | ".join(
         v for v in (
             _plain(header.get("location")),
@@ -263,53 +387,14 @@ def profile_to_text(profile: dict[str, Any]) -> str:
     if contact:
         lines.append(contact)
 
-    education = [e for e in (p.get("education") or []) if _plain(e.get("school"))]
-    if education:
-        lines.append("\nEDUCATION")
-        for e in education:
-            degree = _plain(e.get("degree"))
-            school = _plain(e.get("school"))
-            dates = _plain(e.get("dates"))
-            loc = _plain(e.get("location"))
-            head = ", ".join(v for v in (degree, school) if v)
-            tail = " | ".join(v for v in (loc, dates) if v)
-            lines.append(f"- {head}{(' (' + tail + ')') if tail else ''}")
-
-    experience = [x for x in (p.get("experience") or []) if _plain(x.get("company"))]
-    if experience:
-        lines.append("\nPROFESSIONAL EXPERIENCE")
-        for x in experience:
-            title = _plain(x.get("title"))
-            company = _plain(x.get("company"))
-            dates = _plain(x.get("dates"))
-            loc = _plain(x.get("location"))
-            head = " — ".join(v for v in (title, company) if v)
-            tail = " | ".join(v for v in (loc, dates) if v)
-            lines.append(f"\n{head}{(' (' + tail + ')') if tail else ''}")
-            for b in x.get("bullets") or []:
-                bt = _plain(b)
-                if bt:
-                    lines.append(f"  - {bt}")
-
-    skills = [s for s in (p.get("skills") or []) if _plain(s.get("items"))]
-    if skills:
-        lines.append("\nTECHNICAL SKILLS")
-        for s in skills:
-            cat = _plain(s.get("category"))
-            items = _plain(s.get("items"))
-            lines.append(f"- {cat + ': ' if cat else ''}{items}")
-
-    projects = [pr for pr in (p.get("projects") or []) if _plain(pr.get("name"))]
-    if projects:
-        lines.append("\nPROJECTS")
-        for pr in projects:
-            nm = _plain(pr.get("name"))
-            dt = _plain(pr.get("date"))
-            lines.append(f"\n{nm}{(' (' + dt + ')') if dt else ''}")
-            for b in pr.get("bullets") or []:
-                bt = _plain(b)
-                if bt:
-                    lines.append(f"  - {bt}")
+    for key, visible in _section_order(p):
+        if not visible:
+            continue
+        emit = _SECTION_TEXT.get(key)
+        if emit:
+            block = emit(p)
+            if block:
+                lines.append(block)
 
     return "\n".join(lines).strip()
 

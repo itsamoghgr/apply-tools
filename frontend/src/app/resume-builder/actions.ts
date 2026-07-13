@@ -60,10 +60,12 @@ export async function setResumeProfileActive(
       if (!rp) return { ok: false, error: "Resume not found." };
       const p = normalizeProfile({
         header: rp.header,
+        summary: rp.summary,
         education: rp.education,
         experience: rp.experience,
         skills: rp.skills,
         projects: rp.projects,
+        sectionOrder: rp.sectionOrder,
       });
       const label = rp.name.trim() || "Untitled resume";
       await prisma.resume.create({
@@ -102,10 +104,12 @@ export async function createResumeProfile(
       // normalizeProfile guarantees a well-formed copy even from legacy rows.
       sections = normalizeProfile({
         header: src.header,
+        summary: src.summary,
         education: src.education,
         experience: src.experience,
         skills: src.skills,
         projects: src.projects,
+        sectionOrder: src.sectionOrder,
       });
     }
   }
@@ -135,10 +139,12 @@ export async function saveResumeProfile(
       data: {
         name: name.trim() || "Untitled resume",
         header: p.header,
+        summary: p.summary,
         education: p.education,
         experience: p.experience,
         skills: p.skills,
         projects: p.projects,
+        sectionOrder: p.sectionOrder,
       },
     });
     await syncCompanionResume(id, name, p);

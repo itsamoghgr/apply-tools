@@ -21,10 +21,12 @@ export default async function EditResumeProfilePage({
 
   const profile = normalizeProfile({
     header: row.header,
+    summary: row.summary,
     education: row.education,
     experience: row.experience,
     skills: row.skills,
     projects: row.projects,
+    sectionOrder: row.sectionOrder,
   });
 
   // Whether this resume shows in the applications / reach-out / AI pickers.
