@@ -4,8 +4,8 @@ A standalone service that discovers startups by reading the open web, researches
 each one's funding and founder, verifies the data, and pushes only clean verified
 leads to the platform backend. It stops after 50 verified leads.
 
-This is a **separate FastAPI app** (`agent_server/`, uvicorn on **port 8001**),
-independent of the existing platform backend (`backend/`, ~port 8000). They talk
+This is a **separate FastAPI app** (`agent_server/`, uvicorn on **port 8002**),
+independent of the existing platform backend (`backend/`, ~port 8001). They talk
 over HTTP only.
 
 > The authoritative interface spec is **`agent_server/CONTRACTS.md`**. This guide
@@ -18,7 +18,7 @@ over HTTP only.
 
 ```
                           ┌─────────────────────────────────────────────┐
-  POST /api/v1/hunt ─202─▶ │ AGENT SERVER (agent_server/, uvicorn :8001) │
+  POST /api/v1/hunt ─202─▶ │ AGENT SERVER (agent_server/, uvicorn :8002) │
   GET  /api/v1/hunt/{id} ─▶ │                                            │
                           │  api/app.py ── BackgroundTasks ──┐           │
                           └──────────────────────────────────┼──────────┘
@@ -32,7 +32,7 @@ over HTTP only.
         ┌───────────────────┘                                          │ HTTP upsert
         ▼ operational                                                  ▼
   ┌──────────────┐                                          ┌────────────────────────┐
-  │ apply_agent  │  jobs, checkpoints, seen_cache,          │ PLATFORM (backend/:8000)│
+  │ apply_agent  │  jobs, checkpoints, seen_cache,          │ PLATFORM (backend/:8001)│
   │ (Postgres)   │  outbox, audit_traces                    │  POST /leads/exists      │
   └──────────────┘  NEVER a copy of clean leads             │  POST /leads/upsert      │
                                                             │  → apply_tools (truth)   │
@@ -182,7 +182,7 @@ Optional shared secret via `X-Agent-Token` (`PLATFORM_API_TOKEN`); unset = open
 ### Prereqs
 - Postgres on `localhost:5432` with role `apply` and both DBs `apply_tools`
   (platform) and `apply_agent` (agent).
-- The platform backend running on `:8000` with the two new endpoints + migration.
+- The platform backend running on `:8001` with the two new endpoints + migration.
 
 ### Setup
 ```bash
@@ -217,14 +217,14 @@ cp agent_server/.env.example agent_server/.env   # then edit
 
 ### Run + drive a hunt
 ```bash
-agent_server/venv/bin/python -m agent_server.api.main        # serves :8001
+agent_server/venv/bin/python -m agent_server.api.main        # serves :8002
 
-curl -s -XPOST localhost:8001/api/v1/hunt \
+curl -s -XPOST localhost:8002/api/v1/hunt \
   -H 'content-type: application/json' \
   -d '{"target_count":3,"query_hint":"recently funded AI dev tools startups"}'
 # → {"job_id":"…","status":"pending"}
 
-curl -s localhost:8001/api/v1/hunt/<job_id>   # live progress
+curl -s localhost:8002/api/v1/hunt/<job_id>   # live progress
 ```
 Add `"dry_run": true` to run the full pipeline but write only to the outbox (no
 platform push).

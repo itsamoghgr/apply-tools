@@ -7,7 +7,7 @@ import TrackingStatusBadge from "./TrackingStatusBadge";
 
 export const dynamic = "force-dynamic";
 
-const BACKEND_URL = process.env.BACKEND_URL ?? "http://127.0.0.1:8000";
+const BACKEND_URL = process.env.BACKEND_URL ?? "http://127.0.0.1:8001";
 
 type Aggregate = {
   openCount: number;

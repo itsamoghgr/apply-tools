@@ -6,9 +6,13 @@ import { Plus } from "lucide-react";
 export const dynamic = "force-dynamic";
 
 export default async function ResumesPage() {
+  // Lists both hand-written resumes and builder-managed companions. Companion
+  // rows (resumeProfileId set) are tagged in the table and their Edit link
+  // points back to the resume-builder (their source of truth), but their
+  // active/inactive toggle is managed here alongside everything else.
   const resumes = await prisma.resume.findMany({
     orderBy: { id: "asc" },
-    select: { id: true, label: true, isActive: true, updatedAt: true },
+    select: { id: true, label: true, isActive: true, updatedAt: true, resumeProfileId: true },
   });
 
   return (

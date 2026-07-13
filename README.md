@@ -87,10 +87,10 @@ Resumes are now managed in the web app at `/resumes`. The Prisma seed imports an
 ## Daily use
 
 ```bash
-./start.sh            # boots FastAPI on :8000 + Next.js on :3000
+./start.sh            # boots FastAPI on :8001 + Next.js on :3001
 ```
 
-Open <http://localhost:3000> for the web app, or click the Chrome extension icon. Both read/write the same Postgres database. `start.sh` checks that Postgres is reachable on `localhost:5432` before booting.
+Open <http://localhost:3001> for the web app, or click the Chrome extension icon. Both read/write the same Postgres database. `start.sh` checks that Postgres is reachable on `localhost:5432` before booting.
 
 Web app pages: `/resumes` (manage), `/resume-builder` (structured resume editor → LaTeX PDF, with AI assists), `/generate` (4 tabs), `/score` (leaderboard), `/history` (audit trail of every successful generation, including PDFs).
 
@@ -133,7 +133,7 @@ The popup shows a small dot indicating whether the backend is reachable (green =
 - **`Postgres not reachable on localhost:5432`** — start it with `brew services start postgresql@17`, then confirm the `apply_tools` database and `apply` role exist (see Setup step 4).
 - **`DATABASE_URL is not set`** — the backend reads it from `backend/.env`; make sure that line is present and matches `frontend/.env`.
 - **Prisma "could not create the shadow database"** — the `apply` role needs `CREATEDB`: `psql -d postgres -c "ALTER ROLE apply CREATEDB;"`.
-- **Popup says "offline"** — is `./start.sh` running? Curl `http://127.0.0.1:8000/` directly to confirm.
+- **Popup says "offline"** — is `./start.sh` running? Curl `http://127.0.0.1:8001/` directly to confirm.
 
 ## Privacy
 

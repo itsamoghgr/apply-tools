@@ -1,4 +1,4 @@
-const BACKEND = "http://127.0.0.1:8000";
+const BACKEND = "http://127.0.0.1:8001";
 const LINKEDIN_INVITE_LIMIT = 300;
 const LINKEDIN_INVITE_WARN = 280;
 
@@ -172,6 +172,14 @@ async function storageGet(keys) {
     return await chrome.storage.local.get(keys);
   } catch (_e) {
     return {};
+  }
+}
+
+async function storageRemove(keys) {
+  try {
+    await chrome.storage.local.remove(keys);
+  } catch (_e) {
+    // ignore
   }
 }
 
@@ -941,37 +949,66 @@ coverSubmit.addEventListener("click", async () => {
 
   coverSubmit.disabled = true;
   coverTextBtn.disabled = true;
-  setStatus(
-    coverStatus,
-    "Generating PDF... (first compile can take 30s+ while tectonic fetches packages)",
-    "working"
-  );
+  setStatus(coverStatus, "Generating cover letter...", "working");
+
+  const resumeId = getResumeId();
 
   try {
-    const res = await fetchWithTimeout(
-      `${BACKEND}/generate`,
+    // 1) Generate the letter text once.
+    const textRes = await fetchWithTimeout(`${BACKEND}/cover-text`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ company, job_description: jd, resume_id: resumeId }),
+    });
+    if (!textRes.ok) {
+      const detail = await readErrorDetail(textRes);
+      throw new Error(detail || `HTTP ${textRes.status}`);
+    }
+    const data = await textRes.json();
+    const body = (data.body || "").trim();
+    const meta = {
+      roleTitle: data.role_title || "",
+      hiringManager: data.hiring_manager || "",
+      resumeId: resumeId || null,
+    };
+
+    // 2) Save onto a tracked job (create it, or update the matching one) so the
+    //    letter shows up on the application in the web app.
+    setStatus(coverStatus, "Saving to your applications...", "working");
+    await saveCoverLetterToTracker(company, jd, resumeId, body, meta);
+
+    // 3) Render the SAME text to a PDF and download it. Reuses the render-only
+    //    endpoint so the PDF matches exactly what was saved (no second LLM call).
+    setStatus(
+      coverStatus,
+      "Building PDF... (first compile can take 30s+ while tectonic fetches packages)",
+      "working",
+    );
+    const pdfRes = await fetchWithTimeout(
+      `${BACKEND}/cover-letter/pdf`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           company,
-          job_description: jd,
-          resume_id: getResumeId(),
+          role_title: meta.roleTitle,
+          hiring_manager: meta.hiringManager,
+          body,
         }),
       },
       TIMEOUT_GENERATE_MS,
     );
-    if (!res.ok) {
-      const detail = await readErrorDetail(res);
-      throw new Error(detail || `HTTP ${res.status}`);
+    if (!pdfRes.ok) {
+      const detail = await readErrorDetail(pdfRes);
+      throw new Error(detail || `HTTP ${pdfRes.status}`);
     }
-    const blob = await res.blob();
+    const blob = await pdfRes.blob();
     if (blob.type && !blob.type.includes("pdf")) {
       throw new Error(`Unexpected response type: ${blob.type}`);
     }
     const filename = `CoverLetter_${safeFilenamePart(company)}.pdf`;
     await downloadBlob(blob, filename);
-    setStatus(coverStatus, `Done. Saved as ${filename}.`, "ok");
+    setStatus(coverStatus, `Done. Saved to applications and downloaded ${filename}.`, "ok");
   } catch (err) {
     setStatus(coverStatus, `Failed: ${err.message || err}`, "err");
   } finally {
@@ -979,6 +1016,57 @@ coverSubmit.addEventListener("click", async () => {
     coverTextBtn.disabled = false;
   }
 });
+
+// Save a generated cover letter onto a tracked JobApplication. If a job for this
+// company already exists (matched by company name, case-insensitive), update it;
+// otherwise create a new tracked application carrying the letter. Keeps the
+// extension's cover letter in sync with the web app's /applications tracker.
+async function saveCoverLetterToTracker(company, jd, resumeId, body, meta) {
+  const payload = {
+    coverLetter: body,
+    coverLetterMeta: meta,
+    jobDescription: jd || null,
+  };
+
+  // Look for an existing tracked job for this company to update in place.
+  let existingId = null;
+  try {
+    const listRes = await fetch(`${BACKEND}/track`);
+    if (listRes.ok) {
+      const { applications = [] } = await listRes.json();
+      const match = applications.find(
+        (a) =>
+          (a.companyName || "").trim().toLowerCase() ===
+          company.trim().toLowerCase(),
+      );
+      if (match) existingId = match.id;
+    }
+  } catch (_e) {
+    // Non-fatal: if the lookup fails we just create a new tracked row below.
+  }
+
+  if (existingId) {
+    const res = await fetch(`${BACKEND}/track/${existingId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) throw new Error((await readErrorDetail(res)) || `HTTP ${res.status}`);
+    return;
+  }
+
+  const res = await fetch(`${BACKEND}/track`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      companyName: company,
+      resumeId: resumeId || null,
+      status: "Applied",
+      ...payload,
+    }),
+  });
+  if (!res.ok) throw new Error((await readErrorDetail(res)) || `HTTP ${res.status}`);
+}
 
 coverTextBtn.addEventListener("click", async () => {
   const company = getSharedCompany();
@@ -1415,6 +1503,33 @@ trackNotes.addEventListener("input", () => {
   storageSet({ [STORAGE_KEYS.track.notes]: trackNotes.value });
 });
 
+// Clear the tracker form after a successful save so the popup is a clean slate
+// for the next job. Wipes the track-specific fields AND the shared company + JD
+// (a new application means a new job entirely), but keeps the selected resume —
+// you typically reuse the same resume across applications. Clears both the DOM
+// inputs and their persisted storage so nothing bleeds into the next entry.
+async function resetTrackForm() {
+  trackRole.value = "";
+  trackLocation.value = "";
+  trackJobUrl.value = "";
+  trackStatusSel.value = "Applied";
+  trackInterview.value = "";
+  trackNotes.value = "";
+  trackAppliedDate.value = todayIsoDate();
+  sharedCompany.value = "";
+  sharedJd.value = "";
+  await storageRemove([
+    STORAGE_KEYS.track.role,
+    STORAGE_KEYS.track.location,
+    STORAGE_KEYS.track.jobUrl,
+    STORAGE_KEYS.track.status,
+    STORAGE_KEYS.track.interview,
+    STORAGE_KEYS.track.notes,
+    STORAGE_KEYS.shared.company,
+    STORAGE_KEYS.shared.jd,
+  ]);
+}
+
 trackSubmit.addEventListener("click", async () => {
   const company = getSharedCompany();
   if (!company) {
@@ -1458,7 +1573,8 @@ trackSubmit.addEventListener("click", async () => {
       const detail = await readErrorDetail(res);
       throw new Error(detail || `HTTP ${res.status}`);
     }
-    setStatus(trackStatusEl, `Saved. ${payload.companyName} - ${payload.status}.`, "ok");
+    setStatus(trackStatusEl, `Saved ${payload.companyName}. Form cleared for the next one.`, "ok");
+    await resetTrackForm();
   } catch (err) {
     setStatus(trackStatusEl, `Failed: ${err.message || err}`, "err");
   } finally {

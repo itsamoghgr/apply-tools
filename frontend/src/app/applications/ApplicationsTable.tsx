@@ -1,12 +1,29 @@
 "use client";
 
-import { useState, useMemo, useEffect, useRef } from "react";
+import { useState, useMemo, useEffect, useRef, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import ApplicationsRow from "./ApplicationsRow";
 
-// Total <th> count in the table header below — used to colSpan group
-// header rows. Bump this if you add or remove a column.
-const COLUMN_COUNT = 11;
+// The app's home timezone. "Today" means the current calendar day HERE, not in
+// UTC — otherwise every evening west of UTC (after ~8pm ET) "today" rolls to the
+// next UTC day and today's applications wrongly bucket under "Yesterday".
+const APP_TZ = "America/New_York";
+
+// Start of *today* in APP_TZ, expressed as the UTC-midnight of that calendar
+// day. appliedDate is stored as UTC-midnight of the day the user picked, so
+// anchoring "now" the same way makes the two directly comparable. Mirrors the
+// dashboard's startOfLocalTodayAsUTC.
+function startOfLocalTodayUTCms(now: Date): number {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: APP_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const get = (t: string) =>
+    Number(parts.find((p) => p.type === t)?.value ?? "0");
+  return Date.UTC(get("year"), get("month") - 1, get("day"));
+}
 
 // Bucket an applied date into a relative group label, like Gmail's inbox.
 // Returns a stable group key (used to sort buckets) plus a human label.
@@ -15,12 +32,10 @@ const COLUMN_COUNT = 11;
 //   YYYY-MM (for older months).
 //
 // IMPORTANT — timezone handling: `appliedDate` is a calendar date the user
-// picked, but Prisma serializes DateTime columns as UTC. Date-only values
-// land as `2026-05-06T00:00:00.000Z`, which `new Date(...)` then renders
-// as the *previous* local day in any TZ west of UTC. To keep the bucket
-// match the day the user actually wrote in the Applied column, we compare
-// year/month/day in UTC for both `now` and the parsed date. The Applied
-// column also displays the UTC date, so the two stay consistent.
+// picked, serialized by Prisma as UTC-midnight (`2026-07-07T00:00:00.000Z`).
+// The `now` anchor is the current calendar day in APP_TZ, also as UTC-midnight,
+// so "Today" means the same local calendar day the Applied column shows — no
+// evening drift where today's rows fall into "Yesterday".
 function bucketFor(appliedISO: string, now = new Date()): {
   key: string;
   label: string;
@@ -32,12 +47,9 @@ function bucketFor(appliedISO: string, now = new Date()): {
     return { key: "unknown", label: "Unknown", rank: -1 };
   }
 
-  // Treat both anchor and target as midnight-UTC of their respective
-  // calendar days. This makes "Today" mean "the same UTC date as now",
-  // which matches what the Applied column shows.
   const utcMidnight = (x: Date) =>
     Date.UTC(x.getUTCFullYear(), x.getUTCMonth(), x.getUTCDate());
-  const today = utcMidnight(now);
+  const today = startOfLocalTodayUTCms(now);
   const target = utcMidnight(d);
   const ONE_DAY = 24 * 60 * 60 * 1000;
   const dayDiff = Math.round((today - target) / ONE_DAY);
@@ -62,7 +74,14 @@ function bucketFor(appliedISO: string, now = new Date()): {
     return { key: "last-week", label: "Last week", rank: 999_997 };
   }
 
-  const startOfThisMonth = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1);
+  // Derive the month boundary from the local-anchored `today` (not raw UTC now)
+  // so it doesn't drift a month at a month-end evening.
+  const todayDate = new Date(today);
+  const startOfThisMonth = Date.UTC(
+    todayDate.getUTCFullYear(),
+    todayDate.getUTCMonth(),
+    1,
+  );
   if (target >= startOfThisMonth) {
     return {
       key: "earlier-this-month",
@@ -107,6 +126,12 @@ export type App = {
   referral: string | null;
   referralLinkedin: string | null;
   jobDescription: string | null;
+  coverLetter: string | null;
+  coverLetterMeta: {
+    roleTitle?: string;
+    hiringManager?: string;
+    resumeId?: string | null;
+  } | null;
   linkedLeads: LinkedLead[];
   reachOuts: AppReachOut[];
 };
@@ -158,11 +183,24 @@ export default function ApplicationsTable({
   // not just the loaded browse window.
   const [query, setQuery] = useState(serverQuery);
 
+  // The debounced navigation re-runs the (heavy) server render. Wrapping it
+  // in a transition keeps the *current* UI mounted and interactive while the
+  // new tree streams in — so the search input never loses focus and the page
+  // doesn't flash/reset on each keystroke. `isPending` drives a subtle
+  // searching indicator instead.
+  const [isPending, startTransition] = useTransition();
+
   // Keep the input in sync if the server query changes underneath us
-  // (e.g. back/forward navigation).
+  // (e.g. back/forward navigation). Guarded so we don't clobber what the user
+  // is actively typing: only adopt the server value when the input still
+  // reflects the previously-committed query (i.e. it's a real external nav).
+  const lastCommittedRef = useRef(serverQuery);
   useEffect(() => {
-    setQuery(serverQuery);
-  }, [serverQuery]);
+    if (query === lastCommittedRef.current) {
+      setQuery(serverQuery);
+    }
+    lastCommittedRef.current = serverQuery;
+  }, [serverQuery]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Push the debounced query into the URL. Searching server-side means we
   // navigate rather than filter in memory; status is preserved, and `all`
@@ -177,7 +215,11 @@ export default function ApplicationsTable({
       if (status !== "all") params.set("status", status);
       if (next) params.set("q", next);
       const qs = params.toString();
-      router.replace(qs ? `/applications?${qs}` : "/applications");
+      startTransition(() => {
+        router.replace(qs ? `/applications?${qs}` : "/applications", {
+          scroll: false,
+        });
+      });
     }, 300);
     return () => {
       if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -240,6 +282,12 @@ export default function ApplicationsTable({
           className="flex-1 bg-transparent border-0 outline-none focus:outline-none focus:ring-0 focus:border-0 shadow-none text-sm placeholder:opacity-40"
           id="applications-search"
         />
+        {isPending && (
+          <span
+            className="h-3.5 w-3.5 shrink-0 rounded-full border-2 border-base-content/20 border-t-primary animate-spin"
+            aria-hidden
+          />
+        )}
         {query && (
           <button
             onClick={() => setQuery("")}
@@ -259,7 +307,7 @@ export default function ApplicationsTable({
         </p>
       )}
 
-      {/* ── Table ── */}
+      {/* ── Application cards, grouped by applied-date bucket ── */}
       {filtered.length === 0 ? (
         <div className="glass-card p-12 text-center">
           <div className="text-4xl mb-3">🔍</div>
@@ -270,36 +318,20 @@ export default function ApplicationsTable({
           </p>
         </div>
       ) : (
-        <div className="glass-card overflow-x-auto">
-          <table className="table table-sm">
-            <thead>
-              <tr className="border-b border-base-300/40">
-                <th className="opacity-50">Sl</th>
-                <th>Company</th>
-                <th>Role</th>
-                <th>Location</th>
-                <th>Interview</th>
-                <th>Status</th>
-                <th>Applied</th>
-                <th>Resume</th>
-                <th>Decision</th>
-                <th>Time</th>
-                <th className="text-right pr-4">Reach out</th>
-              </tr>
-            </thead>
-            {groups.map((g) => (
-              <tbody key={g.key}>
-                <tr className="bg-base-200/40">
-                  <td
-                    colSpan={COLUMN_COUNT}
-                    className="px-4 py-2 text-xs font-semibold uppercase tracking-wide opacity-60 border-y border-base-300/40"
-                  >
-                    {g.label}
-                    <span className="ml-2 font-mono opacity-50 normal-case tracking-normal">
-                      {g.apps.length}
-                    </span>
-                  </td>
-                </tr>
+        <div className="space-y-8">
+          {groups.map((g) => (
+            <section key={g.key} className="space-y-2.5">
+              {/* Eyebrow: date bucket + count, on a hairline rule */}
+              <div className="flex items-center gap-3 px-0.5">
+                <span className="text-[11px] font-semibold uppercase tracking-[0.12em] opacity-50">
+                  {g.label}
+                </span>
+                <span className="text-[11px] tabular-nums opacity-35">
+                  {g.apps.length}
+                </span>
+                <span className="flex-1 h-px bg-base-300/70" />
+              </div>
+              <div className="space-y-2">
                 {g.apps.map((a) => (
                   <ApplicationsRow
                     key={a.id}
@@ -308,9 +340,9 @@ export default function ApplicationsTable({
                     app={a}
                   />
                 ))}
-              </tbody>
-            ))}
-          </table>
+              </div>
+            </section>
+          ))}
         </div>
       )}
     </>

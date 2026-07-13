@@ -11,6 +11,9 @@ type Row = {
   label: string;
   isActive: boolean;
   updatedAt: string;
+  // Set when this row is a synced companion of a resume-builder profile; the
+  // Edit link then points back to the builder and we tag it in the table.
+  resumeProfileId: string | null;
 };
 
 type SortKey =
@@ -231,7 +234,16 @@ export default function ResumeTable({ resumes }: { resumes: Row[] }) {
                     />
                   </td>
                   <td className="font-mono text-xs opacity-50">{r.id}</td>
-                  <td className="font-medium">{r.label}</td>
+                  <td className="font-medium">
+                    <span className="inline-flex items-center gap-2">
+                      {r.label}
+                      {r.resumeProfileId && (
+                        <span className="badge badge-outline badge-xs opacity-70">
+                          builder
+                        </span>
+                      )}
+                    </span>
+                  </td>
                   <td>
                     {r.isActive ? (
                       <span className="inline-flex items-center gap-1.5">
@@ -247,7 +259,11 @@ export default function ResumeTable({ resumes }: { resumes: Row[] }) {
                   </td>
                   <td className="text-right">
                     <Link
-                      href={`/resumes/${r.id}`}
+                      href={
+                        r.resumeProfileId
+                          ? `/resume-builder/${r.resumeProfileId}`
+                          : `/resumes/${r.id}`
+                      }
                       className="text-sm text-primary hover:text-accent transition-colors"
                     >
                       Edit →

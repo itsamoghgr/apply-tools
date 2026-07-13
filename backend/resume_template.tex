@@ -58,14 +58,26 @@
 \raggedright
 \setlength{\tabcolsep}{0in}
 
-% Professional section formatting with consistent spacing.
-% The leading \vspace pulls the section title up toward the previous section —
-% i.e. it controls the gap BETWEEN sections (Education→Experience, etc.).
-% The trailing \vspace (after \titlerule) is the gap below the rule, within the
-% section, and is left as-is.
+% Section heading look — the original: a \titlerule with a trailing \vspace{-4pt}
+% that sets the rule weight and the gap below the heading. `before`=0 because the
+% gap ABOVE a section is owned by \sectionsep (below), not by titlespacing;
+% `after`=8pt with the -4pt nets the original below-rule spacing.
 \titleformat{\section}{
-  \vspace{-7pt}\scshape\raggedright\large\bfseries
+  \scshape\raggedright\large\bfseries
 }{}{0em}{}[\color{black}\titlerule \vspace{-4pt}]
+\titlespacing*{\section}{0pt}{0pt}{8pt}
+
+% Uniform inter-section spacing (order-independent). The gap ABOVE every section
+% is emitted by \sectionsep — placed BEFORE each section block (including the
+% first) by the renderer — rather than baked into each section relative to its
+% neighbour. \addvspace MERGES with any pending vertical glue instead of stacking,
+% so residual glue can't double the gap. This works together with two things in
+% resume_render.py: (a) sections don't emit a trailing negative \vspace on their
+% LAST entry (which used to leak into the next section and is why gaps were
+% uneven), and (b) the header's -8pt is offset just below so the first section
+% matches the rest. Tune \sectiongap to retune all inter-section gaps at once.
+\newlength{\sectiongap}\setlength{\sectiongap}{7pt}
+\newcommand{\sectionsep}{\par\addvspace{\sectiongap}}
 
 % Ensure that generate pdf is machine readable/ATS parsable (pdfTeX only)
 \ifdefined\pdfgentounicode \pdfgentounicode=1 \fi
@@ -112,10 +124,11 @@
     \small {{CONTACT_LINE}}
     \vspace{-8pt}
 \end{center}
+% Partially offset the header's trailing -8pt so the gap above the FIRST section
+% matches the others (measured: this lands the first-section gap on the same
+% baseline as the \sectionsep gap the body sections get).
+\par\vspace{1pt}
 
-{{EDUCATION_SECTION}}
-{{EXPERIENCE_SECTION}}
-{{SKILLS_SECTION}}
-{{PROJECTS_SECTION}}
+{{SECTIONS}}
 
 \end{document}

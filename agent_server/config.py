@@ -28,7 +28,7 @@ def _int(name: str, default: int) -> int:
 class Config:
     # Server
     host: str = os.environ.get("AGENT_HOST", "0.0.0.0")
-    port: int = _int("AGENT_PORT", 8001)
+    port: int = _int("AGENT_PORT", 8002)
 
     # Agent DB (operational store) — SEPARATE Postgres DB from the platform.
     agent_database_url: str = os.environ.get(
@@ -37,7 +37,7 @@ class Config:
 
     # Platform API (client) — source of truth for verified leads.
     platform_api_base: str = os.environ.get(
-        "PLATFORM_API_BASE", "http://localhost:8000"
+        "PLATFORM_API_BASE", "http://localhost:8001"
     )
     platform_api_token: str | None = os.environ.get("PLATFORM_API_TOKEN") or None
 

@@ -13,16 +13,25 @@ export default async function EditResumeProfilePage({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const row = await prisma.resumeProfile.findUnique({ where: { id } });
+  const row = await prisma.resumeProfile.findUnique({
+    where: { id },
+    include: { resume: { select: { isActive: true } } },
+  });
   if (!row) notFound();
 
   const profile = normalizeProfile({
     header: row.header,
+    summary: row.summary,
     education: row.education,
     experience: row.experience,
     skills: row.skills,
     projects: row.projects,
+    sectionOrder: row.sectionOrder,
   });
+
+  // Whether this resume shows in the applications / reach-out / AI pickers.
+  // No companion yet (legacy profile) reads as inactive until toggled/saved.
+  const initialActive = row.resume?.isActive ?? false;
 
   return (
     <div className="space-y-6 animate-slide-up">
@@ -33,7 +42,12 @@ export default async function EditResumeProfilePage({
         <ArrowLeft className="h-3.5 w-3.5" />
         All resumes
       </Link>
-      <ResumeBuilderEditor id={id} initialName={row.name} initialProfile={profile} />
+      <ResumeBuilderEditor
+        id={id}
+        initialName={row.name}
+        initialProfile={profile}
+        initialActive={initialActive}
+      />
     </div>
   );
 }

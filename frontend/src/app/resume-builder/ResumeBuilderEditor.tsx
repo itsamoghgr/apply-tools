@@ -15,6 +15,8 @@ import {
   Gauge,
   Loader2,
   Eye,
+  EyeOff,
+  Clock,
 } from "lucide-react";
 import {
   DndContext,
@@ -33,20 +35,24 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { saveResumeProfile, deleteResumeProfile } from "./actions";
+import { saveResumeProfile, deleteResumeProfile, setResumeProfileActive } from "./actions";
 import Modal from "./Modal";
 import BoldEditor from "./BoldEditor";
 import {
   type ResumeProfileData,
-  type ExperienceEntry,
-  type EducationEntry,
   type SkillEntry,
   type ProjectEntry,
+  type SectionKey,
+  type DateParts,
+  SECTION_LABELS,
+  MONTHS,
   emptyEducation,
   emptyExperience,
   emptySkill,
   emptyProject,
   normalizeProfile,
+  experienceMonths,
+  formatDuration,
 } from "./types";
 
 // ---- drag-and-drop reordering ----------------------------------------------
@@ -226,6 +232,108 @@ function Field({
   );
 }
 
+// Structured start/end date editor: month + year selects for start and end,
+// plus a "Present" toggle for ongoing entries. Replaces the old free-text Dates
+// field; the displayed range on the resume is derived from these via
+// formatDateRange, and years-of-experience is computed from them.
+const YEAR_NOW = new Date().getFullYear();
+const YEARS = Array.from({ length: 60 }, (_, k) => YEAR_NOW + 5 - k); // now+5 → now-54
+
+function MonthYearSelect({
+  month,
+  year,
+  onMonth,
+  onYear,
+  disabled,
+}: {
+  month: number | null;
+  year: number | null;
+  onMonth: (m: number | null) => void;
+  onYear: (y: number | null) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="flex gap-1 min-w-0">
+      <select
+        value={month ?? ""}
+        disabled={disabled}
+        onChange={(e) => onMonth(e.target.value ? Number(e.target.value) : null)}
+        className="select select-bordered select-sm flex-1 min-w-0 px-2 disabled:opacity-40"
+      >
+        <option value="">Mon</option>
+        {MONTHS.slice(1).map((m, idx) => (
+          <option key={m} value={idx + 1}>{m}</option>
+        ))}
+      </select>
+      <select
+        value={year ?? ""}
+        disabled={disabled}
+        onChange={(e) => onYear(e.target.value ? Number(e.target.value) : null)}
+        className="select select-bordered select-sm w-[4.75rem] shrink-0 px-2 disabled:opacity-40"
+      >
+        <option value="">Year</option>
+        {YEARS.map((y) => (
+          <option key={y} value={y}>{y}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function DateRangeField({
+  value,
+  onChange,
+}: {
+  value: DateParts;
+  onChange: (patch: Partial<DateParts>) => void;
+}) {
+  // "From" / "To" act as the field labels (each ABOVE its month+year), so the
+  // dropdowns line up with the Location input on the same grid row. The Present
+  // toggle floats to the right of the label row.
+  // Each date column mirrors <Field> EXACTLY — a `block` label with a `text-xs`
+  // span followed by an `mt-1` control — so its line-box metrics match the
+  // Location field and the dropdowns land on the same baseline in the grid row.
+  // The Present toggle is overlaid at the top-right without affecting layout.
+  return (
+    <div className="min-w-0 relative">
+      <label className="absolute top-0 right-0 flex items-center gap-1.5 text-xs opacity-70 cursor-pointer z-10">
+        <input
+          type="checkbox"
+          checked={value.isPresent}
+          onChange={(e) => onChange({ isPresent: e.target.checked })}
+          className="checkbox checkbox-xs"
+        />
+        Present
+      </label>
+      <div className="flex gap-3 min-w-0">
+        <label className="block flex-1 min-w-0">
+          <span className="text-xs font-medium opacity-60">From</span>
+          <div className="mt-1">
+            <MonthYearSelect
+              month={value.startMonth}
+              year={value.startYear}
+              onMonth={(m) => onChange({ startMonth: m })}
+              onYear={(y) => onChange({ startYear: y })}
+            />
+          </div>
+        </label>
+        <label className="block flex-1 min-w-0">
+          <span className="text-xs font-medium opacity-60">To</span>
+          <div className="mt-1">
+            <MonthYearSelect
+              month={value.endMonth}
+              year={value.endYear}
+              onMonth={(m) => onChange({ endMonth: m })}
+              onYear={(y) => onChange({ endYear: y })}
+              disabled={value.isPresent}
+            />
+          </div>
+        </label>
+      </div>
+    </div>
+  );
+}
+
 function SectionCard({
   title,
   children,
@@ -373,14 +481,18 @@ export default function ResumeBuilderEditor({
   id,
   initialName,
   initialProfile,
+  initialActive,
 }: {
   id: string;
   initialName: string;
   initialProfile: ResumeProfileData;
+  initialActive: boolean;
 }) {
   const [name, setName] = useState(initialName);
   const [profile, setProfile] = useState<ResumeProfileData>(initialProfile);
   const [dirty, setDirty] = useState(false);
+  const [active, setActive] = useState(initialActive);
+  const [togglingActive, startToggleActive] = useTransition();
   const [saving, startSave] = useTransition();
   const [exporting, setExporting] = useState(false);
   const [previewing, setPreviewing] = useState(false);
@@ -396,7 +508,10 @@ export default function ResumeBuilderEditor({
   // Stable client-side IDs for the reorderable entry lists (see useStableIds).
   const eduIds = useStableIds(profile.education.length);
   const expIds = useStableIds(profile.experience.length);
+  const skillIds = useStableIds(profile.skills.length);
   const projIds = useStableIds(profile.projects.length);
+  // Section-level reordering (the whole-section drag list).
+  const sectionIds = useStableIds(profile.sectionOrder.length);
 
   // single mutator that flags dirty state
   function update(mut: (p: ResumeProfileData) => ResumeProfileData) {
@@ -411,6 +526,23 @@ export default function ResumeBuilderEditor({
     update((p) => {
       p.header[key] = val;
       return p;
+    });
+  }
+
+  // Toggle whether this resume appears in the applications / reach-out / AI
+  // pickers. Optimistic: flip immediately, revert on failure.
+  function toggleActive() {
+    if (togglingActive) return;
+    const next = !active;
+    setActive(next);
+    startToggleActive(async () => {
+      const res = await setResumeProfileActive(id, next);
+      if (res.ok) {
+        toast.success(next ? "Active in pickers" : "Hidden from pickers");
+      } else {
+        setActive(!next);
+        toast.error(res.error);
+      }
     });
   }
 
@@ -559,9 +691,222 @@ export default function ResumeBuilderEditor({
     update((p) => ({ ...p, experience: arrayMove(p.experience, from, to) }));
     expIds.reorder(from, to);
   }
+  function moveSkill(from: number, to: number) {
+    update((p) => ({ ...p, skills: arrayMove(p.skills, from, to) }));
+    skillIds.reorder(from, to);
+  }
   function moveProject(from: number, to: number) {
     update((p) => ({ ...p, projects: arrayMove(p.projects, from, to) }));
     projIds.reorder(from, to);
+  }
+  // Reorder whole sections, and toggle a section's visibility. These drive both
+  // the editor layout and the rendered PDF / plaintext output.
+  function moveSection(from: number, to: number) {
+    update((p) => ({ ...p, sectionOrder: arrayMove(p.sectionOrder, from, to) }));
+    sectionIds.reorder(from, to);
+  }
+  function toggleSection(key: SectionKey) {
+    update((p) => ({
+      ...p,
+      sectionOrder: p.sectionOrder.map((s) =>
+        s.key === key ? { ...s, visible: !s.visible } : s,
+      ),
+    }));
+  }
+  function setSummary(val: string) {
+    update((p) => ({ ...p, summary: val }));
+  }
+
+  // Render one section's editor body by key. Kept as hand-written blocks (each
+  // section has its own fields/DnD); the section ORDER and visibility are what's
+  // now dynamic. Header renders separately, fixed at the top.
+  function renderSectionBody(key: SectionKey) {
+    switch (key) {
+      case "summary":
+        return (
+          <SectionCard title="Summary">
+            <textarea
+              value={profile.summary}
+              onChange={(e) => setSummary(e.target.value)}
+              rows={4}
+              placeholder="A short professional summary (2–4 sentences)."
+              className="textarea textarea-bordered textarea-sm w-full leading-relaxed"
+            />
+          </SectionCard>
+        );
+      case "education":
+        return (
+          <SectionCard
+            title="Education"
+            action={
+              <button type="button" onClick={() => update((p) => ({ ...p, education: [...p.education, emptyEducation()] }))} className="btn btn-ghost btn-xs gap-1">
+                <Plus className="h-3.5 w-3.5" /> Add
+              </button>
+            }
+          >
+            {profile.education.length === 0 && <Empty label="No education entries yet." />}
+            <SortableList
+              id="dnd-education"
+              items={profile.education}
+              ids={eduIds.ids}
+              onMove={moveEducation}
+              className="space-y-4"
+              renderItem={(e, i) => (
+                <EntryFrame
+                  onRemove={() => update((p) => ({ ...p, education: p.education.filter((_, j) => j !== i) }))}
+                >
+                  <div className="grid sm:grid-cols-2 gap-3">
+                    <Field label="School" value={e.school} onChange={(v) => editEdu(update, i, "school", v)} />
+                    <Field label="Degree" value={e.degree} onChange={(v) => editEdu(update, i, "degree", v)} />
+                    <Field label="Location" value={e.location} onChange={(v) => editEdu(update, i, "location", v)} />
+                    <DateRangeField value={e} onChange={(patch) => editEduDates(update, i, patch)} />
+                  </div>
+                </EntryFrame>
+              )}
+            />
+          </SectionCard>
+        );
+      case "experience": {
+        const totalExp = formatDuration(experienceMonths(profile.experience));
+        return (
+          <SectionCard
+            title="Professional Experience"
+            action={
+              <div className="flex items-center gap-2">
+                {totalExp && (
+                  <span
+                    title="Total experience, merging overlapping periods (‘Present’ counts to this month)"
+                    className="badge badge-outline badge-sm gap-1 font-medium tabular-nums"
+                  >
+                    <Clock className="h-3 w-3" />
+                    {totalExp}
+                  </span>
+                )}
+                <button type="button" onClick={() => update((p) => ({ ...p, experience: [...p.experience, emptyExperience()] }))} className="btn btn-ghost btn-xs gap-1">
+                  <Plus className="h-3.5 w-3.5" /> Add
+                </button>
+              </div>
+            }
+          >
+            {profile.experience.length === 0 && <Empty label="No experience entries yet." />}
+            <SortableList
+              id="dnd-experience"
+              items={profile.experience}
+              ids={expIds.ids}
+              onMove={moveExperience}
+              className="space-y-4"
+              renderItem={(x, i) => (
+                <EntryFrame
+                  onRemove={() => update((p) => ({ ...p, experience: p.experience.filter((_, j) => j !== i) }))}
+                >
+                  <div className="grid sm:grid-cols-2 gap-3">
+                    <Field label="Company" value={x.company} onChange={(v) => editExp(update, i, "company", v)} />
+                    <Field label="Title" value={x.title} onChange={(v) => editExp(update, i, "title", v)} />
+                    <Field label="Location" value={x.location} onChange={(v) => editExp(update, i, "location", v)} />
+                    <DateRangeField value={x} onChange={(patch) => editExpDates(update, i, patch)} />
+                  </div>
+                  <BulletEditor
+                    bullets={x.bullets}
+                    context={`${x.title} at ${x.company}`}
+                    listId={`experience-${i}`}
+                    onChange={(bullets) => update((p) => { p.experience[i].bullets = bullets; return p; })}
+                  />
+                </EntryFrame>
+              )}
+            />
+          </SectionCard>
+        );
+      }
+      case "skills":
+        return (
+          <SectionCard
+            title="Technical Skills"
+            action={
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={suggest}
+                  disabled={suggesting}
+                  className="btn btn-ghost btn-xs gap-1.5 text-primary"
+                >
+                  {suggesting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
+                  Suggest
+                </button>
+                <button type="button" onClick={() => update((p) => ({ ...p, skills: [...p.skills, emptySkill()] }))} className="btn btn-ghost btn-xs gap-1">
+                  <Plus className="h-3.5 w-3.5" /> Add category
+                </button>
+              </div>
+            }
+          >
+            {profile.skills.length === 0 && <Empty label="No skill categories yet." />}
+            <SortableList
+              id="dnd-skills"
+              items={profile.skills}
+              ids={skillIds.ids}
+              onMove={moveSkill}
+              className="space-y-3"
+              renderItem={(s, i) => (
+                <div className="flex items-center gap-2">
+                  <DragHandle className="opacity-30 hover:opacity-70" label="Drag to reorder category" />
+                  <input
+                    value={s.category}
+                    onChange={(e) => editSkill(update, i, "category", e.target.value)}
+                    placeholder="Category (e.g. Languages)"
+                    className="input input-bordered input-sm w-48 shrink-0"
+                  />
+                  <input
+                    value={s.items}
+                    onChange={(e) => editSkill(update, i, "items", e.target.value)}
+                    placeholder="Python, SQL, R, …"
+                    className="input input-bordered input-sm flex-1"
+                  />
+                  <button type="button" onClick={() => update((p) => ({ ...p, skills: p.skills.filter((_, j) => j !== i) }))} className="btn btn-ghost btn-xs btn-square text-error/70">
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              )}
+            />
+          </SectionCard>
+        );
+      case "projects":
+        return (
+          <SectionCard
+            title="Projects"
+            action={
+              <button type="button" onClick={() => update((p) => ({ ...p, projects: [...p.projects, emptyProject()] }))} className="btn btn-ghost btn-xs gap-1">
+                <Plus className="h-3.5 w-3.5" /> Add
+              </button>
+            }
+          >
+            {profile.projects.length === 0 && <Empty label="No projects yet." />}
+            <SortableList
+              id="dnd-projects"
+              items={profile.projects}
+              ids={projIds.ids}
+              onMove={moveProject}
+              className="space-y-4"
+              renderItem={(pr, i) => (
+                <EntryFrame
+                  onRemove={() => update((p) => ({ ...p, projects: p.projects.filter((_, j) => j !== i) }))}
+                >
+                  <div className="grid sm:grid-cols-2 gap-3">
+                    <Field label="Project name" value={pr.name} onChange={(v) => editProj(update, i, "name", v)} />
+                    <Field label="Date" value={pr.date} onChange={(v) => editProj(update, i, "date", v)} placeholder="2026" />
+                  </div>
+                  <BulletEditor
+                    bullets={pr.bullets}
+                    context={`Project: ${pr.name}`}
+                    listId={`project-${i}`}
+                    onChange={(bullets) => update((p) => { p.projects[i].bullets = bullets; return p; })}
+                  />
+                </EntryFrame>
+              )}
+            />
+          </SectionCard>
+        );
+      default:
+        return null;
+    }
   }
 
   // A resume must fit one page. Once we know the count (after a preview/export
@@ -617,6 +962,26 @@ export default function ResumeBuilderEditor({
         </button>
         <button
           type="button"
+          onClick={toggleActive}
+          disabled={togglingActive}
+          title={
+            active
+              ? "This resume is selectable in the applications, reach-out, and AI pickers. Click to hide it."
+              : "This resume is hidden from the pickers. Click to make it selectable."
+          }
+          className={`btn btn-sm gap-1.5 ${active ? "btn-success btn-outline" : "btn-ghost"}`}
+        >
+          {togglingActive ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : active ? (
+            <Eye className="h-4 w-4" />
+          ) : (
+            <EyeOff className="h-4 w-4" />
+          )}
+          {active ? "Active" : "Inactive"}
+        </button>
+        <button
+          type="button"
           onClick={save}
           disabled={saving || !dirty}
           className="btn btn-outline btn-sm gap-1.5"
@@ -666,152 +1031,47 @@ export default function ResumeBuilderEditor({
         </div>
       </SectionCard>
 
-      {/* Education */}
-      <SectionCard
-        title="Education"
-        action={
-          <button type="button" onClick={() => update((p) => ({ ...p, education: [...p.education, emptyEducation()] }))} className="btn btn-ghost btn-xs gap-1">
-            <Plus className="h-3.5 w-3.5" /> Add
-          </button>
-        }
-      >
-        {profile.education.length === 0 && <Empty label="No education entries yet." />}
+      {/* Sections manager — reorder + show/hide whole sections. Drives both the
+          editor layout below and the rendered PDF / plaintext output. */}
+      <SectionCard title="Sections">
+        <p className="text-xs opacity-50 mb-3">
+          Drag to reorder. Toggle a section off to hide it from the resume (its
+          content is kept).
+        </p>
         <SortableList
-          id="dnd-education"
-          items={profile.education}
-          ids={eduIds.ids}
-          onMove={moveEducation}
-          className="space-y-4"
-          renderItem={(e, i) => (
-            <EntryFrame
-              onRemove={() => update((p) => ({ ...p, education: p.education.filter((_, j) => j !== i) }))}
-            >
-              <div className="grid sm:grid-cols-2 gap-3">
-                <Field label="School" value={e.school} onChange={(v) => editEdu(update, i, "school", v)} />
-                <Field label="Dates" value={e.dates} onChange={(v) => editEdu(update, i, "dates", v)} placeholder="Aug 2024 – May 2026" />
-                <Field label="Degree" value={e.degree} onChange={(v) => editEdu(update, i, "degree", v)} />
-                <Field label="Location" value={e.location} onChange={(v) => editEdu(update, i, "location", v)} />
-              </div>
-            </EntryFrame>
-          )}
-        />
-      </SectionCard>
-
-      {/* Experience */}
-      <SectionCard
-        title="Professional Experience"
-        action={
-          <button type="button" onClick={() => update((p) => ({ ...p, experience: [...p.experience, emptyExperience()] }))} className="btn btn-ghost btn-xs gap-1">
-            <Plus className="h-3.5 w-3.5" /> Add
-          </button>
-        }
-      >
-        {profile.experience.length === 0 && <Empty label="No experience entries yet." />}
-        <SortableList
-          id="dnd-experience"
-          items={profile.experience}
-          ids={expIds.ids}
-          onMove={moveExperience}
-          className="space-y-4"
-          renderItem={(x, i) => (
-            <EntryFrame
-              onRemove={() => update((p) => ({ ...p, experience: p.experience.filter((_, j) => j !== i) }))}
-            >
-              <div className="grid sm:grid-cols-2 gap-3">
-                <Field label="Company" value={x.company} onChange={(v) => editExp(update, i, "company", v)} />
-                <Field label="Dates" value={x.dates} onChange={(v) => editExp(update, i, "dates", v)} placeholder="May 2025 – Dec 2025" />
-                <Field label="Title" value={x.title} onChange={(v) => editExp(update, i, "title", v)} />
-                <Field label="Location" value={x.location} onChange={(v) => editExp(update, i, "location", v)} />
-              </div>
-              <BulletEditor
-                bullets={x.bullets}
-                context={`${x.title} at ${x.company}`}
-                listId={`experience-${i}`}
-                onChange={(bullets) => update((p) => { p.experience[i].bullets = bullets; return p; })}
-              />
-            </EntryFrame>
-          )}
-        />
-      </SectionCard>
-
-      {/* Skills */}
-      <SectionCard
-        title="Technical Skills"
-        action={
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={suggest}
-              disabled={suggesting}
-              className="btn btn-ghost btn-xs gap-1.5 text-primary"
-            >
-              {suggesting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
-              Suggest
-            </button>
-            <button type="button" onClick={() => update((p) => ({ ...p, skills: [...p.skills, emptySkill()] }))} className="btn btn-ghost btn-xs gap-1">
-              <Plus className="h-3.5 w-3.5" /> Add category
-            </button>
-          </div>
-        }
-      >
-        {profile.skills.length === 0 && <Empty label="No skill categories yet." />}
-        <div className="space-y-3">
-          {profile.skills.map((s, i) => (
-            <div key={i} className="flex items-start gap-2">
-              <input
-                value={s.category}
-                onChange={(e) => editSkill(update, i, "category", e.target.value)}
-                placeholder="Category (e.g. Languages)"
-                className="input input-bordered input-sm w-48 shrink-0"
-              />
-              <input
-                value={s.items}
-                onChange={(e) => editSkill(update, i, "items", e.target.value)}
-                placeholder="Python, SQL, R, …"
-                className="input input-bordered input-sm flex-1"
-              />
-              <button type="button" onClick={() => update((p) => ({ ...p, skills: p.skills.filter((_, j) => j !== i) }))} className="btn btn-ghost btn-xs btn-square text-error/70">
-                <Trash2 className="h-3.5 w-3.5" />
+          id="dnd-sections"
+          items={profile.sectionOrder}
+          ids={sectionIds.ids}
+          onMove={moveSection}
+          className="space-y-1.5"
+          renderItem={(s) => (
+            <div className="flex items-center gap-3 rounded-lg border border-base-300 bg-base-100/40 px-3 py-2">
+              <DragHandle className="opacity-30 hover:opacity-70" label="Drag to reorder section" />
+              <span className={`text-sm font-medium flex-1 ${s.visible ? "" : "opacity-40"}`}>
+                {SECTION_LABELS[s.key]}
+              </span>
+              <button
+                type="button"
+                onClick={() => toggleSection(s.key)}
+                title={s.visible ? "Hide from resume" : "Show on resume"}
+                aria-label={s.visible ? `Hide ${SECTION_LABELS[s.key]}` : `Show ${SECTION_LABELS[s.key]}`}
+                className={`btn btn-ghost btn-xs gap-1.5 ${s.visible ? "text-primary" : "opacity-50"}`}
+              >
+                {s.visible ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+                {s.visible ? "Shown" : "Hidden"}
               </button>
             </div>
-          ))}
-        </div>
-      </SectionCard>
-
-      {/* Projects */}
-      <SectionCard
-        title="Projects"
-        action={
-          <button type="button" onClick={() => update((p) => ({ ...p, projects: [...p.projects, emptyProject()] }))} className="btn btn-ghost btn-xs gap-1">
-            <Plus className="h-3.5 w-3.5" /> Add
-          </button>
-        }
-      >
-        {profile.projects.length === 0 && <Empty label="No projects yet." />}
-        <SortableList
-          id="dnd-projects"
-          items={profile.projects}
-          ids={projIds.ids}
-          onMove={moveProject}
-          className="space-y-4"
-          renderItem={(pr, i) => (
-            <EntryFrame
-              onRemove={() => update((p) => ({ ...p, projects: p.projects.filter((_, j) => j !== i) }))}
-            >
-              <div className="grid sm:grid-cols-2 gap-3">
-                <Field label="Project name" value={pr.name} onChange={(v) => editProj(update, i, "name", v)} />
-                <Field label="Date" value={pr.date} onChange={(v) => editProj(update, i, "date", v)} placeholder="2026" />
-              </div>
-              <BulletEditor
-                bullets={pr.bullets}
-                context={`Project: ${pr.name}`}
-                listId={`project-${i}`}
-                onChange={(bullets) => update((p) => { p.projects[i].bullets = bullets; return p; })}
-              />
-            </EntryFrame>
           )}
         />
       </SectionCard>
+
+      {/* Section bodies, rendered in the profile's order; hidden sections are
+          dimmed but still editable. */}
+      {profile.sectionOrder.map((s) => (
+        <div key={s.key} className={s.visible ? "" : "opacity-50"}>
+          {renderSectionBody(s.key)}
+        </div>
+      ))}
 
       {/* Danger zone */}
       <div className="flex justify-end">
@@ -1338,11 +1598,22 @@ function ModalActions({
 
 type Updater = (mut: (p: ResumeProfileData) => ResumeProfileData) => void;
 
-function editEdu(update: Updater, i: number, key: keyof EducationEntry, v: string) {
+// String-only edit helpers (school/degree/location, company/title/location).
+// Date fields are structured and edited via editEduDates/editExpDates below.
+type EduStrKey = "school" | "degree" | "location";
+type ExpStrKey = "company" | "title" | "location";
+function editEdu(update: Updater, i: number, key: EduStrKey, v: string) {
   update((p) => { p.education[i][key] = v; return p; });
 }
-function editExp(update: Updater, i: number, key: keyof Omit<ExperienceEntry, "bullets">, v: string) {
+function editExp(update: Updater, i: number, key: ExpStrKey, v: string) {
   update((p) => { p.experience[i][key] = v; return p; });
+}
+// Merge structured date changes into an entry.
+function editEduDates(update: Updater, i: number, patch: Partial<DateParts>) {
+  update((p) => { p.education[i] = { ...p.education[i], ...patch }; return p; });
+}
+function editExpDates(update: Updater, i: number, patch: Partial<DateParts>) {
+  update((p) => { p.experience[i] = { ...p.experience[i], ...patch }; return p; });
 }
 function editSkill(update: Updater, i: number, key: keyof SkillEntry, v: string) {
   update((p) => { p.skills[i][key] = v; return p; });

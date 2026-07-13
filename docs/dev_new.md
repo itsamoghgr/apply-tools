@@ -153,10 +153,10 @@ See `docs/dev.md` section 8 for exact commands. The short version:
 python -m agent_server.api.main
 
 # tell it to hunt for 3 leads
-curl -XPOST localhost:8001/api/v1/hunt -d '{"target_count":3,"query_hint":"AI dev tools startups"}'
+curl -XPOST localhost:8002/api/v1/hunt -d '{"target_count":3,"query_hint":"AI dev tools startups"}'
 
 # check progress with the job id it gives back
-curl localhost:8001/api/v1/hunt/<job_id>
+curl localhost:8002/api/v1/hunt/<job_id>
 ```
 
 Add `"dry_run": true` to do a full practice run that finds and checks everything

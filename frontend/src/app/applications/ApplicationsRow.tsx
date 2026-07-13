@@ -14,8 +14,12 @@ import {
   Sparkles,
   Copy,
   Check,
+  Maximize2,
+  Download,
+  FileText,
 } from "lucide-react";
 import LeadPicker from "./LeadPicker";
+import DetailsModal from "./DetailsModal";
 import type { LinkedLead, AppReachOut } from "./ApplicationsTable";
 
 type App = {
@@ -39,8 +43,17 @@ type App = {
   referral: string | null;
   referralLinkedin: string | null;
   jobDescription: string | null;
+  coverLetter: string | null;
+  coverLetterMeta: CoverLetterMeta | null;
   linkedLeads: LinkedLead[];
   reachOuts: AppReachOut[];
+};
+
+// Captured at generation so the on-demand PDF render matches the saved letter.
+type CoverLetterMeta = {
+  roleTitle?: string;
+  hiringManager?: string;
+  resumeId?: string | null;
 };
 
 const STATUS_OPTIONS = [
@@ -119,9 +132,18 @@ function ApplicationsRowInner({
   const [busy, setBusy] = useState(false);
   const [local, setLocal] = useState(app);
   const [open, setOpen] = useState(false);
+  // Two-step delete on the card: first click arms, second confirms. Auto-disarms
+  // after a few seconds so it can't sit primed and catch a later stray click.
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [pickerMode, setPickerMode] = useState<
     "off" | "link" | "reach-out"
   >("off");
+
+  useEffect(() => {
+    if (!confirmingDelete) return;
+    const t = setTimeout(() => setConfirmingDelete(false), 3500);
+    return () => clearTimeout(t);
+  }, [confirmingDelete]);
 
   // Re-sync local state when the parent re-renders with fresh props
   // (e.g., after router.refresh()). We compare by reference; the page
@@ -304,160 +326,227 @@ function ApplicationsRowInner({
 
   return (
     <>
-      <tr
-        className={`align-middle whitespace-nowrap cursor-pointer transition-colors ${
-          open ? "bg-base-200/60" : "hover:bg-base-200/40"
+      <div
+        className={`group rounded-[var(--radius-box)] border bg-base-200/40 transition-colors ${
+          open
+            ? "border-primary/50 bg-base-200/70"
+            : "border-base-300 hover:border-base-content/20"
         }`}
-        onClick={(e) => {
-          const t = e.target as HTMLElement;
-          if (
-            t.closest("input, select, textarea, button, a, [contenteditable]")
-          ) {
-            return;
-          }
-          setOpen((o) => !o);
-        }}
-        aria-expanded={open}
       >
-        <td className="opacity-40 text-xs tabular-nums">{slNo}</td>
-        <td className="font-medium">
-          <CompanyCell
-            name={local.companyName}
-            url={local.companyCareerPage}
-            onSave={(v) => patch("companyName", v || app.companyName)}
-            className={cellInput}
-          />
-        </td>
-        <td>
-          <RoleCell
-            role={local.jobRole ?? ""}
-            url={local.jobUrl}
-            onSave={(v) => patch("jobRole", v || null)}
-            className={cellInput}
-          />
-        </td>
-        <td>
-          <EditableText
-            value={local.location ?? ""}
-            onSave={(v) => patch("location", v || null)}
-            className={cellInput}
-          />
-        </td>
-        <td className="min-w-[140px]">
-          <ChipSelect
-            value={local.interviewStatus ?? ""}
-            options={INTERVIEW_OPTIONS}
-            badgeMap={INTERVIEW_BADGE}
-            emptyLabel="—"
-            disabled={busy}
-            onChange={(v) => patch("interviewStatus", v || null)}
-          />
-        </td>
-        <td className="min-w-[140px]">
-          <ChipSelect
-            value={local.status}
-            options={STATUS_OPTIONS}
-            badgeMap={STATUS_BADGE}
-            disabled={busy}
-            onChange={(v) => patch("status", v)}
-          />
-        </td>
-        <td>
-          <input
-            type="date"
-            defaultValue={fmtDate(local.appliedDate)}
-            onBlur={(e) => {
-              if (e.target.value !== fmtDate(local.appliedDate)) {
-                patch("appliedDate", e.target.value);
-              }
-            }}
-            className="input input-ghost input-xs tabular-nums"
-            disabled={busy}
-          />
-        </td>
-        <td className="min-w-[180px]">
-          <select
-            value={local.resumeId ?? ""}
-            onChange={(e) => patch("resumeId", e.target.value || null)}
-            className="select select-bordered select-sm w-full"
-            disabled={busy}
-          >
-            <option value="">—</option>
-            {resumes.map((r) => (
-              <option key={r.id} value={r.id}>
-                {r.label}
-              </option>
-            ))}
-            {local.resumeId &&
-              !resumes.some((r) => r.id === local.resumeId) && (
-                <option value={local.resumeId}>
-                  {(local.resumeLabel ?? local.resumeId) + " (archived)"}
-                </option>
-              )}
-          </select>
-        </td>
-        <td>
-          <input
-            type="date"
-            defaultValue={fmtDate(local.decisionDate)}
-            onBlur={(e) => {
-              if (e.target.value !== fmtDate(local.decisionDate)) {
-                patch("decisionDate", e.target.value || null);
-              }
-            }}
-            className="input input-ghost input-xs tabular-nums"
-            disabled={busy}
-          />
-        </td>
-        <td>
-          <EditableText
-            value={local.decisionTime ?? ""}
-            onSave={(v) => patch("decisionTime", v || null)}
-            className={cellInput}
-            placeholder="e.g. 2:00pm"
-          />
-        </td>
-        <td className="text-right pr-4">
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation();
-              onMainReachOutClick();
-            }}
-            disabled={busy}
-            title={
-              local.linkedLeads.length === 0
-                ? "Pick a lead to reach out to"
-                : local.linkedLeads.length === 1
-                ? `Reach out to ${local.linkedLeads[0].name}`
-                : "Choose which lead to reach out to"
-            }
-            className="inline-flex items-center gap-1.5 text-xs font-medium text-primary/80 hover:text-primary hover:bg-primary/10 rounded-md px-2.5 py-1.5 transition-colors disabled:opacity-40"
-          >
-            <Mail className="h-3.5 w-3.5" />
-            Reach out
-            {local.linkedLeads.length > 1 && (
-              <span className="badge badge-ghost badge-xs ml-0.5">
-                {local.linkedLeads.length}
-              </span>
-            )}
-          </button>
-        </td>
-      </tr>
-      {open && (
-        <tr className="bg-base-200/40">
-          <td colSpan={11} className="p-0 border-t border-base-300/40">
-            <DetailsPanel
-              app={local}
-              busy={busy}
-              onSaveMany={patchMany}
-              onDelete={onDelete}
-              onUnlinkLead={unlinkLead}
-              onLinkLead={() => setPickerMode("link")}
-              onReachOutToLead={navigateToReachOut}
+        {/* ── Header band: identity + status + hover actions ── */}
+        <div className="flex items-start gap-3 px-4 pt-3">
+          <span className="text-[11px] tabular-nums opacity-30 pt-1 shrink-0">
+            {slNo}
+          </span>
+
+          {/* Company + role in two fixed tracks so the role column lines up
+              uniformly down the page instead of shifting with company width. */}
+          <div className="min-w-0 flex-1 grid grid-cols-[16rem_1fr] items-baseline gap-x-4">
+            <span className="font-medium text-[15px] leading-snug truncate">
+              <CompanyCell
+                name={local.companyName}
+                url={local.companyCareerPage}
+                onSave={(v) => patch("companyName", v || app.companyName)}
+                className={cellInput}
+              />
+            </span>
+            <span className="text-[13px] leading-snug truncate opacity-60 min-w-0">
+              <RoleCell
+                role={local.jobRole ?? ""}
+                url={local.jobUrl}
+                onSave={(v) => patch("jobRole", v || null)}
+                className={cellInput}
+              />
+            </span>
+          </div>
+
+          {/* Cover-letter indicator — present only when a letter is saved, so
+              you can scan which jobs already have one. Opens the details modal. */}
+          {local.coverLetter && local.coverLetter.trim() && (
+            <button
+              type="button"
+              onClick={() => setOpen(true)}
+              title="Cover letter ready — open to view"
+              aria-label="Cover letter ready"
+              className="shrink-0 text-primary/70 hover:text-primary transition-colors -mt-0.5"
+            >
+              <FileText className="h-4 w-4" />
+            </button>
+          )}
+
+          {/* Status — the one prominent chip; what you scan a card for */}
+          <div className="shrink-0">
+            <ChipSelect
+              value={local.status}
+              options={STATUS_OPTIONS}
+              badgeMap={STATUS_BADGE}
+              disabled={busy}
+              onChange={(v) => patch("status", v)}
             />
-          </td>
-        </tr>
+          </div>
+
+          {/* Actions — quiet until hover/focus so resting cards stay calm */}
+          <div className="flex items-center gap-0.5 shrink-0 -mr-1 -mt-0.5">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onMainReachOutClick();
+              }}
+              disabled={busy}
+              title={
+                local.linkedLeads.length === 0
+                  ? "Pick a lead to reach out to"
+                  : local.linkedLeads.length === 1
+                  ? `Reach out to ${local.linkedLeads[0].name}`
+                  : "Choose which lead to reach out to"
+              }
+              aria-label="Reach out"
+              className="relative btn btn-ghost btn-xs btn-square text-primary/70 hover:text-primary opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity disabled:opacity-40"
+            >
+              <Mail className="h-4 w-4" />
+              {local.linkedLeads.length > 1 && (
+                <span className="absolute -top-0.5 -right-0.5 text-[9px] font-medium tabular-nums bg-primary text-primary-content rounded-full h-3.5 min-w-3.5 px-0.5 flex items-center justify-center">
+                  {local.linkedLeads.length}
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => setOpen(true)}
+              aria-label={`Open details for ${local.companyName}`}
+              title="Open details"
+              className="btn btn-ghost btn-xs btn-square opacity-30 group-hover:opacity-70 hover:!opacity-100 transition-opacity"
+            >
+              <Maximize2 className="h-4 w-4" />
+            </button>
+            {confirmingDelete ? (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setConfirmingDelete(false);
+                  onDelete();
+                }}
+                disabled={busy}
+                aria-label={`Confirm delete ${local.companyName}`}
+                title="Click again to permanently delete"
+                className="inline-flex items-center gap-1 text-[11px] font-medium text-error hover:text-error-content hover:bg-error rounded-md px-2 py-1 transition-colors disabled:opacity-40"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                Delete?
+              </button>
+            ) : (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setConfirmingDelete(true);
+                }}
+                disabled={busy}
+                aria-label={`Delete ${local.companyName}`}
+                title="Delete application"
+                className="btn btn-ghost btn-xs btn-square text-error/60 hover:text-error opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity disabled:opacity-40"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* ── Meta row: 5 equal columns, evenly spread across the full width,
+             so every field aligns to the same column down the page. ── */}
+        <div className="grid grid-cols-5 gap-x-4 px-4 pb-3 pt-2.5 mt-2.5 ml-[26px] mr-4 border-t border-base-300/70 text-[13px]">
+          <Fact label="Location">
+            <EditableText
+              value={local.location ?? ""}
+              onSave={(v) => patch("location", v || null)}
+              className={cellInput}
+              placeholder="—"
+            />
+          </Fact>
+          <Fact label="Applied">
+            <input
+              type="date"
+              defaultValue={fmtDate(local.appliedDate)}
+              onBlur={(e) => {
+                if (e.target.value !== fmtDate(local.appliedDate)) {
+                  patch("appliedDate", e.target.value);
+                }
+              }}
+              className="bg-transparent outline-none tabular-nums rounded focus:bg-base-200 px-1 py-0.5"
+              disabled={busy}
+            />
+          </Fact>
+          <Fact label="Resume">
+            <select
+              value={local.resumeId ?? ""}
+              onChange={(e) => patch("resumeId", e.target.value || null)}
+              className="bg-transparent outline-none rounded hover:bg-base-200/60 focus:bg-base-200 px-1 py-0.5 max-w-[10rem] cursor-pointer truncate"
+              disabled={busy}
+            >
+              <option value="">—</option>
+              {resumes.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.label}
+                </option>
+              ))}
+              {local.resumeId &&
+                !resumes.some((r) => r.id === local.resumeId) && (
+                  <option value={local.resumeId}>
+                    {(local.resumeLabel ?? local.resumeId) + " (archived)"}
+                  </option>
+                )}
+            </select>
+          </Fact>
+          <Fact label="Interview">
+            <ChipSelect
+              value={local.interviewStatus ?? ""}
+              options={INTERVIEW_OPTIONS}
+              badgeMap={INTERVIEW_BADGE}
+              emptyLabel="—"
+              disabled={busy}
+              onChange={(v) => patch("interviewStatus", v || null)}
+            />
+          </Fact>
+          <Fact label="Decision">
+            <span className="inline-flex items-center gap-1.5">
+              <input
+                type="date"
+                defaultValue={fmtDate(local.decisionDate)}
+                onBlur={(e) => {
+                  if (e.target.value !== fmtDate(local.decisionDate)) {
+                    patch("decisionDate", e.target.value || null);
+                  }
+                }}
+                className="bg-transparent outline-none tabular-nums rounded focus:bg-base-200 px-1 py-0.5"
+                disabled={busy}
+              />
+              <EditableText
+                value={local.decisionTime ?? ""}
+                onSave={(v) => patch("decisionTime", v || null)}
+                className={cellInput}
+                placeholder="—"
+              />
+            </span>
+          </Fact>
+        </div>
+      </div>
+      {open && (
+        <DetailsModal
+          title={`${local.companyName}${local.jobRole ? ` · ${local.jobRole}` : ""}`}
+          onClose={() => setOpen(false)}
+        >
+          <DetailsPanel
+            app={local}
+            busy={busy}
+            onSaveMany={patchMany}
+            onDelete={onDelete}
+            onUnlinkLead={unlinkLead}
+            onLinkLead={() => setPickerMode("link")}
+            onReachOutToLead={navigateToReachOut}
+          />
+        </DetailsModal>
       )}
       {pickerMode !== "off" && (
         <PickerPortal
@@ -750,6 +839,18 @@ function DetailsPanel({
             ) : (
               <ReadJobDescription value={draft.jobDescription} />
             )}
+          </Section>
+
+          <Section label="Cover letter" full>
+            <CoverLetterSection
+              company={app.companyName}
+              jobDescription={draft.jobDescription}
+              resumeId={app.resumeId}
+              coverLetter={app.coverLetter}
+              coverLetterMeta={app.coverLetterMeta}
+              busy={busy}
+              onSave={onSaveMany}
+            />
           </Section>
 
           <Section label="Ask a question" full>
@@ -1165,6 +1266,217 @@ function QuestionSection({
   );
 }
 
+// ─── Cover letter ───────────────────────────────────────────────────────────
+// One editable cover letter per application. Generate from the job's company +
+// JD + chosen resume, edit the body, download a matching PDF on demand, or
+// regenerate. Persisted onto the JobApplication via the same patch path as the
+// other fields.
+function CoverLetterSection({
+  company,
+  jobDescription,
+  resumeId,
+  coverLetter,
+  coverLetterMeta,
+  busy,
+  onSave,
+}: {
+  company: string;
+  jobDescription: string;
+  resumeId: string | null;
+  coverLetter: string | null;
+  coverLetterMeta: CoverLetterMeta | null;
+  busy: boolean;
+  onSave: (updates: Partial<App>) => Promise<boolean>;
+}) {
+  const [body, setBody] = useState(coverLetter ?? "");
+  const [meta, setMeta] = useState<CoverLetterMeta | null>(coverLetterMeta);
+  const [generating, setGenerating] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const hasLetter = body.trim().length > 0;
+  const hasJd = jobDescription.trim().length > 0;
+  // Dirty if the editor differs from what's persisted on the row.
+  const dirty = body !== (coverLetter ?? "");
+
+  async function generate(regenerate = false) {
+    if (!hasJd || generating) return;
+    if (regenerate && !window.confirm("Regenerate this cover letter? Your current edits will be replaced.")) {
+      return;
+    }
+    setGenerating(true);
+    try {
+      const res = await fetch("/api/proxy/cover-text", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          company,
+          job_description: jobDescription,
+          resume_id: resumeId,
+        }),
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${res.status}`);
+      }
+      const json = (await res.json()) as {
+        role_title?: string;
+        hiring_manager?: string;
+        body?: string;
+      };
+      const nextMeta: CoverLetterMeta = {
+        roleTitle: json.role_title ?? "",
+        hiringManager: json.hiring_manager ?? "",
+        resumeId,
+      };
+      const nextBody = json.body ?? "";
+      setBody(nextBody);
+      setMeta(nextMeta);
+      const ok = await onSave({ coverLetter: nextBody, coverLetterMeta: nextMeta });
+      if (ok) toast.success(regenerate ? "Cover letter regenerated" : "Cover letter generated");
+    } catch (e) {
+      toast.error(`Couldn't generate: ${(e as Error).message}`);
+    } finally {
+      setGenerating(false);
+    }
+  }
+
+  async function save() {
+    if (saving || !dirty) return;
+    setSaving(true);
+    try {
+      const ok = await onSave({ coverLetter: body || null });
+      if (ok) toast.success("Cover letter saved");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function downloadPdf() {
+    if (downloading || !hasLetter) return;
+    setDownloading(true);
+    try {
+      const res = await fetch("/api/proxy/cover-letter/pdf", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          company,
+          role_title: meta?.roleTitle ?? "",
+          hiring_manager: meta?.hiringManager ?? "",
+          body,
+        }),
+      });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.detail || `HTTP ${res.status}`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `CoverLetter_${company.replace(/[^A-Za-z0-9._-]+/g, "_")}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      toast.error(`Couldn't build PDF: ${(e as Error).message}`);
+    } finally {
+      setDownloading(false);
+    }
+  }
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(body);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      toast.error("Copy failed");
+    }
+  }
+
+  // No letter yet → generate CTA.
+  if (!hasLetter) {
+    return (
+      <div className="space-y-2">
+        {!hasJd && (
+          <p className="text-xs opacity-50 italic">
+            Add a job description above to generate a tailored cover letter.
+          </p>
+        )}
+        <button
+          type="button"
+          onClick={() => generate(false)}
+          disabled={!hasJd || generating}
+          className="inline-flex items-center gap-1.5 text-xs font-semibold text-primary-content bg-primary hover:bg-primary/90 rounded-md px-3 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <Sparkles className="h-3.5 w-3.5" />
+          {generating ? "Generating…" : "Generate cover letter"}
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2.5">
+      <textarea
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        rows={10}
+        placeholder="Cover letter body"
+        className="textarea textarea-bordered textarea-sm w-full leading-relaxed"
+      />
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={save}
+          disabled={saving || !dirty}
+          className="inline-flex items-center gap-1.5 text-xs font-semibold text-primary-content bg-primary hover:bg-primary/90 rounded-md px-3 py-1.5 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {saving ? "Saving…" : dirty ? "Save" : "Saved"}
+        </button>
+        <button
+          type="button"
+          onClick={downloadPdf}
+          disabled={downloading}
+          className="inline-flex items-center gap-1.5 text-xs font-medium opacity-80 hover:opacity-100 hover:text-primary hover:bg-primary/10 rounded-md px-2.5 py-1.5 transition-colors disabled:opacity-40"
+        >
+          <Download className="h-3.5 w-3.5" />
+          {downloading ? "Building…" : "Download PDF"}
+        </button>
+        <button
+          type="button"
+          onClick={copy}
+          className="inline-flex items-center gap-1 text-xs opacity-70 hover:opacity-100 hover:text-primary transition-colors px-2 py-1.5"
+          title="Copy cover letter text"
+        >
+          {copied ? (
+            <>
+              <Check className="h-3 w-3" /> Copied
+            </>
+          ) : (
+            <>
+              <Copy className="h-3 w-3" /> Copy
+            </>
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={() => generate(true)}
+          disabled={generating || !hasJd}
+          className="inline-flex items-center gap-1.5 text-xs opacity-70 hover:opacity-100 hover:text-primary transition-colors px-2 py-1.5 ml-auto disabled:opacity-40"
+          title={hasJd ? "Regenerate from the job description" : "Add a job description to regenerate"}
+        >
+          <Sparkles className="h-3.5 w-3.5" />
+          {generating ? "Regenerating…" : "Regenerate"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── Edit-mode input primitives ─────────────────────────────────────────────
 
 function TextInput({
@@ -1209,6 +1521,20 @@ function UrlInput({
   );
 }
 
+// One field cell on a card's meta grid: a muted uppercase label stacked above
+// its (inline-editable) value. Stacking + a fixed grid track keeps every field
+// aligned to the same column down the page, so the second line reads uniform.
+function Fact({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <span className="flex flex-col gap-0.5 min-w-0">
+      <span className="text-[9px] uppercase tracking-[0.09em] opacity-35">
+        {label}
+      </span>
+      <span className="opacity-85 min-w-0 truncate">{children}</span>
+    </span>
+  );
+}
+
 function CompanyCell({
   name,
   url,
@@ -1222,12 +1548,14 @@ function CompanyCell({
 }) {
   const [editing, setEditing] = useState(false);
 
-  if (editing || !url) {
+  // Only swap to an input while actively editing, so the resting state (text or
+  // link) sizes to its content and the full company name is always visible.
+  if (editing) {
     return (
       <input
         type="text"
         defaultValue={name}
-        autoFocus={editing}
+        autoFocus
         onBlur={(e) => {
           setEditing(false);
           if (e.target.value !== name) onSave(e.target.value);
@@ -1238,6 +1566,19 @@ function CompanyCell({
         }}
         className={className}
       />
+    );
+  }
+
+  // No career page → plain text; double-click to rename.
+  if (!url) {
+    return (
+      <span
+        onDoubleClick={() => setEditing(true)}
+        title="Double-click to rename"
+        className="cursor-text"
+      >
+        {name}
+      </span>
     );
   }
 

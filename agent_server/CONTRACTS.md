@@ -8,8 +8,8 @@
 >
 > Layout note: this is a SEPARATE FastAPI app. The package is `agent_server/`
 > (importable, sibling to `backend/`). Tests live in top-level `tests/`, docs in
-> top-level `docs/`. It runs as its own uvicorn process on **port 8001** and
-> talks to the existing `backend/` (port ~8000) over HTTP only.
+> top-level `docs/`. It runs as its own uvicorn process on **port 8002** and
+> talks to the existing `backend/` (port ~8001) over HTTP only.
 
 Status legend: 🧊 FROZEN (do not change) · 🔧 owned by one agent (internal).
 
@@ -33,8 +33,8 @@ ORCHESTRATOR (deterministic code loop — NOT an LLM)
         count++, sleep(random short)
 ```
 
-Two processes: **platform backend** (existing, `backend/`, port ~8000) and
-**agent server** (new, `agent_server/`, uvicorn on **port 8001**). Two Postgres
+Two processes: **platform backend** (existing, `backend/`, port ~8001) and
+**agent server** (new, `agent_server/`, uvicorn on **port 8002**). Two Postgres
 DBs, logically separate:
 - **platform DB** (`apply_tools`) = source of truth for verified leads.
 - **agent DB** (`apply_agent`) = operational only: jobs, checkpoints, seen-cache,
@@ -149,7 +149,7 @@ psycopg v3, mirroring `backend/db.py` connection style but pointing at
 
 ---
 
-## 5. 🧊 HTTP API of the agent server (port 8001)
+## 5. 🧊 HTTP API of the agent server (port 8002)
 
 Owner: API & orchestrator agent. FastAPI (`agent_server/api/app.py`).
 

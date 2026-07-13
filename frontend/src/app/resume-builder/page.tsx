@@ -20,7 +20,9 @@ export default async function ResumeBuilderPage() {
             {resumes.length}
           </span>
         </div>
-        <NewResumeButton />
+        <NewResumeButton
+          existing={resumes.map((r) => ({ id: r.id, name: r.name }))}
+        />
       </div>
 
       {resumes.length === 0 ? (
