@@ -194,11 +194,11 @@ def _contact_line(header: dict[str, Any]) -> str:
     parts: list[str] = []
     phone = _g(header, "phone")
     if phone:
-        parts.append(f"Tel: {escape_latex(phone)}")
+        parts.append(escape_latex(phone))
     email = _g(header, "email")
     if email:
         parts.append(
-            f"Email: \\href{{mailto:{email}}}{{\\underline{{{escape_latex(email)}}}}}"
+            f"\\href{{mailto:{email}}}{{\\underline{{{escape_latex(email)}}}}}"
         )
     for key, label in (
         ("linkedin", "LinkedIn"),
