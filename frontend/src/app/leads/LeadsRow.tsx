@@ -8,7 +8,6 @@ import {
   ExternalLink,
   Trash2,
   Mail,
-  Send,
   AlertTriangle,
 } from "lucide-react";
 import type { Lead } from "./LeadsTable";
@@ -29,12 +28,6 @@ const FIELD_LABELS: Partial<Record<keyof Lead, string>> = {
 function fieldLabel(field: keyof Lead): string {
   return FIELD_LABELS[field] ?? String(field);
 }
-
-const STATUS_BADGE: Record<string, string> = {
-  draft: "badge-ghost",
-  sent: "badge-success",
-  failed: "badge-error",
-};
 
 export default function LeadsRow({ slNo, lead }: { slNo: number; lead: Lead }) {
   const router = useRouter();
@@ -129,7 +122,6 @@ export default function LeadsRow({ slNo, lead }: { slNo: number; lead: Lead }) {
     }, 4500);
 
     toast(`Deleted ${lead.name}`, {
-      description: "Linked reach-outs are kept but unlinked.",
       duration: 4500,
       action: {
         label: "Undo",
@@ -144,9 +136,6 @@ export default function LeadsRow({ slNo, lead }: { slNo: number; lead: Lead }) {
 
   const cellInput =
     "w-full bg-transparent outline-none focus:bg-base-200 rounded px-1 py-0.5 transition-colors";
-
-  const sentCount = local.reachOuts.filter((r) => r.status === "sent").length;
-  const totalReachOuts = local.reachOuts.length;
 
   // Optimistically hidden while a delete is pending (Undo restores it).
   if (deleted) return null;
@@ -221,18 +210,6 @@ export default function LeadsRow({ slNo, lead }: { slNo: number; lead: Lead }) {
             onSave={(v) => patch("linkedinUrl", v || null)}
             className={cellInput}
           />
-        </td>
-        <td className="text-center">
-          {totalReachOuts === 0 ? (
-            <span className="text-xs opacity-30">—</span>
-          ) : (
-            <span
-              className="badge badge-ghost badge-sm font-mono tabular-nums"
-              title={`${sentCount} sent · ${totalReachOuts - sentCount} draft/failed`}
-            >
-              {sentCount}/{totalReachOuts}
-            </span>
-          )}
         </td>
         <td className="text-center">
           <input
@@ -398,7 +375,7 @@ function DetailsPanel({
                 value={draft.linkedinProfile}
                 onChange={(e) => setField("linkedinProfile", e.target.value)}
                 rows={10}
-                placeholder="Paste the profile text from the LinkedIn PDF here. The Reach Out composer reads this when generating personalized emails."
+                placeholder="Paste the profile text from the LinkedIn PDF here."
                 className="textarea textarea-bordered textarea-sm w-full font-mono text-xs leading-relaxed"
               />
             ) : draft.linkedinProfile ? (
@@ -427,43 +404,6 @@ function DetailsPanel({
               </p>
             ) : (
               <span className="text-sm opacity-30 italic">No notes</span>
-            )}
-          </Section>
-
-          <Section label="Reach-out history" full>
-            {lead.reachOuts.length === 0 ? (
-              <p className="text-sm opacity-40 italic">
-                No reach-outs yet. Draft one from the{" "}
-                <a href="/reach-out" className="link link-primary">
-                  Reach Out
-                </a>{" "}
-                page; we&apos;ll auto-link it here by email.
-              </p>
-            ) : (
-              <ul className="space-y-1.5">
-                {lead.reachOuts.map((r) => (
-                  <li
-                    key={r.id}
-                    className="flex items-center gap-3 px-3 py-2 rounded-md bg-base-200/40 border border-base-300/40"
-                  >
-                    <span
-                      className={`badge badge-sm ${STATUS_BADGE[r.status] ?? "badge-ghost"} shrink-0`}
-                    >
-                      {r.status}
-                    </span>
-                    <Send className="h-3.5 w-3.5 opacity-40 shrink-0" />
-                    <span className="text-sm truncate flex-1">
-                      {r.subject || <span className="opacity-40 italic">(no subject)</span>}
-                    </span>
-                    <span
-                      className="text-xs opacity-50 tabular-nums whitespace-nowrap"
-                      title={new Date(r.sentAt ?? r.createdAt).toLocaleString()}
-                    >
-                      {relativeTime(new Date(r.sentAt ?? r.createdAt))}
-                    </span>
-                  </li>
-                ))}
-              </ul>
             )}
           </Section>
 

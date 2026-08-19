@@ -73,12 +73,6 @@
       >
         Cover
       </button>
-      <button type="button" class="tab" role="tab" data-tab="email" aria-selected="false">
-        Email
-      </button>
-      <button type="button" class="tab" role="tab" data-tab="outreach" aria-selected="false">
-        Outreach
-      </button>
       <button type="button" class="tab" role="tab" data-tab="score" aria-selected="false">
         Score
       </button>
@@ -110,92 +104,6 @@
           <button type="button" class="copy-btn" data-copy="cover-body-out">Copy</button>
         </div>
         <textarea id="cover-body-out" rows="14"></textarea>
-      </div>
-    </section>
-
-    <!-- ============ Email tab ============ -->
-    <section class="panel" data-panel="email">
-      <label for="email-intent">
-        What is this email for? <span class="hint">(optional)</span>
-      </label>
-      <textarea
-        id="email-intent"
-        placeholder="e.g. asking the recruiter to consider me for this role"
-        rows="2"
-        maxlength="2000"
-      ></textarea>
-
-      <div class="panel-actions">
-        <button type="button" id="emailSubmit" class="btn-primary">Generate email</button>
-      </div>
-      <div id="emailStatus" class="status" role="status" aria-live="polite"></div>
-
-      <div id="emailResult" class="result hidden">
-        <div class="result-row">
-          <label for="email-subject-out">Subject</label>
-          <button type="button" class="copy-btn" data-copy="email-subject-out">Copy</button>
-        </div>
-        <input type="text" id="email-subject-out" readonly />
-
-        <div class="result-row">
-          <label for="email-body-out">Body</label>
-          <button type="button" class="copy-btn" data-copy="email-body-out">Copy</button>
-        </div>
-        <textarea id="email-body-out" rows="12"></textarea>
-      </div>
-    </section>
-
-    <!-- ============ Outreach tab (uses its own profile, not shared JD) ============ -->
-    <section class="panel" data-panel="outreach">
-      <div class="panel-note">
-        Outreach uses the target person's profile, not the JD above.
-      </div>
-
-      <label for="outreach-channel">Channel</label>
-      <select id="outreach-channel" required>
-        <option value="linkedin_invitation">LinkedIn invitation (~280 chars)</option>
-        <option value="linkedin_message">LinkedIn message / InMail</option>
-        <option value="email">Email</option>
-      </select>
-
-      <label for="outreach-profile">
-        Their LinkedIn profile <span class="hint">(paste text)</span>
-      </label>
-      <textarea
-        id="outreach-profile"
-        placeholder="Paste their profile: name, headline, current role, recent experience, posts they've written..."
-        rows="6"
-        maxlength="30000"
-      ></textarea>
-
-      <label for="outreach-context">
-        What is this about? <span class="hint">(optional)</span>
-      </label>
-      <textarea
-        id="outreach-context"
-        placeholder="e.g. asking for a referral / interested in their work on X"
-        rows="2"
-        maxlength="2000"
-      ></textarea>
-
-      <div class="panel-actions">
-        <button type="button" id="outreachSubmit" class="btn-primary">Generate message</button>
-      </div>
-      <div id="outreachStatus" class="status" role="status" aria-live="polite"></div>
-
-      <div id="outreachResult" class="result hidden">
-        <div class="result-row" id="outreachSubjectRow" style="display: none;">
-          <label for="outreach-subject-out">Subject</label>
-          <button type="button" class="copy-btn" data-copy="outreach-subject-out">Copy</button>
-        </div>
-        <input type="text" id="outreach-subject-out" readonly style="display: none;" />
-
-        <div class="result-row">
-          <label for="outreach-message-out">Message</label>
-          <span id="outreachCharCount" class="char-count"></span>
-          <button type="button" class="copy-btn" data-copy="outreach-message-out">Copy</button>
-        </div>
-        <textarea id="outreach-message-out" rows="10"></textarea>
       </div>
     </section>
 
@@ -402,8 +310,8 @@
     <section class="panel" data-panel="chat">
       <div class="chat-thread" id="chatThread" aria-live="polite">
         <div class="chat-empty" id="chatEmpty">
-          Ask anything about your job search — cover letters, outreach,
-          interview prep, or career questions.
+          Ask anything about your job search — cover letters, interview
+          prep, or career questions.
         </div>
       </div>
       <div id="chatStatus" class="status" role="status" aria-live="polite"></div>

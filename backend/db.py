@@ -368,178 +368,8 @@ def list_leads_for_application(app_id: str) -> list[dict]:
         return _rows_to_dicts(rows)
 
 
-def list_reach_outs_for_application(app_id: str) -> list[dict]:
-    with get_conn() as conn:
-        rows = conn.execute(
-            text(
-                'SELECT * FROM "ReachOut" WHERE "jobApplicationId" = :app '
-                'ORDER BY "createdAt" DESC'
-            ),
-            {"app": app_id},
-        ).fetchall()
-        return _rows_to_dicts(rows)
-
-
 # -----------------------------------------------------------------------------
-# ReachOut CRUD (LinkedIn-driven outreach emails: draft, edit, send).
-# -----------------------------------------------------------------------------
-
-REACH_OUT_INSERT_COLUMNS = (
-    "recipientName",
-    "recipientEmail",
-    "linkedinProfile",
-    "contextNote",
-    "resumeId",
-    "leadId",
-    "jobApplicationId",
-    "channel",
-    "subject",
-    "body",
-)
-
-REACH_OUT_PATCH_COLUMNS = (
-    "recipientName",
-    "recipientEmail",
-    "linkedinProfile",
-    "contextNote",
-    "resumeId",
-    "channel",
-    "subject",
-    "body",
-    "htmlBody",
-    "status",
-    "sentAt",
-    "errorMessage",
-)
-
-
-def _clean_reach_out_value(col: str, value):
-    if isinstance(value, str):
-        v = value.strip()
-        # recipientName / recipientEmail / linkedinProfile / subject / body
-        # are NOT NULL — keep empty strings out of UPDATEs by callers.
-        if v == "" and col in {
-            "contextNote",
-            "resumeId",
-            "leadId",
-            "jobApplicationId",
-            "errorMessage",
-            "sentAt",
-            "htmlBody",
-        }:
-            return None
-        return v
-    return value
-
-
-def insert_reach_out(fields: dict, *, require_content: bool = True) -> str:
-    """Insert a ReachOut row in 'draft' status. Returns the new id.
-
-    When `require_content` is True (default, used by the AI-generated path),
-    `linkedinProfile`, `subject`, and `body` must each be non-empty strings.
-    Set False for blank manual drafts where the user will fill in subject
-    and body inside the editor before sending — we still write empty
-    strings into those NOT NULL columns to keep the schema simple.
-    """
-    channel = (fields.get("channel") or "email").strip() or "email"
-    # Email channel needs an address; LinkedIn channels don't (the user
-    # pastes the message into LinkedIn manually).
-    base_required = (
-        ("recipientName", "recipientEmail") if channel == "email" else ("recipientName",)
-    )
-    # LinkedIn invitations have no subject (just a 300-char note).
-    if require_content:
-        if channel == "linkedin_invitation":
-            content_required = ("linkedinProfile", "body")
-        else:
-            content_required = ("linkedinProfile", "subject", "body")
-    else:
-        content_required = ()
-    for col in base_required + content_required:
-        v = fields.get(col)
-        if not (isinstance(v, str) and v.strip()):
-            raise ValueError(f"{col} is required")
-
-    row_id = secrets.token_urlsafe(12)
-    cleaned: dict = {"id": row_id}
-    for col in REACH_OUT_INSERT_COLUMNS:
-        if col in fields:
-            cleaned[col] = _clean_reach_out_value(col, fields[col])
-    # Backfill the NOT NULL content columns with empty strings when the
-    # caller skipped them (blank manual draft, or LinkedIn channels where
-    # subject/recipientEmail don't apply).
-    for col in ("recipientEmail", "linkedinProfile", "subject", "body"):
-        cleaned.setdefault(col, "")
-
-    cols = list(cleaned.keys())
-    col_sql = ", ".join(f'"{c}"' for c in cols)
-    bind_sql = ", ".join(f":{c}" for c in cols)
-    with get_conn() as conn:
-        conn.execute(
-            text(
-                f'INSERT INTO "ReachOut" ({col_sql}, "status", "updatedAt") '
-                f"VALUES ({bind_sql}, 'draft', CURRENT_TIMESTAMP)"
-            ),
-            cleaned,
-        )
-    return row_id
-
-
-def get_reach_out(row_id: str) -> dict | None:
-    with get_conn() as conn:
-        row = conn.execute(
-            text('SELECT * FROM "ReachOut" WHERE "id" = :id'), {"id": row_id}
-        ).fetchone()
-        return _row_to_dict(row) if row else None
-
-
-def update_reach_out(row_id: str, fields: dict) -> bool:
-    """Patch a ReachOut row. Only known columns are written. Returns True on hit."""
-    updates: dict = {}
-    for col in REACH_OUT_PATCH_COLUMNS:
-        if col in fields:
-            updates[col] = _clean_reach_out_value(col, fields[col])
-    if not updates:
-        return False
-
-    set_sql = (
-        ", ".join(f'"{c}" = :{c}' for c in updates)
-        + ', "updatedAt" = CURRENT_TIMESTAMP'
-    )
-    params = dict(updates, _id=row_id)
-    with get_conn() as conn:
-        cur = conn.execute(
-            text(f'UPDATE "ReachOut" SET {set_sql} WHERE "id" = :_id'), params
-        )
-        return cur.rowcount > 0
-
-
-def delete_reach_out(row_id: str) -> bool:
-    with get_conn() as conn:
-        cur = conn.execute(
-            text('DELETE FROM "ReachOut" WHERE "id" = :id'), {"id": row_id}
-        )
-        return cur.rowcount > 0
-
-
-def list_reach_outs() -> list[dict]:
-    with get_conn() as conn:
-        rows = conn.execute(
-            text('SELECT * FROM "ReachOut" ORDER BY "createdAt" DESC')
-        ).fetchall()
-        return _rows_to_dicts(rows)
-
-
-# Event recording moved off-box: see tracking-sidecar/main.py. The local
-# backend no longer holds a per-event row or aggregate counters; both are
-# fetched on demand from the sidecar via `/reach-out/{id}/events` and
-# `/reach-out/aggregates`.
-
-
-# -----------------------------------------------------------------------------
-# Lead CRUD (the people you might reach out to). A Lead is the master
-# record; ReachOut rows can reference one via ReachOut.leadId so each
-# Lead's profile shows how many emails were sent to them.
+# Lead CRUD. Leads are people attached to applications.
 # -----------------------------------------------------------------------------
 
 LEAD_INSERT_COLUMNS = (
@@ -662,80 +492,12 @@ def get_lead(lead_id: str) -> dict | None:
 
 
 def list_leads() -> list[dict]:
-    """Return every Lead with reach-out aggregates joined in.
-
-    A single LEFT JOIN keeps this O(N) instead of N+1; we surface
-    `reachOutCount`, `lastSentAt`, and `lastStatus` so the dashboard can
-    show "3 emails, last sent 2d ago" without a follow-up query.
-    """
+    """Return every Lead, newest first."""
     with get_conn() as conn:
         rows = conn.execute(
-            text(
-                """
-                SELECT
-                    l.*,
-                    COALESCE(agg."reachOutCount", 0) AS "reachOutCount",
-                    agg."lastSentAt" AS "lastSentAt",
-                    agg."lastStatus" AS "lastStatus"
-                FROM "Lead" l
-                LEFT JOIN (
-                    SELECT
-                        ro."leadId" AS "leadId",
-                        COUNT(*) AS "reachOutCount",
-                        MAX(ro."sentAt") AS "lastSentAt",
-                        -- pick the status of the most recent reach-out
-                        (SELECT r2."status"
-                           FROM "ReachOut" r2
-                          WHERE r2."leadId" = ro."leadId"
-                          ORDER BY r2."createdAt" DESC, r2."id" DESC
-                          LIMIT 1) AS "lastStatus"
-                    FROM "ReachOut" ro
-                    WHERE ro."leadId" IS NOT NULL
-                    GROUP BY ro."leadId"
-                ) agg ON agg."leadId" = l."id"
-                ORDER BY l."createdAt" DESC
-                """
-            )
+            text('SELECT * FROM "Lead" ORDER BY "createdAt" DESC')
         ).fetchall()
         return _rows_to_dicts(rows)
-
-
-def find_or_create_lead_by_email(
-    name: str,
-    email: str | None,
-    *,
-    linkedin_profile: str | None = None,
-    linkedin_url: str | None = None,
-    current_company: str | None = None,
-    role: str | None = None,
-) -> str | None:
-    """Look up a Lead by email; create one if missing. Returns the lead id,
-    or None when no email was provided (so we don't accidentally create
-    nameless duplicate rows for every blank email).
-
-    Used by the ReachOut create paths to keep the Lead → ReachOut graph
-    populated automatically. Existing Lead rows are NOT mutated here —
-    callers can edit them on the Leads page if their data drifted.
-    """
-    if not (isinstance(email, str) and email.strip()):
-        return None
-    email_clean = email.strip()
-    with get_conn() as conn:
-        row = conn.execute(
-            text('SELECT "id" FROM "Lead" WHERE "email" = :email'),
-            {"email": email_clean},
-        ).fetchone()
-        if row:
-            return row.id
-    fields = {
-        "name": name.strip() if isinstance(name, str) and name.strip() else email_clean,
-        "email": email_clean,
-        "linkedinProfile": linkedin_profile,
-        "linkedinUrl": linkedin_url,
-        "currentCompany": current_company,
-        "role": role,
-    }
-    return insert_lead(fields)
 
 
 def _as_unique_violation(exc: IntegrityError) -> Exception:
@@ -763,7 +525,7 @@ def _as_unique_violation(exc: IntegrityError) -> Exception:
 
 
 # -----------------------------------------------------------------------------
-# Setting key/value store (used for Gmail credentials).
+# Setting key/value store.
 # -----------------------------------------------------------------------------
 
 

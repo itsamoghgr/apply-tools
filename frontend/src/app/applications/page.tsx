@@ -141,21 +141,6 @@ export default async function ApplicationsPage({
           },
           orderBy: { createdAt: "asc" },
         },
-        reachOuts: {
-          orderBy: { createdAt: "desc" },
-          // Cap the reach-out preview list per app — we only surface the
-          // most recent few in the row; the rest live on the Reach-out page.
-          take: 5,
-          select: {
-            id: true,
-            subject: true,
-            status: true,
-            sentAt: true,
-            recipientName: true,
-            recipientEmail: true,
-            createdAt: true,
-          },
-        },
       },
     }),
     prisma.resume.findMany({
@@ -226,15 +211,6 @@ export default async function ApplicationsPage({
       currentCompany: jl.lead.currentCompany,
       role: jl.lead.role,
       linkRole: jl.role,
-    })),
-    reachOuts: a.reachOuts.map((r) => ({
-      id: r.id,
-      subject: r.subject,
-      status: r.status,
-      sentAt: r.sentAt?.toISOString() ?? null,
-      recipientName: r.recipientName,
-      recipientEmail: r.recipientEmail,
-      createdAt: r.createdAt.toISOString(),
     })),
   }));
 

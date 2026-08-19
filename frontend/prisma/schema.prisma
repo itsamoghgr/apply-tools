@@ -202,7 +202,7 @@ model ResumeProfile {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   // Companion plaintext Resume synced from this profile so it can be selected
-  // in the applications / reach-out / AI pickers. Cascade-deletes with this row.
+  // in the applications / AI pickers. Cascade-deletes with this row.
   resume      Resume?
 
   @@index([updatedAt])

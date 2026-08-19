@@ -133,7 +133,6 @@ export type App = {
     resumeId?: string | null;
   } | null;
   linkedLeads: LinkedLead[];
-  reachOuts: AppReachOut[];
 };
 
 export type LinkedLead = {
@@ -145,16 +144,6 @@ export type LinkedLead = {
   currentCompany: string | null;
   role: string | null;
   linkRole: string | null;
-};
-
-export type AppReachOut = {
-  id: string;
-  subject: string;
-  status: string;
-  sentAt: string | null;
-  recipientName: string;
-  recipientEmail: string;
-  createdAt: string;
 };
 
 export default function ApplicationsTable({

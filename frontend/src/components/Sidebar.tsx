@@ -12,9 +12,7 @@ import {
   ChevronRight,
   Menu,
   X,
-  Send,
   Users,
-  Mail,
   FilePlus2,
   User,
 } from "lucide-react";
@@ -44,8 +42,6 @@ type NavItem = {
 const NAV: NavItem[] = [
   { href: "/", label: "Home", icon: Home, exact: true },
   { href: "/applications", label: "Applications", icon: Briefcase },
-  { href: "/reach-out", label: "Reach Out", icon: Send },
-  { href: "/mail", label: "Mail", icon: Mail },
   { href: "/leads", label: "Leads", icon: Users },
   { href: "/resumes", label: "Resumes", icon: FileText },
   { href: "/resume-builder", label: "Resume Builder", icon: FilePlus2 },

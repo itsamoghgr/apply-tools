@@ -8,7 +8,7 @@ import { emptyProfile, normalizeProfile, type ResumeProfileData } from "./types"
 import { profileToText } from "./renderText";
 
 // Upsert the companion plaintext Resume for a builder profile so it shows up in
-// the applications / reach-out / AI pickers (they select active Resume rows by
+// the applications / AI pickers (they select active Resume rows by
 // id). The builder is the source of truth: label follows the profile name and
 // content is re-rendered on every save. Keyed by resumeProfileId so it's
 // idempotent; cascade-deletes with the profile via the schema relation.
@@ -37,7 +37,7 @@ async function syncCompanionResume(
 }
 
 // Toggle the active state of a builder resume's companion (controls whether it
-// appears in the applications / reach-out / AI pickers). Called from the builder
+// appears in the applications / AI pickers). Called from the builder
 // editor's active switch. Idempotent — upserts the companion if it's somehow
 // missing so the toggle always has something to flip.
 export async function setResumeProfileActive(

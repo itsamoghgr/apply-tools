@@ -7,9 +7,7 @@ import {
   Pencil,
   ExternalLink,
   Trash2,
-  Mail,
   Plus,
-  Send,
   X as XIcon,
   Sparkles,
   Copy,
@@ -20,7 +18,7 @@ import {
 } from "lucide-react";
 import LeadPicker from "./LeadPicker";
 import DetailsModal from "./DetailsModal";
-import type { LinkedLead, AppReachOut } from "./ApplicationsTable";
+import type { LinkedLead } from "./ApplicationsTable";
 
 type App = {
   id: string;
@@ -46,7 +44,6 @@ type App = {
   coverLetter: string | null;
   coverLetterMeta: CoverLetterMeta | null;
   linkedLeads: LinkedLead[];
-  reachOuts: AppReachOut[];
 };
 
 // Captured at generation so the on-demand PDF render matches the saved letter.
@@ -135,9 +132,7 @@ function ApplicationsRowInner({
   // Two-step delete on the card: first click arms, second confirms. Auto-disarms
   // after a few seconds so it can't sit primed and catch a later stray click.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const [pickerMode, setPickerMode] = useState<
-    "off" | "link" | "reach-out"
-  >("off");
+  const [pickerMode, setPickerMode] = useState<"off" | "link">("off");
 
   useEffect(() => {
     if (!confirmingDelete) return;
@@ -155,22 +150,6 @@ function ApplicationsRowInner({
       setLocal(app);
     }
   }, [app]);
-
-  function navigateToReachOut(leadId: string) {
-    router.push(
-      `/reach-out?leadId=${encodeURIComponent(
-        leadId
-      )}&applicationId=${encodeURIComponent(app.id)}`
-    );
-  }
-
-  function onMainReachOutClick() {
-    if (local.linkedLeads.length === 1) {
-      navigateToReachOut(local.linkedLeads[0].id);
-      return;
-    }
-    setPickerMode("reach-out");
-  }
 
   async function linkLead(
     leadId: string,
@@ -208,20 +187,6 @@ function ApplicationsRowInner({
       // for one inline link change.
     } catch (e) {
       toast.error(`Link failed: ${(e as Error).message}`);
-    }
-  }
-
-  async function onPickForReachOut(leadId: string, role: string | null) {
-    try {
-      // If this lead isn't already linked, link it on the way through.
-      if (!local.linkedLeads.some((l) => l.id === leadId)) {
-        const lead = await linkLead(leadId, role);
-        mergeLinkedLead(lead);
-      }
-      setPickerMode("off");
-      navigateToReachOut(leadId);
-    } catch (e) {
-      toast.error(`Could not start reach-out: ${(e as Error).message}`);
     }
   }
 
@@ -389,30 +354,6 @@ function ApplicationsRowInner({
           <div className="flex items-center gap-0.5 shrink-0 -mr-1 -mt-0.5">
             <button
               type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                onMainReachOutClick();
-              }}
-              disabled={busy}
-              title={
-                local.linkedLeads.length === 0
-                  ? "Pick a lead to reach out to"
-                  : local.linkedLeads.length === 1
-                  ? `Reach out to ${local.linkedLeads[0].name}`
-                  : "Choose which lead to reach out to"
-              }
-              aria-label="Reach out"
-              className="relative btn btn-ghost btn-xs btn-square text-primary/70 hover:text-primary opacity-0 group-hover:opacity-100 focus-visible:opacity-100 transition-opacity disabled:opacity-40"
-            >
-              <Mail className="h-4 w-4" />
-              {local.linkedLeads.length > 1 && (
-                <span className="absolute -top-0.5 -right-0.5 text-[9px] font-medium tabular-nums bg-primary text-primary-content rounded-full h-3.5 min-w-3.5 px-0.5 flex items-center justify-center">
-                  {local.linkedLeads.length}
-                </span>
-              )}
-            </button>
-            <button
-              type="button"
               onClick={() => setOpen(true)}
               aria-label={`Open details for ${local.companyName}`}
               title="Open details"
@@ -544,17 +485,13 @@ function ApplicationsRowInner({
             onDelete={onDelete}
             onUnlinkLead={unlinkLead}
             onLinkLead={() => setPickerMode("link")}
-            onReachOutToLead={navigateToReachOut}
           />
         </DetailsModal>
       )}
       {pickerMode !== "off" && (
         <PickerPortal
-          mode={pickerMode}
           alreadyLinkedIds={local.linkedLeads.map((l) => l.id)}
-          onPick={
-            pickerMode === "link" ? onPickForLink : onPickForReachOut
-          }
+          onPick={onPickForLink}
           onClose={() => setPickerMode("off")}
         />
       )}
@@ -569,28 +506,21 @@ const ApplicationsRow = memo(ApplicationsRowInner);
 export default ApplicationsRow;
 
 function PickerPortal({
-  mode,
   alreadyLinkedIds,
   onPick,
   onClose,
 }: {
-  mode: "link" | "reach-out";
   alreadyLinkedIds: string[];
   onPick: (leadId: string, role: string | null) => Promise<void> | void;
   onClose: () => void;
 }) {
-  // For "reach-out" we let the user pick from any lead (linked or not).
-  // For "link" we hide already-linked leads.
-  const exclude = mode === "link" ? alreadyLinkedIds : [];
-  const title =
-    mode === "link" ? "Link a lead to this application" : "Reach out to…";
   return (
     <LeadPicker
-      title={title}
-      excludeLeadIds={exclude}
+      title="Link a lead to this application"
+      excludeLeadIds={alreadyLinkedIds}
       onPick={onPick}
       onClose={onClose}
-      showRoleField={mode === "link"}
+      showRoleField
     />
   );
 }
@@ -642,7 +572,6 @@ function DetailsPanel({
   onDelete,
   onUnlinkLead,
   onLinkLead,
-  onReachOutToLead,
 }: {
   app: App;
   busy: boolean;
@@ -650,7 +579,6 @@ function DetailsPanel({
   onDelete: () => void;
   onUnlinkLead: (leadId: string) => void;
   onLinkLead: () => void;
-  onReachOutToLead: (leadId: string) => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -727,12 +655,7 @@ function DetailsPanel({
               busy={busy}
               onLinkLead={onLinkLead}
               onUnlinkLead={onUnlinkLead}
-              onReachOutToLead={onReachOutToLead}
             />
-          </Section>
-
-          <Section label="Outreach history" full>
-            <OutreachHistoryList reachOuts={app.reachOuts} />
           </Section>
 
           <Section label="Career page" full>
@@ -990,13 +913,11 @@ function LinkedLeadsList({
   busy,
   onLinkLead,
   onUnlinkLead,
-  onReachOutToLead,
 }: {
   leads: LinkedLead[];
   busy: boolean;
   onLinkLead: () => void;
   onUnlinkLead: (leadId: string) => void;
-  onReachOutToLead: (leadId: string) => void;
 }) {
   return (
     <div className="space-y-2">
@@ -1024,14 +945,6 @@ function LinkedLeadsList({
               )}
               <button
                 type="button"
-                onClick={() => onReachOutToLead(l.id)}
-                className="inline-flex items-center justify-center h-6 w-6 rounded-full text-primary/80 hover:text-primary hover:bg-primary/10 transition-colors"
-                title={`Reach out to ${l.name}`}
-              >
-                <Send className="h-3 w-3" />
-              </button>
-              <button
-                type="button"
                 onClick={() => onUnlinkLead(l.id)}
                 disabled={busy}
                 className="inline-flex items-center justify-center h-6 w-6 rounded-full opacity-50 hover:opacity-100 hover:bg-error/10 hover:text-error transition-colors disabled:opacity-30"
@@ -1052,60 +965,6 @@ function LinkedLeadsList({
         Link a lead
       </button>
     </div>
-  );
-}
-
-const REACH_OUT_STATUS_BADGE: Record<string, string> = {
-  draft: "badge-ghost",
-  sent: "badge-success",
-  failed: "badge-error",
-};
-
-function OutreachHistoryList({ reachOuts }: { reachOuts: AppReachOut[] }) {
-  if (reachOuts.length === 0) {
-    return (
-      <p className="text-sm opacity-30 italic">
-        No reach-outs recorded for this application yet.
-      </p>
-    );
-  }
-  return (
-    <ul className="space-y-2">
-      {reachOuts.map((r) => {
-        const variant =
-          REACH_OUT_STATUS_BADGE[r.status] ?? "badge-ghost";
-        const dateIso = r.sentAt ?? r.createdAt;
-        const date = new Date(dateIso);
-        const dateStr = isNaN(date.getTime())
-          ? ""
-          : date.toLocaleDateString();
-        return (
-          <li
-            key={r.id}
-            className="flex items-center gap-3 rounded-lg bg-base-100 border border-base-300/40 px-3 py-2"
-          >
-            <span className={`badge ${variant} badge-xs shrink-0`}>
-              {r.status}
-            </span>
-            <a
-              href={`/reach-out?edit=${encodeURIComponent(r.id)}`}
-              className="link link-hover text-sm flex-1 min-w-0 truncate"
-              title={r.subject}
-            >
-              {r.subject || <span className="opacity-50 italic">(no subject)</span>}
-            </a>
-            <span className="text-xs opacity-50 shrink-0">
-              {r.recipientName}
-            </span>
-            {dateStr && (
-              <span className="text-xs opacity-40 shrink-0 tabular-nums">
-                {dateStr}
-              </span>
-            )}
-          </li>
-        );
-      })}
-    </ul>
   );
 }
 

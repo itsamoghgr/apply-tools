@@ -1,6 +1,6 @@
 // Render a structured builder profile to clean plain text — the same shape the
 // backend's profile_to_text (backend/resume_ai.py) produces. This becomes the
-// `content` of the companion Resume row, which the applications / reach-out / AI
+// `content` of the companion Resume row, which the applications / AI
 // pickers feed to the LLM as the resume "voice / ground truth." Keep the two
 // renderers in sync so a builder resume reads the same whether scored in-editor
 // (backend) or consumed by a downstream generator (this text).

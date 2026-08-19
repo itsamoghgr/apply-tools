@@ -42,18 +42,6 @@ export default async function LeadsPage({
   const leads = await prisma.lead.findMany({
     where: { ...where, domain: null },
     orderBy: { createdAt: "desc" },
-    include: {
-      reachOuts: {
-        select: {
-          id: true,
-          status: true,
-          subject: true,
-          sentAt: true,
-          createdAt: true,
-        },
-        orderBy: { createdAt: "desc" },
-      },
-    },
   });
 
   const serialised = leads.map((l) => ({
@@ -69,13 +57,6 @@ export default async function LeadsPage({
     notes: l.notes,
     createdAt: l.createdAt.toISOString(),
     updatedAt: l.updatedAt.toISOString(),
-    reachOuts: l.reachOuts.map((r) => ({
-      id: r.id,
-      status: r.status,
-      subject: r.subject,
-      sentAt: r.sentAt?.toISOString() ?? null,
-      createdAt: r.createdAt.toISOString(),
-    })),
   }));
 
   // ── Discovered company leads: rows WITH an agent-set domain ────────────────
@@ -178,9 +159,7 @@ export default async function LeadsPage({
           {/* Sub-filter only applies to the outreach view */}
           <div className="flex items-center justify-between flex-wrap gap-3">
             <p className="text-sm opacity-60 max-w-2xl">
-              People you can reach out to. Each lead is auto-linked to any Reach
-              Out emails sent from this app, so you can see outreach history at a
-              glance.
+              People you&apos;ve saved from company research and applications.
             </p>
             <div
               role="tablist"

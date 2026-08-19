@@ -1,8 +1,6 @@
 """Generation modes:
 
 1. generate_cover_letter(company, jd) -> bytes (PDF)
-2. generate_application_email(company, jd, intent) -> {"subject", "body"}
-3. generate_outreach_message(profile_text, channel, context) -> {"message", "char_count", "subject"?}
 4. score_jd_fit(job_description, company) -> {"score": int 0-10, "verdict": str}
 
 The first three share the resume.txt ground truth and anti-AI-slop voice rules.
@@ -47,10 +45,11 @@ DEFAULT_RESUME_ID = "default"
 AI_PROVIDER = os.environ.get("AI_PROVIDER", "anthropic").lower()
 SCORE_PROVIDER = os.environ.get("SCORE_PROVIDER", AI_PROVIDER).lower()
 # EXTRACT_PROVIDER overrides just the JD auto-detect path. Defaults to Groq
-# (fast/consistent Llama) regardless of where generation runs; the extract path
-# then falls back NVIDIA -> Bedrock -> Anthropic (see EXTRACT_FALLBACK_CHAIN).
+# (Llama 3.3 on Bedrock) regardless of where generation runs; the extract path
+# then falls back Groq -> Anthropic -> NVIDIA (see EXTRACT_FALLBACK_CHAIN).
+# Bedrock leads because a full JD page exceeds Groq's 8000 TPM on-demand cap.
 # Override via env if you want auto-detect on a different primary.
-EXTRACT_PROVIDER = os.environ.get("EXTRACT_PROVIDER", "groq").lower()
+EXTRACT_PROVIDER = os.environ.get("EXTRACT_PROVIDER", "bedrock").lower()
 
 # Hard ceiling on a single LLM call. Without this, a slow upstream stalls
 # the popup forever (no client-side timeout in popup.js for /score, /extract-jd).
@@ -65,10 +64,13 @@ EXTRACT_TIMEOUT_SECS = float(os.environ.get("EXTRACT_TIMEOUT_SECS", "15"))
 DEFAULT_MODEL = os.environ.get("MODEL", "claude-opus-4-5")
 MAX_TOKENS = 2048
 
-# Groq
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+# Groq. Note: Groq retires model ids on its own schedule (llama-3.3-70b-versatile
+# was decommissioned and 404'd every call), so these are overridable via env and
+# a model_not_found now falls through to the next provider — see
+# _FALLBACK_TRIGGERS.
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 GROQ_MAX_TOKENS = 4096
-SCORE_GROQ_MODEL = os.environ.get("SCORE_GROQ_MODEL", "llama-3.3-70b-versatile")
+SCORE_GROQ_MODEL = os.environ.get("SCORE_GROQ_MODEL", "openai/gpt-oss-120b")
 
 # NVIDIA NIM (OpenAI-compatible)
 NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
@@ -88,7 +90,11 @@ BEDROCK_MODEL = os.environ.get(
     "BEDROCK_MODEL", "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 )
 BEDROCK_EXTRACT_MODEL = os.environ.get(
-    "BEDROCK_EXTRACT_MODEL", "meta.llama3-3-70b-instruct-v1:0"
+    # Like Claude Sonnet above, Llama 3.3 needs the region-prefixed inference
+    # profile — the bare meta.llama3-3-70b-instruct-v1:0 raises
+    # "Invocation ... with on-demand throughput isn't supported".
+    "BEDROCK_EXTRACT_MODEL",
+    "us.meta.llama3-3-70b-instruct-v1:0",
 )
 # The Chat tab is a free-form assistant (plain text, multi-turn), separate
 # from the JSON generation path. Default to the same Sonnet 4.5 profile as
@@ -97,7 +103,7 @@ BEDROCK_CHAT_MODEL = os.environ.get("BEDROCK_CHAT_MODEL", BEDROCK_MODEL)
 BEDROCK_MAX_TOKENS = 4096
 
 # Extract JD (kept separate for backward compat; honours AI_PROVIDER)
-EXTRACT_MODEL = os.environ.get("EXTRACT_MODEL", "llama-3.3-70b-versatile")
+EXTRACT_MODEL = os.environ.get("EXTRACT_MODEL", "openai/gpt-oss-120b")
 EXTRACT_MAX_TOKENS = 4096
 
 
@@ -181,128 +187,6 @@ Output schema (all fields required):
 - Do NOT emit: $, &, #, _, {{, }}, ~, ^, or backslashes outside the whitelist.
 - Percent signs ARE allowed: write "43%" with the symbol, not "43 percent". (The renderer escapes it safely.) Ampersands and dollar signs are still banned - spell them out ("and", "USD" or the written amount). A bare number where a percentage was meant is a bug; always keep the % on the number.
 - Do NOT include the salutation ("Dear ...") or sign-off ("Best Regards,") - those are in the template.
-"""
-
-
-APPLICATION_EMAIL_SYSTEM = f"""You are ghostwriting a job-application email in the candidate's own voice. The candidate is Amogh Ramagiri, a Data Scientist with an MS in Data Science from GW.
-
-You will receive: his resume (ground truth about him), a company name, a job description, and an optional intent note describing what kind of email this should be (e.g. asking for consideration, asking for a referral, asking to be passed to a hiring manager).
-
-Return STRICT JSON only - no markdown fences, no commentary before or after.
-
-Output schema (all fields required):
-{{
-  "subject": "<concrete, specific email subject. Include role title and his name. Max 70 chars. Examples: 'Application: Data Science Intern - Amogh Ramagiri', 'Quick note re: ML Engineer role - Amogh Ramagiri'>",
-  "body": "<plain-text email body, including greeting and signoff>"
-}}
-
-{VOICE_RULES}
-
-# Application email structure rules
-
-- Body length: 100-180 words. Shorter is better than longer.
-- Open with "Hi {{Name}}," if a name is given in the JD or intent note. Otherwise "Hi there,". Never "Dear Hiring Manager," (too formal for email) and never "To Whom It May Concern,".
-- One sentence stake: which role at which company, and why it caught your attention.
-- 1-2 short paragraphs citing 1-3 specific resume items that map to the JD. Real numbers / tools.
-- A short ask aligned to the intent note if given (e.g. "Would love to be considered." / "Any chance you could pass this along to the hiring team?").
-- Sign off with "Best,\\nAmogh" or "Thanks,\\nAmogh". Never "Sincerely" or long signoffs.
-
-# Format
-- Plain text only. No HTML, no markdown.
-- Use real newlines between paragraphs (the JSON string can contain \\n).
-- No subject line inside the body - the subject is its own field.
-"""
-
-
-OUTREACH_INVITATION_SYSTEM = f"""You are ghostwriting a LinkedIn connection request note in the candidate's own voice. The candidate is Amogh Ramagiri, a Data Scientist with an MS in Data Science from GW.
-
-You will receive: his resume (ground truth about him), the target person's LinkedIn profile (pasted text), and an optional context note describing the angle ("looking for referral at their company", "wanted to chat about their work in X", etc.).
-
-LinkedIn caps these notes at 300 characters. Target 260-290 characters — use the budget.
-
-Return STRICT JSON only - no markdown fences, no commentary before or after.
-
-Output schema (all fields required):
-{{
-  "message": "<the connection request note, plain text. Includes greeting, brief intro of Amogh, and a soft ask. 260-290 characters.>"
-}}
-
-{VOICE_RULES}
-
-# LinkedIn invitation rules
-
-## Structure (in this order)
-
-1. **Greeting** — "Hi {{first name}}," using their actual first name from the profile. If the profile has no first name, use "Hi,".
-2. **Who Amogh is** — one short clause introducing him: role + program. e.g. "I'm a Data Scientist with an MS from GW" or "I'm a Data Scientist, recently finished my MS in DS at GW".
-3. **Specific anchor** — name ONE concrete thing from their profile: a current role, a company, a project, a domain they work in. Not vague adjectives.
-4. **Soft ask** — short, specific. "Would love to connect to hear how you got into <X>." / "Open to chatting about <Y> if you have a moment." Use the context note to pick the angle when one is given.
-
-## Hard rules
-
-- HARD MAXIMUM: 295 characters. If you're at or above 300, you've failed.
-- Target 260-290 characters — don't leave 50+ characters on the table; use them to make the message specific.
-- DO include the greeting. DO NOT include a signoff like "Thanks, Amogh" — connection requests show the sender's name automatically and a signoff wastes the budget.
-- Lead with THEIR work, not Amogh's accomplishments. The intro of Amogh is a one-clause identifier ("I'm a DS with an MS from GW"), not a brag. No metrics, no "reduced X by Y%". Save numbers for follow-up messages.
-- Banned filler words: "interesting", "impressive", "complex", "fascinating", "amazing", "great work". They add no information and burn characters.
-- Anchor must be SPECIFIC: name the company, the team, the product, the topic. "your work in revenue management at Holland America Line" is acceptable; "your work in revenue management" alone is weaker; "your interesting work" is forbidden.
-- One thought per sentence. Three sentences max after the greeting.
-- Use contractions. No buzzwords. No em-dashes that look ChatGPT-generated.
-
-## Example shape (for structure only — do not copy phrasing)
-
-"Hi Abbie, I'm a Data Scientist with an MS from GW. Saw you're leading revenue management at Holland America Line — I've been working on forecasting and pricing problems and would love to hear how you got into RM."
-"""
-
-
-OUTREACH_LINKEDIN_MESSAGE_SYSTEM = f"""You are ghostwriting a LinkedIn message (DM or InMail) in the candidate's own voice. The candidate is Amogh Ramagiri, a Data Scientist with an MS in Data Science from GW.
-
-You will receive: his resume (ground truth about him), the target person's LinkedIn profile (pasted text), and an optional context note describing the angle ("looking for referral at their company", "want to chat about their work", etc.).
-
-Return STRICT JSON only - no markdown fences, no commentary before or after.
-
-Output schema (all fields required):
-{{
-  "message": "<the message, plain text, including greeting and short signoff. 80-180 words.>"
-}}
-
-{VOICE_RULES}
-
-# LinkedIn message rules
-
-- Length: 80-180 words.
-- Open with "Hi {{first name}}," using their actual first name from the profile.
-- Anchor on ONE specific thing from their profile (a project, a recent role, a topic they post about). Show you actually read it.
-- One short paragraph connecting their work to his with 1-2 concrete resume items.
-- Soft ask. e.g. "Would love to hear how you got into X." / "Any chance you'd have 15 minutes for a quick chat?". No hard close.
-- Sign off with "Thanks,\\nAmogh" or just "- Amogh". Casual.
-- Use real newlines between paragraphs (the JSON string can contain \\n).
-"""
-
-
-OUTREACH_EMAIL_SYSTEM = f"""You are ghostwriting an outreach email to a specific person, in the candidate's own voice. The candidate is Amogh Ramagiri, a Data Scientist with an MS in Data Science from GW.
-
-You will receive: his resume (ground truth about him), the target person's LinkedIn profile (pasted text), and an optional context note describing the angle.
-
-Return STRICT JSON only - no markdown fences, no commentary before or after.
-
-Output schema (all fields required):
-{{
-  "subject": "<concrete subject line, max 60 chars. Never 'Reaching out' or 'Hello'. Reference something specific from their profile or a clear mutual interest.>",
-  "message": "<plain-text email body including greeting and signoff. 100-200 words.>"
-}}
-
-{VOICE_RULES}
-
-# Outreach email rules
-
-- Body length: 100-200 words.
-- Open with "Hi {{first name}}," using their actual first name from the profile.
-- First sentence anchors on one specific thing from their profile.
-- One short paragraph connecting their work to his with 1-2 concrete resume items.
-- Soft, specific ask. No "let me know if you have any questions" filler.
-- Sign off with "Thanks,\\nAmogh" or "Best,\\nAmogh". Casual.
-- Plain text only, no HTML or markdown. Use real newlines between paragraphs.
 """
 
 
@@ -434,20 +318,32 @@ def _strip_json_fences(text: str) -> str:
 
 def _parse_claude_json(raw: str) -> dict[str, Any]:
     cleaned = _strip_json_fences(raw)
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start != -1 and end != -1 and end > start:
+    candidates = [cleaned]
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidates.append(cleaned[start : end + 1])
+
+    last_err: json.JSONDecodeError | None = None
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError as e:
+            last_err = e
+            # Llama-family models routinely emit *literal* newlines inside JSON
+            # string values (a long job_description is the common case), which
+            # is invalid JSON. strict=False accepts control characters inside
+            # strings; the payload is otherwise well-formed. Claude escapes
+            # these correctly, so this only ever fires on the Llama hops.
             try:
-                return json.loads(cleaned[start : end + 1])
+                return json.loads(candidate, strict=False)
             except json.JSONDecodeError:
                 pass
-        raise ValueError(
-            f"Could not parse Claude response as JSON: {e}\n"
-            f"--- raw response ---\n{raw}"
-        ) from e
+
+    raise ValueError(
+        f"Could not parse model response as JSON: {last_err}\n"
+        f"--- raw response ---\n{raw}"
+    ) from last_err
 
 
 def _validate_keys(payload: dict[str, Any], required: set[str]) -> None:
@@ -741,14 +637,15 @@ def _dispatch_provider(
 # nvidia timeout dead-ended with no further hop.
 FALLBACK_CHAIN = ("bedrock", "groq", "anthropic", "nvidia")
 
-# JD auto-detect (extract) prefers the cheap/fast Llama providers, in order:
-# Groq (Llama 3.3 70b) first — fast and consistent (~2-3s) — then Bedrock
-# (Llama 3.3 on a reliable endpoint), with Anthropic as the backstop and NVIDIA
-# NIM LAST. NVIDIA's public endpoint frequently times out (>45s), so once Groq's
-# daily quota is exhausted we must NOT fall to it ahead of Bedrock/Anthropic —
-# that dead-ended every auto-detect on a hung hop. This mirrors FALLBACK_CHAIN's
-# ordering rationale. Used only by extract_jd_from_page, not generation/scoring.
-EXTRACT_FALLBACK_CHAIN = ("groq", "bedrock", "anthropic", "nvidia")
+# JD auto-detect (extract) leads with Bedrock (Llama 3.3 on a reliable endpoint).
+# Groq was primary, but a whole JD page + reserved output exceeds its 8000 TPM
+# on-demand cap (413 rate_limit_exceeded on every extract), so it 413'd and fell
+# through to Bedrock anyway — this just skips the wasted hop. Groq stays second
+# for when the page is small enough to fit. Anthropic is the backstop and NVIDIA
+# NIM LAST: its public endpoint frequently times out (>45s), so we must NOT fall
+# to it ahead of Bedrock/Anthropic — that dead-ended every auto-detect on a hung
+# hop. Used only by extract_jd_from_page, not generation/scoring.
+EXTRACT_FALLBACK_CHAIN = ("bedrock", "groq", "anthropic", "nvidia")
 
 # Substrings that mark an exception as "provider is unusable right now"
 # rather than "the request itself is malformed". Lowercased before match.
@@ -765,6 +662,15 @@ _FALLBACK_TRIGGERS = (
     "timeout",
     "service unavailable",
     "503",
+    # A retired/unavailable model is a property of the provider, not of our
+    # request — the same prompt succeeds on the next hop. Without these, a
+    # decommissioned model id (providers retire them on their own schedule)
+    # aborts the whole chain instead of falling through to Bedrock/Anthropic.
+    "model_not_found",
+    "does not exist or you do not have access",
+    "model not found",
+    "decommissioned",
+    "has been deprecated",
 )
 
 
@@ -878,40 +784,6 @@ def _user_msg_cover_letter(company: str, jd: str, resume: str) -> str:
         f"{company}\n\n"
         "JOB DESCRIPTION:\n"
         f"{jd}\n\n"
-        "Return JSON only."
-    )
-
-
-def _user_msg_application_email(
-    company: str, jd: str, intent: str | None, resume: str
-) -> str:
-    intent_block = (
-        f"INTENT NOTE (what kind of email this is):\n{intent}\n\n" if intent else ""
-    )
-    return (
-        "RESUME (ground truth - do not invent beyond this):\n"
-        f"{resume}\n\n"
-        "COMPANY:\n"
-        f"{company}\n\n"
-        "JOB DESCRIPTION:\n"
-        f"{jd}\n\n"
-        f"{intent_block}"
-        "Return JSON only."
-    )
-
-
-def _user_msg_outreach(
-    profile_text: str, context: str | None, resume: str
-) -> str:
-    context_block = (
-        f"CONTEXT (what this is about, the angle):\n{context}\n\n" if context else ""
-    )
-    return (
-        "RESUME (ground truth about Amogh - do not invent beyond this):\n"
-        f"{resume}\n\n"
-        "TARGET PERSON'S LINKEDIN PROFILE (their ground truth):\n"
-        f"{profile_text}\n\n"
-        f"{context_block}"
         "Return JSON only."
     )
 
@@ -1106,37 +978,6 @@ def render_cover_letter_pdf(
     return compile_latex(tex_source, jobname="cover_letter")
 
 
-def generate_application_email(
-    company: str,
-    jd: str,
-    intent: str | None = None,
-    resume_id: str | None = None,
-) -> dict[str, str]:
-    """Generate a job-application email. Returns {'subject': ..., 'body': ...}."""
-    if not company or not company.strip():
-        raise ValueError("company must not be empty")
-    if not jd or not jd.strip():
-        raise ValueError("job_description must not be empty")
-
-    resume = _read_resume(resume_id)
-    payload, _ = _call_llm(
-        APPLICATION_EMAIL_SYSTEM,
-        _user_msg_application_email(
-            company.strip(), jd.strip(), intent.strip() if intent else None, resume
-        ),
-        required_keys={"subject", "body"},
-    )
-    out = {"subject": payload["subject"].strip(), "body": payload["body"].strip()}
-    insert_application(
-        mode="email",
-        company=company.strip(),
-        job_description=jd.strip(),
-        resume_id=resume_id,
-        output=json.dumps(out),
-    )
-    return out
-
-
 def answer_application_question(
     company: str,
     jd: str,
@@ -1178,7 +1019,7 @@ def answer_application_question(
 
 CHAT_SYSTEM = (
     "You are Apply Tools' built-in assistant, helping the user with their job "
-    "search: cover letters, outreach, interview prep, resume questions, and "
+    "search: cover letters, interview prep, resume questions, and "
     "general career advice. Be concise, direct, and practical. Use plain text "
     "(short paragraphs or simple lists); avoid heavy markdown. If you don't "
     "know something, say so rather than inventing details."
@@ -1248,101 +1089,6 @@ def chat_reply(messages: list[dict[str, str]]) -> dict[str, str]:
     if not reply:
         raise RuntimeError("Bedrock returned an empty chat response")
     return {"reply": reply}
-
-
-VALID_OUTREACH_CHANNELS = ("linkedin_invitation", "linkedin_message", "email")
-
-# LinkedIn caps invitation notes at 300 chars. We target ≤280 with a 290 hard limit.
-INVITATION_HARD_MAX = 290
-INVITATION_RETRY_TARGET = 270
-
-
-def _system_for_channel(channel: str) -> str:
-    if channel == "linkedin_invitation":
-        return OUTREACH_INVITATION_SYSTEM
-    if channel == "linkedin_message":
-        return OUTREACH_LINKEDIN_MESSAGE_SYSTEM
-    if channel == "email":
-        return OUTREACH_EMAIL_SYSTEM
-    raise ValueError(
-        f"channel must be one of {VALID_OUTREACH_CHANNELS}, got {channel!r}"
-    )
-
-
-def _required_keys_for_channel(channel: str) -> set[str]:
-    if channel == "email":
-        return {"subject", "message"}
-    return {"message"}
-
-
-def generate_outreach_message(
-    profile_text: str,
-    channel: str,
-    context: str | None = None,
-    resume_id: str | None = None,
-) -> dict[str, Any]:
-    """Generate an outreach message for the given channel.
-
-    Returns:
-      - linkedin_invitation: {"message": str, "char_count": int}
-      - linkedin_message: {"message": str, "char_count": int}
-      - email: {"subject": str, "message": str, "char_count": int}
-    """
-    if channel not in VALID_OUTREACH_CHANNELS:
-        raise ValueError(
-            f"channel must be one of {VALID_OUTREACH_CHANNELS}, got {channel!r}"
-        )
-    if not profile_text or not profile_text.strip():
-        raise ValueError("profile_text must not be empty")
-
-    resume = _read_resume(resume_id)
-    system_prompt = _system_for_channel(channel)
-    required_keys = _required_keys_for_channel(channel)
-
-    user_message = _user_msg_outreach(
-        profile_text.strip(), context.strip() if context else None, resume
-    )
-
-    payload, raw = _call_llm(system_prompt, user_message, required_keys)
-
-    message = payload["message"].strip()
-
-    # LinkedIn invitation char-limit enforcement: one retry if over 290.
-    if channel == "linkedin_invitation" and len(message) > INVITATION_HARD_MAX:
-        retry_messages: list[dict[str, str]] = [
-            {"role": "assistant", "content": raw},
-            {
-                "role": "user",
-                "content": (
-                    f"That was {len(message)} characters. Hard maximum is "
-                    f"{INVITATION_HARD_MAX}. Rewrite shorter, target "
-                    f"{INVITATION_RETRY_TARGET} characters. Same JSON schema, "
-                    "no fences, no commentary."
-                ),
-            },
-        ]
-        payload, _ = _call_llm(
-            system_prompt,
-            user_message,
-            required_keys,
-            extra_messages=retry_messages,
-        )
-        message = payload["message"].strip()
-        if len(message) > 300:
-            raise ValueError(
-                f"LinkedIn invitation still {len(message)} characters after retry "
-                f"(max 300). Try shortening the context note or regenerating."
-            )
-
-    result: dict[str, Any] = {"message": message, "char_count": len(message)}
-    if channel == "email":
-        result["subject"] = payload["subject"].strip()
-    insert_application(
-        mode="outreach",
-        resume_id=resume_id,
-        output=json.dumps({"channel": channel, **result}),
-    )
-    return result
 
 
 def _user_msg_score(jd: str, company: str | None, resume: str) -> str:
@@ -1708,14 +1454,14 @@ def extract_jd_from_page(
         "Return JSON only."
     )
 
-    # Auto-detect routes through EXTRACT_PROVIDER (default NVIDIA NIM) and uses
-    # the extract-specific fallback order NVIDIA -> Groq -> Bedrock -> Anthropic
+    # Auto-detect routes through EXTRACT_PROVIDER (default Bedrock) and uses the
+    # extract-specific fallback order Bedrock -> Groq -> Anthropic -> NVIDIA
     # (EXTRACT_FALLBACK_CHAIN), keeping extraction on cheap/fast Llama providers
     # before the Anthropic backstop. It uses a lighter Llama model where the
     # provider offers one (Groq and Bedrock); nvidia uses NIM_MODEL by default.
     # Note: this only sets the *primary* model — each fallback uses its own
-    # default (so a fail-over to Bedrock lands on BEDROCK_MODEL/Claude, not
-    # Llama). Acceptable for the rare fallback path.
+    # default, so a fail-over from Bedrock to Groq lands on EXTRACT_MODEL but a
+    # fail-over TO Bedrock lands on BEDROCK_MODEL/Claude, not the cheaper Llama.
     if EXTRACT_PROVIDER == "groq":
         extract_model: str | None = EXTRACT_MODEL
     elif EXTRACT_PROVIDER == "bedrock":
@@ -1787,9 +1533,6 @@ if __name__ == "__main__":
     usage = (
         "Usage:\n"
         "  python generate.py cover <company> <job_description> [--resume ID]\n"
-        "  python generate.py email <company> <job_description> [intent] [--resume ID]\n"
-        "  python generate.py outreach <channel> <profile_text> [context] [--resume ID]\n"
-        "    where <channel> is one of: linkedin_invitation, linkedin_message, email\n"
         "  python generate.py question <company> <job_description> <question> [--resume ID]\n"
         "  python generate.py score <job_description> [company] [--resume ID]\n"
         "  python generate.py score-all <job_description> [company]\n"
@@ -1820,24 +1563,6 @@ if __name__ == "__main__":
         pdf_bytes = generate_cover_letter(args[2], args[3], resume_id=cli_resume_id)
         Path("test.pdf").write_bytes(pdf_bytes)
         print(f"Wrote test.pdf ({len(pdf_bytes)} bytes)")
-    elif mode == "email":
-        if len(args) not in (4, 5):
-            print(usage, file=sys.stderr)
-            sys.exit(2)
-        intent = args[4] if len(args) == 5 else None
-        out = generate_application_email(
-            args[2], args[3], intent, resume_id=cli_resume_id
-        )
-        print(json.dumps(out, indent=2))
-    elif mode == "outreach":
-        if len(args) not in (4, 5):
-            print(usage, file=sys.stderr)
-            sys.exit(2)
-        context = args[4] if len(args) == 5 else None
-        out = generate_outreach_message(
-            args[3], args[2], context, resume_id=cli_resume_id
-        )
-        print(json.dumps(out, indent=2))
     elif mode == "question":
         if len(args) != 5:
             print(usage, file=sys.stderr)

@@ -570,7 +570,7 @@ button:disabled {
   color: var(--bad);
 }
 
-/* ---------- result area (email/outreach) ---------- */
+/* ---------- result area ---------- */
 
 .result {
   margin-top: 12px;

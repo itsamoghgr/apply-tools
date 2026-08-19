@@ -29,7 +29,7 @@ export default async function EditResumeProfilePage({
     sectionOrder: row.sectionOrder,
   });
 
-  // Whether this resume shows in the applications / reach-out / AI pickers.
+  // Whether this resume shows in the applications / AI pickers.
   // No companion yet (legacy profile) reads as inactive until toggled/saved.
   const initialActive = row.resume?.isActive ?? false;
 
