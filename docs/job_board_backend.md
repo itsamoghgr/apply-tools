@@ -17,14 +17,14 @@ Nothing new is deployed. The Job Board slots into the two services that already 
 
 ```
 ┌─ backend/  (FastAPI :8001) ──────────── owns apply_tools ─────────────┐
-│  db.py       + WatchedCompany / JobPosting / DigestRun row access     │
+│  db.py       + WatchedCompany / JobPosting / AlertRun row access     │
 │  server.py   + /api/v1/jobboard/* endpoints (agent-facing, tokened)   │
 └───────────────────────────▲───────────────────────────────────────────┘
                             │  HTTP only (never a direct DB connection)
 ┌─ agent_server/  (FastAPI :8002) ─────── owns apply_agent ─────────────┐
-│  jobboard/   NEW package: adapters, matcher, monitor, digest, mailer  │
+│  jobboard/   NEW package: adapters, matcher, monitor, alert, mailer  │
 │  api/jobboard.py   manual triggers + run history                      │
-│  scheduler   APScheduler: 3h monitor, 6h digest                       │
+│  scheduler   APScheduler: 3h monitor, 6h alert                       │
 └───────────────────────────────────────────────────────────────────────┘
 ┌─ frontend/  (Next.js :3001) ─────────────────────────────────────────┐
 │  Prisma direct → apply_tools  (watchlist CRUD, feed rendering)        │
@@ -60,9 +60,9 @@ agent_server/jobboard/
 │   └── generic.py           fetch_page + ≤10-page walk + bounded LLM extract
 ├── matcher.py               normalize_title, role_match, dedup_key
 ├── monitor.py               run_monitor_cycle()
-├── digest.py                send_digest()
+├── alert.py                send_alert()
 ├── mailer.py                send_mail() — smtplib, ~60 lines
-├── templates.py             render_digest_html() / render_digest_text()
+├── templates.py             render_alert_html() / render_alert_text()
 ├── platform_client.py       HTTP client → :8001 /api/v1/jobboard/*
 └── db.py                    apply_agent: jobboard_runs bookkeeping
 
@@ -87,12 +87,12 @@ WatchedCompany 1───┐
     monitor)       ▼
               JobPosting ──────► JobApplication   (nullable; set on "Track")
                    │  N───1
-                   └──────────► DigestRun         (nullable; stamped when reported)
+                   └──────────► AlertRun         (nullable; stamped when reported)
 ```
 
 `JobPosting` is the join point between the monitor and the rest of the app: it
 points *back* at the company being watched, *forward* at a tracked application once
-you act on it, and *sideways* at the digest that reported it.
+you act on it, and *sideways* at the alert that reported it.
 
 ### 3.2 DDL
 
@@ -142,7 +142,7 @@ CREATE TABLE IF NOT EXISTS "JobPosting" (
     "postedAt"         timestamp(3),   -- source-provided; NULL when unknown
     "firstSeenAt"      timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "isNew"            boolean     NOT NULL DEFAULT true,
-    "digestRunId"      text,           -- stamped once reported
+    "alertRunId"      text,           -- stamped once reported
     "archivedAt"       timestamp(3),   -- vanished from the board
     "jobApplicationId" text
         REFERENCES "JobApplication"("id") ON DELETE SET NULL,
@@ -155,17 +155,17 @@ CREATE TABLE IF NOT EXISTS "JobPosting" (
 CREATE UNIQUE INDEX IF NOT EXISTS "JobPosting_company_dedup_key"
     ON "JobPosting" ("watchedCompanyId", "dedupKey");
 
--- Digest query: unreported new postings since a watermark.
-CREATE INDEX IF NOT EXISTS "JobPosting_undigested_idx"
-    ON "JobPosting" ("firstSeenAt") WHERE "digestRunId" IS NULL AND "isNew";
-CREATE INDEX IF NOT EXISTS "JobPosting_digestRunId_idx"
-    ON "JobPosting" ("digestRunId");
+-- Alert query: unreported new postings since a watermark.
+CREATE INDEX IF NOT EXISTS "JobPosting_unalerted_idx"
+    ON "JobPosting" ("firstSeenAt") WHERE "alertRunId" IS NULL AND "isNew";
+CREATE INDEX IF NOT EXISTS "JobPosting_alertRunId_idx"
+    ON "JobPosting" ("alertRunId");
 -- Feed query: live postings for a company.
 CREATE INDEX IF NOT EXISTS "JobPosting_company_live_idx"
     ON "JobPosting" ("watchedCompanyId", "firstSeenAt" DESC)
     WHERE "archivedAt" IS NULL;
 
-CREATE TABLE IF NOT EXISTS "DigestRun" (
+CREATE TABLE IF NOT EXISTS "AlertRun" (
     "id"           text        PRIMARY KEY,
     "startedAt"    timestamp(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "finishedAt"   timestamp(3),
@@ -177,10 +177,10 @@ CREATE TABLE IF NOT EXISTS "DigestRun" (
     "error"        text
 );
 
-CREATE INDEX IF NOT EXISTS "DigestRun_startedAt_idx" ON "DigestRun" ("startedAt" DESC);
--- Watermark lookup: the last digest that actually mailed.
-CREATE INDEX IF NOT EXISTS "DigestRun_sent_idx"
-    ON "DigestRun" ("finishedAt" DESC) WHERE "status" = 'sent';
+CREATE INDEX IF NOT EXISTS "AlertRun_startedAt_idx" ON "AlertRun" ("startedAt" DESC);
+-- Watermark lookup: the last alert that actually mailed.
+CREATE INDEX IF NOT EXISTS "AlertRun_sent_idx"
+    ON "AlertRun" ("finishedAt" DESC) WHERE "status" = 'sent';
 ```
 
 ### 3.3 Design notes on the schema
@@ -190,11 +190,11 @@ CREATE INDEX IF NOT EXISTS "DigestRun_sent_idx"
 manually mid-cycle without ever producing a duplicate posting. Every write is an
 `ON CONFLICT DO UPDATE`, so re-running is free.
 
-**`isNew` vs `digestRunId` are different questions.** `isNew=false` means "existed
-before we started watching" (the seed backlog). `digestRunId IS NULL` means "not yet
-reported by email". A posting must satisfy both to enter a digest. Keeping them
+**`isNew` vs `alertRunId` are different questions.** `isNew=false` means "existed
+before we started watching" (the seed backlog). `alertRunId IS NULL` means "not yet
+reported by email". A posting must satisfy both to enter an alert. Keeping them
 separate is what makes seeding safe: seeded rows are permanently excluded from
-digests without needing a fake `digestRunId`.
+alerts without needing a fake `alertRunId`.
 
 **Nothing is ever deleted.** `archivedAt` marks a posting that disappeared from the
 board; the row stays. This satisfies the project's absolute no-deletion rule and
@@ -253,7 +253,7 @@ model JobPosting {
   postedAt         DateTime?
   firstSeenAt      DateTime  @default(now())
   isNew            Boolean   @default(true)
-  digestRunId      String?
+  alertRunId      String?
   archivedAt       DateTime?
   jobApplicationId String?
   jobApplication   JobApplication? @relation(fields: [jobApplicationId], references: [id], onDelete: SetNull)
@@ -261,12 +261,12 @@ model JobPosting {
   updatedAt        DateTime  @updatedAt
 
   @@unique([watchedCompanyId, dedupKey])
-  @@index([digestRunId])
-  // NOTE: the partial indexes (undigested, company-live) are DB-level only —
+  @@index([alertRunId])
+  // NOTE: the partial indexes (unalerted, company-live) are DB-level only —
   // Prisma can't express `WHERE`, so they're not redeclared here.
 }
 
-model DigestRun {
+model AlertRun {
   id           String    @id
   startedAt    DateTime  @default(now())
   finishedAt   DateTime?
@@ -297,7 +297,7 @@ model DigestRun {
 
 CREATE TABLE IF NOT EXISTS jobboard_runs (
     id                text        PRIMARY KEY,
-    kind              text        NOT NULL CHECK (kind IN ('monitor','digest')),
+    kind              text        NOT NULL CHECK (kind IN ('monitor','alert')),
     status            text        NOT NULL DEFAULT 'running'
                                   CHECK (status IN ('running','succeeded','failed')),
     trigger           text        NOT NULL DEFAULT 'schedule'
@@ -308,7 +308,7 @@ CREATE TABLE IF NOT EXISTS jobboard_runs (
     postings_seen     int         NOT NULL DEFAULT 0,   -- returned by sources
     postings_matched  int         NOT NULL DEFAULT 0,   -- passed the role filter
     postings_new      int         NOT NULL DEFAULT 0,   -- actually inserted
-    digest_run_id     text,                              -- platform DigestRun.id
+    alert_run_id     text,                              -- platform AlertRun.id
     error             text,
     started_at        timestamptz NOT NULL DEFAULT now(),
     finished_at       timestamptz
@@ -391,8 +391,8 @@ def upsert_job_postings(company_id: str, postings: list[dict]) -> dict:
 
     ON CONFLICT ("watchedCompanyId", "dedupKey") DO UPDATE refreshes title /
     location / url / postedAt and clears archivedAt (a role that reappeared is
-    live again) — but NEVER touches isNew, firstSeenAt, or digestRunId, so a
-    re-listed posting can't re-enter a digest.
+    live again) — but NEVER touches isNew, firstSeenAt, or alertRunId, so a
+    re-listed posting can't re-enter an alert.
 
     `inserted` is computed from the `xmax = 0` trick so the caller learns which
     rows were genuinely new without a second query.
@@ -408,38 +408,38 @@ def archive_missing_postings(company_id: str, live_dedup_keys: list[str]) -> int
     """
 
 
-def list_undigested_postings(window_start: datetime | None) -> list[dict]:
-    """Postings eligible for the next digest, joined to their company.
+def list_unalerted_postings(window_start: datetime | None) -> list[dict]:
+    """Postings eligible for the next alert, joined to their company.
 
-    WHERE "isNew" AND "digestRunId" IS NULL AND "archivedAt" IS NULL
+    WHERE "isNew" AND "alertRunId" IS NULL AND "archivedAt" IS NULL
       AND ("firstSeenAt" > :window_start OR :window_start IS NULL)
     Ordered by company name, then firstSeenAt DESC. Includes company name,
     domain, and logoUrl so the mailer needs no second query.
     """
 
 
-def create_digest_run(window_start: datetime, window_end: datetime) -> str:
-    """Open a DigestRun row (status 'pending'). Returns its id."""
+def create_alert_run(window_start: datetime, window_end: datetime) -> str:
+    """Open a AlertRun row (status 'pending'). Returns its id."""
 
 
-def close_digest_run(run_id: str, *, status: str, new_count: int,
+def close_alert_run(run_id: str, *, status: str, new_count: int,
                      company_count: int, posting_ids: list[str],
                      error: str | None = None) -> None:
-    """Close a DigestRun and stamp digestRunId on the reported postings —
+    """Close a AlertRun and stamp alertRunId on the reported postings —
     in ONE transaction, so a crash can never mark a run sent while leaving
     postings unstamped (which would double-report them next cycle)."""
 
 
-def last_sent_digest_at() -> datetime | None:
-    """finishedAt of the most recent status='sent' DigestRun — the watermark.
-    None on first ever run, which makes the first digest unbounded-backwards
+def last_sent_alert_at() -> datetime | None:
+    """finishedAt of the most recent status='sent' AlertRun — the watermark.
+    None on first ever run, which makes the first alert unbounded-backwards
     (but seeded rows are isNew=false, so it still won't dump a backlog)."""
 ```
 
-**The transactional pair in `close_digest_run` is the subtle one.** Marking the run
-`sent` and stamping `digestRunId` on its postings must be atomic. Split them, and a
+**The transactional pair in `close_alert_run` is the subtle one.** Marking the run
+`sent` and stamping `alertRunId` on its postings must be atomic. Split them, and a
 crash between the two leaves postings unstamped — they'd be reported again in the
-next digest. Both statements run on one `get_conn()` connection, which the existing
+next alert. Both statements run on one `get_conn()` connection, which the existing
 context manager already wraps in a transaction.
 
 ---
@@ -457,9 +457,9 @@ local dev keeps working unchanged).
 | `PATCH` | `/api/v1/jobboard/companies/{id}` | status/seed patch → `{ok}` |
 | `POST` | `/api/v1/jobboard/postings/upsert` | `{company_id, postings[]}` → `{ok, inserted, updated, new_ids}` |
 | `POST` | `/api/v1/jobboard/postings/archive` | `{company_id, live_dedup_keys[]}` → `{ok, archived}` |
-| `GET` | `/api/v1/jobboard/postings/undigested?since=` | → `{postings: [...]}` |
-| `POST` | `/api/v1/jobboard/digest-runs` | `{window_start, window_end}` → `{ok, id}` |
-| `POST` | `/api/v1/jobboard/digest-runs/{id}/close` | `{status, new_count, company_count, posting_ids[], error?}` → `{ok}` |
+| `GET` | `/api/v1/jobboard/postings/unalerted?since=` | → `{postings: [...]}` |
+| `POST` | `/api/v1/jobboard/alert-runs` | `{window_start, window_end}` → `{ok, id}` |
+| `POST` | `/api/v1/jobboard/alert-runs/{id}/close` | `{status, new_count, company_count, posting_ids[], error?}` → `{ok}` |
 
 Pydantic models follow the file's existing `Field(..., max_length=N)` discipline:
 
@@ -562,25 +562,25 @@ the loop continues. A dead career page never aborts a cycle.
 timezone so the day boundary matches your expectation, not UTC's. When the source
 gives no date, the DB dedup decides novelty and the day filter simply doesn't apply.
 
-### 7.4 `digest.py`
+### 7.4 `alert.py`
 
 ```python
-def send_digest(*, force: bool = False, trigger: str = "schedule") -> DigestResult:
-    """Report everything found since the last successful digest. Never raises."""
+def send_alert(*, force: bool = False, trigger: str = "schedule") -> AlertResult:
+    """Report everything found since the last successful alert. Never raises."""
 ```
 
-1. `window_start = last_sent_digest_at()` (None on first run)
-2. `create_digest_run(window_start, now)` → `run_id`
-3. `list_undigested_postings(window_start)`
+1. `window_start = last_sent_alert_at()` (None on first run)
+2. `create_alert_run(window_start, now)` → `run_id`
+3. `list_unalerted_postings(window_start)`
 4. Empty and not `force` → close `skipped`, no mail
 5. Render HTML + text, `mailer.send_mail(...)`
-6. Success → `close_digest_run(status='sent', posting_ids=[...])`
-   Failure → `close_digest_run(status='failed', posting_ids=[])`
+6. Success → `close_alert_run(status='sent', posting_ids=[...])`
+   Failure → `close_alert_run(status='failed', posting_ids=[])`
 
-Step 6's failure branch is deliberate: **postings keep `digestRunId = NULL` on a
-send failure**, so they roll into the next successful digest rather than being
+Step 6's failure branch is deliberate: **postings keep `alertRunId = NULL` on a
+send failure**, so they roll into the next successful alert rather than being
 silently lost. Combined with the watermark, a laptop asleep through two cycles
-produces one catch-up digest containing everything, not a gap.
+produces one catch-up alert containing everything, not a gap.
 
 ### 7.5 `mailer.py`
 
@@ -600,10 +600,10 @@ failed without crashing the scheduler.
     # ── Job Board ──────────────────────────────────────────────────────────
     jobboard_enabled: bool = os.environ.get("JOBBOARD_ENABLED", "true").lower() == "true"
     jobboard_monitor_interval_h: int = _int("JOBBOARD_MONITOR_INTERVAL_H", 3)
-    jobboard_digest_interval_h: int = _int("JOBBOARD_DIGEST_INTERVAL_H", 6)
+    jobboard_alert_interval_h: int = _int("JOBBOARD_ALERT_INTERVAL_H", 6)
     jobboard_max_pages: int = _int("JOBBOARD_MAX_PAGES", 10)
     jobboard_today_only: bool = os.environ.get("JOBBOARD_TODAY_ONLY", "true").lower() == "true"
-    jobboard_digest_heartbeat: bool = os.environ.get("JOBBOARD_DIGEST_HEARTBEAT", "false").lower() == "true"
+    jobboard_alert_heartbeat: bool = os.environ.get("JOBBOARD_ALERT_HEARTBEAT", "false").lower() == "true"
     jobboard_company_sleep_min_s: float = float(os.environ.get("JOBBOARD_COMPANY_SLEEP_MIN_S", "1.0"))
     jobboard_company_sleep_max_s: float = float(os.environ.get("JOBBOARD_COMPANY_SLEEP_MAX_S", "3.0"))
 
@@ -611,7 +611,7 @@ failed without crashing the scheduler.
     smtp_port: int = _int("JOBBOARD_SMTP_PORT", 465)
     smtp_user: str | None = os.environ.get("JOBBOARD_SMTP_USER") or None
     smtp_app_password: str | None = os.environ.get("JOBBOARD_SMTP_APP_PASSWORD") or None
-    digest_to: str | None = os.environ.get("JOBBOARD_DIGEST_TO") or None
+    alert_to: str | None = os.environ.get("JOBBOARD_ALERT_TO") or None
 ```
 
 ---
@@ -623,11 +623,11 @@ failed without crashing the scheduler.
 | Monitor runs twice / crashes mid-cycle | `UNIQUE (watchedCompanyId, dedupKey)` + `ON CONFLICT DO UPDATE` — every write idempotent |
 | One career page 500s or changes layout | Per-company `try/except`; run continues; red badge in UI |
 | Fetch returns empty (site down) | Empty `live_dedup_keys` is a no-op — can't archive a whole board |
-| Digest email fails to send | Postings keep `digestRunId = NULL`; roll into the next digest |
-| Crash between "run sent" and "stamp postings" | Both in one transaction in `close_digest_run` |
-| Adding a company floods the digest | Seed cycle writes `isNew=false` for the entire existing board |
-| Laptop asleep for hours | APScheduler `coalesce=True` + watermark window → one catch-up digest |
-| Board re-lists an old role | Upsert never touches `isNew` / `firstSeenAt` / `digestRunId` |
+| Alert email fails to send | Postings keep `alertRunId = NULL`; roll into the next alert |
+| Crash between "run sent" and "stamp postings" | Both in one transaction in `close_alert_run` |
+| Adding a company floods the alert | Seed cycle writes `isNew=false` for the entire existing board |
+| Laptop asleep for hours | APScheduler `coalesce=True` + watermark window → one catch-up alert |
+| Board re-lists an old role | Upsert never touches `isNew` / `firstSeenAt` / `alertRunId` |
 | Timezone drift on dates | All UTC on ingest, `timestamp(3)`, local-tz only for the "today" boundary |
 | Runaway LLM cost | LLM only on the generic path, one bounded call per company per cycle; `used_llm` tracked per run |
 
@@ -640,7 +640,7 @@ failed without crashing the scheduler.
 3. `backend/server.py` endpoints + Pydantic models, exercised with `curl`
 4. `jobboard/adapters/` + `matcher.py`, unit-tested against checked-in JSON fixtures
 5. `jobboard/monitor.py` + `jobboard/db.py` bookkeeping
-6. `jobboard/mailer.py` + `digest.py` + `templates.py`
+6. `jobboard/mailer.py` + `alert.py` + `templates.py`
 7. `api/jobboard.py` router + APScheduler lifespan
 
 After step 5 the monitor populates real data and you can inspect it with SQL before
@@ -650,5 +650,5 @@ can be verified in isolation.
 **Tests** (`tests/`, matching the existing layout): adapter parsing against
 fixtures, and three monitor cases that carry the real risk — seeding marks nothing
 new, an unchanged board on cycle two yields zero new, one added posting yields
-exactly one new. Plus two digest cases: the watermark never double-reports, and a
-failed send leaves postings undigested.
+exactly one new. Plus two alert cases: the watermark never double-reports, and a
+failed send leaves postings unalerted.

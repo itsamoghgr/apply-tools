@@ -5,7 +5,7 @@
 > A watchlist-driven career-page monitor. You supply the companies and their
 > career-page URLs; every 3 hours the monitor re-scrapes each board, keeps only
 > postings matching your target roles, and stores the ones it has never seen
-> before. Every 6 hours a digest email summarises what's new.
+> before. Every 6 hours an alert email summarises what's new.
 
 ---
 
@@ -16,7 +16,7 @@
 - A user-managed watchlist: company name + career-page URL (+ optional logo).
 - A 3-hourly monitor cycle that scrapes each watched company and persists new,
   role-matching postings.
-- A 6-hourly digest email: total new roles, then one block per role showing the
+- A 6-hourly alert email: total new roles, then one block per role showing the
   company name and logo.
 - A `/job-board` page to manage the watchlist and browse new postings, with a
   one-click push of a posting into the existing applications tracker.
@@ -45,7 +45,7 @@ Data is split the way the existing services already split it:
 
 | Store | Holds | Why |
 | --- | --- | --- |
-| `apply_tools` (platform, Prisma) | `WatchedCompany`, `JobPosting`, `DigestRun` | Durable product data. Lets `/job-board` read it directly via Prisma and lets a posting become a `JobApplication` row. |
+| `apply_tools` (platform, Prisma) | `WatchedCompany`, `JobPosting`, `AlertRun` | Durable product data. Lets `/job-board` read it directly via Prisma and lets a posting become a `JobApplication` row. |
 | `apply_agent` (agent, raw SQL) | `jobboard_runs`, per-run audit | Operational bookkeeping only — same rule as CONTRACTS.md §0: the agent DB is never a second permanent copy of clean data. |
 
 Consistent with the platform-migration precedent, the new Prisma models are
@@ -141,7 +141,7 @@ a board that silently backfills or omits dates still can't cause a missed role.
 
 **First-cycle seeding.** The first time a company is monitored, its entire current
 board is inserted with `isNew = false` and `seededAt` set. Without this, adding a
-company to the watchlist would dump its whole back catalogue into your next digest.
+company to the watchlist would dump its whole back catalogue into your next alert.
 Only postings appearing *after* the seed cycle count as new.
 
 ### 2.5 Role matching
@@ -210,21 +210,21 @@ model JobPosting {
   postedAt         DateTime?       // from source when available
   firstSeenAt      DateTime @default(now())
   isNew            Boolean  @default(true)   // false for seeded backlog
-  digestRunId      String?         // set once reported, so it's never re-reported
+  alertRunId      String?         // set once reported, so it's never re-reported
   archivedAt       DateTime?       // gone from the board on a later cycle
   jobApplicationId String?         // set when pushed into the tracker
 
   @@unique([watchedCompanyId, dedupKey])
   @@index([firstSeenAt])
-  @@index([digestRunId])
+  @@index([alertRunId])
   @@index([isNew])
 }
 
-model DigestRun {
+model AlertRun {
   id           String    @id
   startedAt    DateTime  @default(now())
   finishedAt   DateTime?
-  windowStart  DateTime          // watermark: end of the previous successful digest
+  windowStart  DateTime          // watermark: end of the previous successful alert
   windowEnd    DateTime
   newCount     Int       @default(0)
   companyCount Int       @default(0)
@@ -244,7 +244,7 @@ and broke dashboard date grouping, so this is load-bearing.
 ```sql
 CREATE TABLE IF NOT EXISTS jobboard_runs (
     id             text PRIMARY KEY,
-    kind           text NOT NULL CHECK (kind IN ('monitor','digest')),
+    kind           text NOT NULL CHECK (kind IN ('monitor','alert')),
     status         text NOT NULL DEFAULT 'running'
                         CHECK (status IN ('running','succeeded','failed')),
     companies_total     int NOT NULL DEFAULT 0,
@@ -296,28 +296,28 @@ history of what was once open.
 
 ---
 
-## 5. The digest email (every 6h)
+## 5. The alert email (every 6h)
 
-`jobboard/digest.py :: send_digest(force=False) -> DigestResult`
+`jobboard/alert.py :: send_alert(force=False) -> AlertResult`
 
 ### 5.1 Window
 
 Not a fixed "last 6 hours". The window is a **watermark**:
 
 ```
-windowStart = max(finishedAt of last DigestRun WHERE status='sent')  (else epoch)
+windowStart = max(finishedAt of last AlertRun WHERE status='sent')  (else epoch)
 windowEnd   = now()
-postings    = JobPosting WHERE isNew AND digestRunId IS NULL
+postings    = JobPosting WHERE isNew AND alertRunId IS NULL
                           AND firstSeenAt > windowStart
 ```
 
-Each digest covers exactly two monitor cycles in the healthy case, but if a cycle
+Each alert covers exactly two monitor cycles in the healthy case, but if a cycle
 is slow, fails, or the machine sleeps, nothing is dropped — the unreported rows are
-simply carried into the next digest. `digestRunId` is stamped on every posting
+simply carried into the next alert. `alertRunId` is stamped on every posting
 included, so a role can never be reported twice.
 
 **Zero-new behaviour:** status `skipped`, no mail sent. `force=true` (or
-`JOBBOARD_DIGEST_HEARTBEAT=true`) sends a "nothing new" heartbeat instead.
+`JOBBOARD_ALERT_HEARTBEAT=true`) sends a "nothing new" heartbeat instead.
 
 ### 5.2 Content
 
@@ -353,7 +353,7 @@ email gets one shot, since it cannot retry a failed image.
 
 > Corrected during implementation: this originally specified
 > `logo.clearbit.com`. That host no longer resolves — the free logo API was
-> retired — so every logo in both the UI and the digest was a broken image.
+> retired — so every logo in both the UI and the alert was a broken image.
 > The replacement sources were verified live before switching.
 
 The email is built as **table-based HTML with inline styles** (the only thing that
@@ -371,13 +371,13 @@ JOBBOARD_SMTP_HOST=smtp.gmail.com
 JOBBOARD_SMTP_PORT=465
 JOBBOARD_SMTP_USER=...
 JOBBOARD_SMTP_APP_PASSWORD=...      # Gmail app password, not the account password
-JOBBOARD_DIGEST_TO=itsamoghgr@gmail.com
+JOBBOARD_ALERT_TO=itsamoghgr@gmail.com
 ```
 
 Credentials live in `agent_server/.env` (gitignored), read through `config.py`
-alongside the existing keys. If SMTP config is absent the digest logs a clear
+alongside the existing keys. If SMTP config is absent the alert logs a clear
 warning and marks the run `failed` without crashing the scheduler — and the
-postings keep `digestRunId = NULL`, so they roll into the next successful digest
+postings keep `alertRunId = NULL`, so they roll into the next successful alert
 rather than being lost.
 
 ---
@@ -391,8 +391,8 @@ existing `:8002` app, so `./start.sh` continues to be the only thing you run.
 scheduler.add_job(run_monitor_cycle, "interval", hours=3,
                   id="jobboard_monitor", max_instances=1, coalesce=True,
                   misfire_grace_time=1800)
-scheduler.add_job(send_digest, "interval", hours=6,
-                  id="jobboard_digest",  max_instances=1, coalesce=True,
+scheduler.add_job(send_alert, "interval", hours=6,
+                  id="jobboard_alert",  max_instances=1, coalesce=True,
                   misfire_grace_time=1800)
 ```
 
@@ -400,12 +400,12 @@ scheduler.add_job(send_digest, "interval", hours=6,
 - `coalesce=True` + `misfire_grace_time` — after a laptop sleep, one catch-up run
   fires rather than a burst of missed ones.
 - Adds `apscheduler>=3.10` to `agent_server/pyproject.toml`. In-memory jobstore is
-  sufficient: the watermark lives in `DigestRun`, so restarts lose no state.
+  sufficient: the watermark lives in `AlertRun`, so restarts lose no state.
 
-Because the two jobs are independent timers, the digest sometimes lands moments
+Because the two jobs are independent timers, the alert sometimes lands moments
 before a monitor cycle finishes — the watermark design makes that harmless.
 
-An offset start (digest first fires 30 min after boot) avoids a digest racing the
+An offset start (alert first fires 30 min after boot) avoids an alert racing the
 very first monitor cycle on a cold start.
 
 ---
@@ -418,7 +418,7 @@ reachable from the browser through the existing `/api/agent/[...path]` proxy.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/api/v1/jobboard/monitor/run` | Trigger a monitor cycle now (background task) |
-| `POST` | `/api/v1/jobboard/digest/send` | Send a digest now; `{force:true}` to mail even when empty |
+| `POST` | `/api/v1/jobboard/alert/send` | Send an alert now; `{force:true}` to mail even when empty |
 | `GET` | `/api/v1/jobboard/runs?kind=&limit=` | Recent run history + counts |
 | `POST` | `/api/v1/jobboard/detect` | `{careerUrl}` → `{ats, slug, sampleCount}` — used by the add-company form to validate a URL before saving |
 
@@ -432,8 +432,8 @@ GET   /jobboard/companies?active=true
 PATCH /jobboard/companies/{id}          # lastCheckedAt / lastStatus / seededAt
 POST  /jobboard/postings/upsert         # bulk, idempotent on (companyId, dedupKey)
 POST  /jobboard/postings/archive        # bulk archive by dedupKey
-GET   /jobboard/postings/undigested
-POST  /jobboard/digest-runs             # create / close a DigestRun
+GET   /jobboard/postings/unalerted
+POST  /jobboard/alert-runs             # create / close a AlertRun
 ```
 
 This keeps the existing invariant that the agent service touches platform data
@@ -459,8 +459,8 @@ between Applications and Leads.
    posting counts. Add-company form calls `/detect` first so a bad URL is caught
    immediately, and shows a live "found N jobs, M matching" preview before saving.
 
-A header strip shows last monitor run, next scheduled run, last digest, and manual
-**Run now** / **Send digest** buttons wired to the trigger endpoints.
+A header strip shows last monitor run, next scheduled run, last alert, and manual
+**Run now** / **Send alert** buttons wired to the trigger endpoints.
 
 ---
 
@@ -472,12 +472,12 @@ Added to `agent_server/config.py`:
 | --- | --- | --- |
 | `JOBBOARD_ENABLED` | `true` | Master switch for both scheduled jobs |
 | `JOBBOARD_MONITOR_INTERVAL_H` | `3` | Monitor cadence |
-| `JOBBOARD_DIGEST_INTERVAL_H` | `6` | Digest cadence |
+| `JOBBOARD_ALERT_INTERVAL_H` | `6` | Alert cadence |
 | `JOBBOARD_MAX_PAGES` | `10` | Fallback pagination cap |
 | `JOBBOARD_TODAY_ONLY` | `true` | Prefer same-day postings when the source dates them |
-| `JOBBOARD_DIGEST_HEARTBEAT` | `false` | Mail even when nothing is new |
+| `JOBBOARD_ALERT_HEARTBEAT` | `false` | Mail even when nothing is new |
 | `JOBBOARD_COMPANY_SLEEP_S` | `1.0–3.0` | Jitter between companies |
-| `JOBBOARD_SMTP_*`, `JOBBOARD_DIGEST_TO` | — | Mail transport (§5.3) |
+| `JOBBOARD_SMTP_*`, `JOBBOARD_ALERT_TO` | — | Mail transport (§5.3) |
 
 ---
 
@@ -490,7 +490,7 @@ Added to `agent_server/config.py`:
 | 3 | Matching | `jobboard/matcher.py` — normalization, alias matching, `dedupKey` |
 | 4 | Platform API | `backend/db.py` + `backend/server.py` `/jobboard/*` endpoints |
 | 5 | Monitor | `jobboard/monitor.py` + run bookkeeping; verify seeding vs new-detection |
-| 6 | Mailer + digest | `jobboard/mailer.py`, `jobboard/digest.py`, HTML template; watermark logic |
+| 6 | Mailer + alert | `jobboard/mailer.py`, `jobboard/alert.py`, HTML template; watermark logic |
 | 7 | Scheduler + routes | APScheduler in lifespan; `api/jobboard.py` triggers |
 | 8 | UI | `/job-board` page, watchlist CRUD, Track action, sidebar entry |
 | 9 | Docs | README section; `.env.example` entries |
@@ -501,9 +501,9 @@ data and you can inspect it with SQL before any email exists.
 **Testing.** Adapter tests run against checked-in JSON fixtures (no network).
 Monitor tests use a fake adapter + a seeded temp DB to assert the three cases that
 actually matter: seeding marks nothing new, an unchanged board on the second cycle
-produces zero new, and one added posting produces exactly one new. Digest tests
+produces zero new, and one added posting produces exactly one new. Alert tests
 assert the watermark never double-reports and that a failed send leaves postings
-undigested.
+unalerted.
 
 ---
 
@@ -515,7 +515,7 @@ undigested.
   errors surface in the UI as a red status badge rather than failing silently.
   Recommendation: prefer the ATS URL over a marketing `/careers` page when both exist.
 - **Clearbit logos** are a third-party dependency and require remote images enabled
-  in Gmail. The lettermark fallback means the digest is never broken by it, and
+  in Gmail. The lettermark fallback means the alert is never broken by it, and
   `logoUrl` lets you pin a logo per company. Say the word if you'd prefer CID-embedded
   images instead.
 - **Rate limiting.** One request per company per 3h with jitter is negligible for

@@ -1,7 +1,7 @@
 """HTTP client for the platform's Job Board endpoints (backend/, port 8001).
 
 The agent service never opens a connection to the platform database — all
-WatchedCompany / JobPosting / DigestRun access goes through here, the same rule
+WatchedCompany / JobPosting / AlertRun access goes through here, the same rule
 stages/platform_client.py follows for leads.
 
 Every call raises PlatformError on failure rather than returning a sentinel: a
@@ -118,15 +118,15 @@ def archive_postings(company_id: str, live_dedup_keys: list[str]) -> int:
     return data.get("archived", 0)
 
 
-def undigested_postings(since: datetime | None = None) -> list[dict]:
+def unalerted_postings(since: datetime | None = None) -> list[dict]:
     params = {"since": since.isoformat()} if since else None
-    data = _request("GET", "/api/v1/jobboard/postings/undigested", params=params)
+    data = _request("GET", "/api/v1/jobboard/postings/unalerted", params=params)
     return data.get("postings", [])
 
 
-def digest_watermark() -> datetime | None:
-    """finishedAt of the last SENT digest, or None before the first send."""
-    data = _request("GET", "/api/v1/jobboard/digest-runs/watermark")
+def alert_watermark() -> datetime | None:
+    """finishedAt of the last SENT alert, or None before the first send."""
+    data = _request("GET", "/api/v1/jobboard/alert-runs/watermark")
     raw = data.get("watermark")
     if not raw:
         return None
@@ -136,16 +136,16 @@ def digest_watermark() -> datetime | None:
         return None
 
 
-def create_digest_run(window_start: datetime | None, window_end: datetime) -> str:
+def create_alert_run(window_start: datetime | None, window_end: datetime) -> str:
     data = _request(
         "POST",
-        "/api/v1/jobboard/digest-runs",
+        "/api/v1/jobboard/alert-runs",
         json={"window_start": _iso(window_start), "window_end": _iso(window_end)},
     )
     return data["id"]
 
 
-def close_digest_run(
+def close_alert_run(
     run_id: str,
     *,
     status: str,
@@ -156,7 +156,7 @@ def close_digest_run(
 ) -> None:
     _request(
         "POST",
-        f"/api/v1/jobboard/digest-runs/{run_id}/close",
+        f"/api/v1/jobboard/alert-runs/{run_id}/close",
         json={
             "status": status,
             "new_count": new_count,

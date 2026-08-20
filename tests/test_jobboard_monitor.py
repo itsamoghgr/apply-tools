@@ -97,7 +97,7 @@ def set_board(monkeypatch, postings):
 # ---------------------------------------------------------------------------
 
 def test_seed_cycle_reports_nothing(fake_env, monkeypatch):
-    """Adding a company must not dump its back catalogue into the next digest."""
+    """Adding a company must not dump its back catalogue into the next alert."""
     set_board(monkeypatch, [posting("AI Engineer", ext="1"),
                             posting("Data Scientist", ext="2"),
                             posting("Product Manager", ext="3")])   # non-matching

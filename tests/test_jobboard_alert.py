@@ -1,4 +1,4 @@
-"""Digest + template + mailer tests.
+"""Alert + template + mailer tests.
 
 The watermark logic is what keeps the inbox honest, so the cases that matter are:
 a failed send must not lose postings, and a successful one must not report them
@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from agent_server.jobboard import digest as dg
+from agent_server.jobboard import alert as dg
 from agent_server.jobboard import mailer, templates
 
 NOW = datetime(2026, 8, 19, 12, 0, tzinfo=timezone.utc)
@@ -32,30 +32,30 @@ class FakePlatform:
         self.closed: list[tuple[str, dict]] = []
         self.fail_create = False
 
-    def digest_watermark(self):
+    def alert_watermark(self):
         return self.watermark
 
-    def undigested_postings(self, since=None):
+    def unalerted_postings(self, since=None):
         return self.postings
 
-    def create_digest_run(self, ws, we):
+    def create_alert_run(self, ws, we):
         if self.fail_create:
             raise dg.pc.PlatformError("create boom")
         run_id = f"dr_{len(self.runs)}"
         self.runs[run_id] = {"window_start": ws, "window_end": we}
         return run_id
 
-    def close_digest_run(self, run_id, **kw):
+    def close_alert_run(self, run_id, **kw):
         self.closed.append((run_id, kw))
 
 
 @pytest.fixture
 def env(monkeypatch):
     plat = FakePlatform()
-    monkeypatch.setattr(dg.pc, "digest_watermark", plat.digest_watermark)
-    monkeypatch.setattr(dg.pc, "undigested_postings", plat.undigested_postings)
-    monkeypatch.setattr(dg.pc, "create_digest_run", plat.create_digest_run)
-    monkeypatch.setattr(dg.pc, "close_digest_run", plat.close_digest_run)
+    monkeypatch.setattr(dg.pc, "alert_watermark", plat.alert_watermark)
+    monkeypatch.setattr(dg.pc, "unalerted_postings", plat.unalerted_postings)
+    monkeypatch.setattr(dg.pc, "create_alert_run", plat.create_alert_run)
+    monkeypatch.setattr(dg.pc, "close_alert_run", plat.close_alert_run)
     monkeypatch.setattr(dg.jb_db, "start_run", lambda *a, **k: "bk_1")
     monkeypatch.setattr(dg.jb_db, "finish_run", lambda *a, **k: None)
     sent = []
@@ -72,7 +72,7 @@ def env(monkeypatch):
 def test_sends_and_stamps_postings(env):
     env.postings = [posting("p1"), posting("p2", company="Ramp")]
 
-    res = dg.send_digest()
+    res = dg.send_alert()
 
     assert res.status == "sent"
     assert res.new_count == 2
@@ -90,12 +90,12 @@ def test_failed_send_leaves_postings_unstamped(env, monkeypatch):
     monkeypatch.setattr(dg.mailer, "send_mail",
                         lambda *a, **k: (_ for _ in ()).throw(mailer.MailSendError("smtp down")))
 
-    res = dg.send_digest()
+    res = dg.send_alert()
 
     assert res.status == "failed"
     _, kwargs = env.closed[-1]
     assert kwargs["status"] == "failed"
-    # THE point: no ids stamped -> they roll into the next digest.
+    # THE point: no ids stamped -> they roll into the next alert.
     assert "posting_ids" not in kwargs or not kwargs.get("posting_ids")
 
 
@@ -105,7 +105,7 @@ def test_unconfigured_smtp_fails_without_losing_postings(env, monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(
                             mailer.MailNotConfigured("missing SMTP config")))
 
-    res = dg.send_digest()
+    res = dg.send_alert()
 
     assert res.status == "failed"
     assert "missing SMTP config" in res.error
@@ -113,9 +113,9 @@ def test_unconfigured_smtp_fails_without_losing_postings(env, monkeypatch):
     assert not kwargs.get("posting_ids")
 
 
-def test_empty_digest_is_skipped_not_sent(env):
+def test_empty_alert_is_skipped_not_sent(env):
     env.postings = []
-    res = dg.send_digest()
+    res = dg.send_alert()
     assert res.status == "skipped"
     assert env.sent == []
     _, kwargs = env.closed[-1]
@@ -124,7 +124,7 @@ def test_empty_digest_is_skipped_not_sent(env):
 
 def test_force_sends_heartbeat_when_empty(env):
     env.postings = []
-    res = dg.send_digest(force=True)
+    res = dg.send_alert(force=True)
     assert res.status == "sent"
     assert len(env.sent) == 1
     assert "nothing new" in env.sent[0][0].lower()
@@ -133,7 +133,7 @@ def test_force_sends_heartbeat_when_empty(env):
 def test_watermark_is_passed_as_window_start(env):
     env.watermark = NOW
     env.postings = [posting("p1")]
-    dg.send_digest()
+    dg.send_alert()
     run = env.runs["dr_0"]
     assert run["window_start"] == NOW
 
@@ -143,9 +143,9 @@ def test_stamp_failure_after_send_is_reported(env, monkeypatch):
     env.postings = [posting("p1")]
     def boom(run_id, **kw):
         raise dg.pc.PlatformError("stamp boom")
-    monkeypatch.setattr(dg.pc, "close_digest_run", boom)
+    monkeypatch.setattr(dg.pc, "close_alert_run", boom)
 
-    res = dg.send_digest()
+    res = dg.send_alert()
 
     assert res.status == "failed"
     assert "stamp boom" in res.error
@@ -153,9 +153,9 @@ def test_stamp_failure_after_send_is_reported(env, monkeypatch):
 
 
 def test_platform_read_failure_is_clean(env, monkeypatch):
-    monkeypatch.setattr(dg.pc, "digest_watermark",
+    monkeypatch.setattr(dg.pc, "alert_watermark",
                         lambda: (_ for _ in ()).throw(dg.pc.PlatformError("down")))
-    res = dg.send_digest()          # must not raise
+    res = dg.send_alert()          # must not raise
     assert res.status == "failed"
     assert env.sent == []
 
@@ -163,7 +163,7 @@ def test_platform_read_failure_is_clean(env, monkeypatch):
 def test_run_create_failure_is_clean(env):
     env.postings = [posting("p1")]
     env.fail_create = True
-    res = dg.send_digest()
+    res = dg.send_alert()
     assert res.status == "failed"
     assert env.sent == []
 
@@ -186,7 +186,7 @@ def test_subject_line_truncates_many_companies():
 
 def test_html_contains_total_and_roles():
     ps = [posting("p1", title="Forward Deployed Engineer"), posting("p2", company="Ramp")]
-    html = templates.render_digest_html(ps)
+    html = templates.render_alert_html(ps)
     assert "2 new roles" in html
     assert "Forward Deployed Engineer" in html
     assert "Acme" in html and "Ramp" in html
@@ -196,7 +196,7 @@ def test_html_contains_total_and_roles():
 def test_html_escapes_hostile_content():
     """A malicious job title must not inject markup into the email."""
     ps = [posting(title='<script>alert(1)</script>', company='<b>Evil</b>')]
-    html = templates.render_digest_html(ps)
+    html = templates.render_alert_html(ps)
     assert "<script>" not in html
     assert "&lt;script&gt;" in html
     assert "<b>Evil</b>" not in html
@@ -214,32 +214,32 @@ def test_logo_url_resolution():
 
 def test_no_dead_logo_host_anywhere():
     """Regression: clearbit must not creep back into the rendered email."""
-    html = templates.render_digest_html([posting(domain="acme.com")])
+    html = templates.render_alert_html([posting(domain="acme.com")])
     assert "clearbit" not in html
 
 
 def test_lettermark_used_when_no_logo():
-    html = templates.render_digest_html([posting(domain=None, company="Zeta")])
+    html = templates.render_alert_html([posting(domain=None, company="Zeta")])
     assert "Z" in html
     assert "clearbit" not in html
 
 
 def test_lettermark_colour_is_stable_per_company():
-    a = templates.render_digest_html([posting(domain=None, company="Acme")])
-    b = templates.render_digest_html([posting(domain=None, company="Acme")])
+    a = templates.render_alert_html([posting(domain=None, company="Acme")])
+    b = templates.render_alert_html([posting(domain=None, company="Acme")])
     assert a == b
 
 
 def test_postings_grouped_under_one_company_card():
     ps = [posting("p1", title="AI Engineer"), posting("p2", title="Data Scientist")]
-    html = templates.render_digest_html(ps)
+    html = templates.render_alert_html(ps)
     assert html.count(">Acme<") == 1          # one card, two rows
     assert "2 new roles" in html
 
 
 def test_date_rendering_is_human():
     today = datetime.now(timezone.utc).isoformat()
-    html = templates.render_digest_html([posting(posted=today)])
+    html = templates.render_alert_html([posting(posted=today)])
     assert "posted today" in html
     # An unparseable date must not crash or leak a raw value.
     assert templates._fmt_date("garbage") is None
@@ -248,14 +248,14 @@ def test_date_rendering_is_human():
 
 def test_text_alternative_has_every_url():
     ps = [posting("p1", url="https://x/1"), posting("p2", company="Ramp", url="https://x/2")]
-    text = templates.render_digest_text(ps)
+    text = templates.render_alert_text(ps)
     assert "https://x/1" in text and "https://x/2" in text
     assert "2 new roles" in text
 
 
 def test_empty_renders_do_not_crash():
-    assert "No new roles" in templates.render_digest_html([])
-    assert "No new roles" in templates.render_digest_text([])
+    assert "No new roles" in templates.render_alert_html([])
+    assert "No new roles" in templates.render_alert_text([])
 
 
 # ---------------------------------------------------------------------------
@@ -274,7 +274,7 @@ def _config_with(**overrides):
 def test_send_mail_raises_when_unconfigured(monkeypatch):
     monkeypatch.setattr(mailer, "CONFIG", _config_with(
         jobboard_smtp_host="smtp.x.com", jobboard_smtp_user=None,
-        jobboard_smtp_app_password="p", jobboard_digest_to="to@x.com"))
+        jobboard_smtp_app_password="p", jobboard_alert_to="to@x.com"))
     with pytest.raises(mailer.MailNotConfigured, match="JOBBOARD_SMTP_USER"):
         mailer.send_mail("s", "<p>h</p>", "t")
 
@@ -282,17 +282,17 @@ def test_send_mail_raises_when_unconfigured(monkeypatch):
 def test_is_configured_true_when_all_present(monkeypatch):
     monkeypatch.setattr(mailer, "CONFIG", _config_with(
         jobboard_smtp_host="smtp.x.com", jobboard_smtp_user="u",
-        jobboard_smtp_app_password="p", jobboard_digest_to="to@x.com"))
+        jobboard_smtp_app_password="p", jobboard_alert_to="to@x.com"))
     assert mailer.is_configured() is True
 
 
 @pytest.mark.parametrize("missing", [
     "jobboard_smtp_host", "jobboard_smtp_user",
-    "jobboard_smtp_app_password", "jobboard_digest_to",
+    "jobboard_smtp_app_password", "jobboard_alert_to",
 ])
 def test_is_configured_requires_every_field(monkeypatch, missing):
     full = {"jobboard_smtp_host": "smtp.x.com", "jobboard_smtp_user": "u",
-            "jobboard_smtp_app_password": "p", "jobboard_digest_to": "to@x.com"}
+            "jobboard_smtp_app_password": "p", "jobboard_alert_to": "to@x.com"}
     full[missing] = None
     monkeypatch.setattr(mailer, "CONFIG", _config_with(**full))
     assert mailer.is_configured() is False
@@ -312,7 +312,7 @@ def test_send_mail_builds_multipart_alternative(monkeypatch):
     monkeypatch.setattr(mailer, "CONFIG", _config_with(
         jobboard_smtp_host="smtp.x.com", jobboard_smtp_port=465,
         jobboard_smtp_user="me@x.com", jobboard_smtp_app_password="p",
-        jobboard_digest_to="to@x.com"))
+        jobboard_alert_to="to@x.com"))
     monkeypatch.setattr(mailer.smtplib, "SMTP_SSL", FakeSMTP)
 
     mailer.send_mail("Subject here", "<p>hi</p>", "hi")

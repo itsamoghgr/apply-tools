@@ -17,10 +17,10 @@ type Run = {
 type Status = {
   enabled: boolean;
   monitor_interval_h: number;
-  digest_interval_h: number;
+  alert_interval_h: number;
   jobs: { id: string; next_run_at: string | null }[];
   last_monitor: Run | null;
-  last_digest: Run | null;
+  last_alert: Run | null;
 };
 
 function relative(iso: string | null): string {
@@ -41,7 +41,7 @@ export default function StatusStrip() {
   const router = useRouter();
   const [, startTransition] = useTransition();
   const [status, setStatus] = useState<Status | null>(null);
-  const [busy, setBusy] = useState<"monitor" | "digest" | null>(null);
+  const [busy, setBusy] = useState<"monitor" | "alert" | null>(null);
 
   async function load(signal?: AbortSignal) {
     try {
@@ -66,23 +66,23 @@ export default function StatusStrip() {
     return () => controller.abort();
   }, []);
 
-  async function trigger(kind: "monitor" | "digest") {
+  async function trigger(kind: "monitor" | "alert") {
     setBusy(kind);
     try {
       const path =
         kind === "monitor"
           ? "/api/agent/api/v1/jobboard/monitor/run"
-          : "/api/agent/api/v1/jobboard/digest/send";
+          : "/api/agent/api/v1/jobboard/alert/send";
       const res = await fetch(path, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(kind === "digest" ? { force: false } : {}),
+        body: JSON.stringify(kind === "alert" ? { force: false } : {}),
       });
       if (!res.ok) throw new Error(await res.text());
       toast.success(
         kind === "monitor"
           ? "Monitor cycle started — refresh in a moment."
-          : "Digest queued.",
+          : "Alert queued.",
       );
       // Give the background task a beat before re-reading status + postings.
       setTimeout(() => {
@@ -110,7 +110,7 @@ export default function StatusStrip() {
     : [
         `Last scan ${scanned}`,
         `Next ${relative(nextMonitor)}`,
-        `Last digest ${relative(status?.last_digest?.finished_at ?? null)}`,
+        `Last alert ${relative(status?.last_alert?.finished_at ?? null)}`,
       ].join(" · ");
 
   return (
@@ -137,12 +137,12 @@ export default function StatusStrip() {
       </button>
       <button
         className="inline-flex h-7 items-center gap-1.5 rounded-md border border-base-300 bg-base-100 px-2.5 text-xs transition-colors hover:border-primary disabled:opacity-50"
-        onClick={() => trigger("digest")}
+        onClick={() => trigger("alert")}
         disabled={busy !== null}
-        title="Send the digest email now"
+        title="Send the alert email now"
       >
         <Mail className="h-3.5 w-3.5 opacity-60" />
-        Digest
+        Alert
       </button>
     </div>
   );

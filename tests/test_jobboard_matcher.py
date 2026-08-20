@@ -174,7 +174,7 @@ def test_longest_alias_wins():
 def test_solutions_engineer_excludes_sales_variants(title, expected):
     """Observed on Vercel's live board: "Partner Solutions Engineer, EMEA" was
     matching as an FDE role. Quota-carrying sales roles don't belong in the
-    digest, but the bare title is kept because it is often a real FDE post."""
+    alert, but the bare title is kept because it is often a real FDE post."""
     assert role_match(title) == expected
 
 

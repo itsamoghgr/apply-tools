@@ -3,7 +3,7 @@
 import { useState } from "react";
 
 // Deterministic lettermark colours, so a company keeps the same badge across
-// renders and matches the digest email's treatment.
+// renders and matches the alert email's treatment.
 const MARK_CLASSES = [
   "bg-primary/15 text-primary",
   "bg-info/15 text-info",

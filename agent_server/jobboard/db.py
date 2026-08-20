@@ -45,7 +45,7 @@ def finish_run(run_id: str, *, status: str, **counts: Any) -> None:
     """Close a run row with its final counts.
 
     Accepted count fields: companies_total, companies_ok, companies_failed,
-    postings_seen, postings_matched, postings_new, digest_run_id, error.
+    postings_seen, postings_matched, postings_new, alert_run_id, error.
     """
     allowed = {
         "companies_total",
@@ -54,7 +54,7 @@ def finish_run(run_id: str, *, status: str, **counts: Any) -> None:
         "postings_seen",
         "postings_matched",
         "postings_new",
-        "digest_run_id",
+        "alert_run_id",
         "error",
     }
     fields = {k: v for k, v in counts.items() if k in allowed}

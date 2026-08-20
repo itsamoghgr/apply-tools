@@ -8,7 +8,7 @@ Per company:
 Two invariants shape the whole file:
 
 SEEDING. The first time a company is monitored it has no history, so its entire
-current board would otherwise read as "new" and flood the next digest. The seed
+current board would otherwise read as "new" and flood the next alert. The seed
 cycle writes every matched posting with isNew=false and stamps seededAt; only
 postings appearing AFTER that count as new.
 

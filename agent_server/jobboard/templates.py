@@ -1,4 +1,4 @@
-"""Digest email rendering — HTML and plaintext.
+"""Alert email rendering — HTML and plaintext.
 
 Email HTML is not web HTML. Gmail strips <style> blocks, Outlook renders through
 Word, and flexbox/grid are unavailable. So this is table-based layout with
@@ -12,7 +12,7 @@ Logos resolve to a favicon service (icons.duckduckgo.com), overridable per
 company via WatchedCompany.logoUrl. NOT Clearbit: logo.clearbit.com no longer
 resolves — the free logo API was retired — so every image would have been
 broken. Clients that block remote images fall back to a lettermark built from
-CSS only, so the digest never looks broken either way.
+CSS only, so the alert never looks broken either way.
 """
 
 from __future__ import annotations
@@ -167,15 +167,15 @@ def _company_block(company: str, postings: list[dict]) -> str:
         </table>"""
 
 
-def render_digest_html(postings: list[dict], *, app_url: str = "http://localhost:3001/job-board") -> str:
-    """Full HTML digest: total banner, then one card per company."""
+def render_alert_html(postings: list[dict], *, app_url: str = "http://localhost:3001/job-board") -> str:
+    """Full HTML alert: total banner, then one card per company."""
     grouped = group_by_company(postings)
     count = len(postings)
     companies = len(grouped)
 
     if count == 0:
         headline = "No new roles"
-        sub = "Nothing new since the last digest."
+        sub = "Nothing new since the last alert."
         blocks = ""
     else:
         headline = f"{count} new {'role' if count == 1 else 'roles'}"
@@ -209,10 +209,10 @@ def render_digest_html(postings: list[dict], *, app_url: str = "http://localhost
 </body></html>"""
 
 
-def render_digest_text(postings: list[dict], *, app_url: str = "http://localhost:3001/job-board") -> str:
+def render_alert_text(postings: list[dict], *, app_url: str = "http://localhost:3001/job-board") -> str:
     """Plaintext alternative. Required: html-only mail scores badly with filters."""
     if not postings:
-        return f"No new roles since the last digest.\n\n{app_url}\n"
+        return f"No new roles since the last alert.\n\n{app_url}\n"
 
     grouped = group_by_company(postings)
     count = len(postings)

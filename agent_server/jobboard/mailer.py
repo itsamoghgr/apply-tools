@@ -1,4 +1,4 @@
-"""Minimal SMTP sender for the Job Board digest.
+"""Minimal SMTP sender for the Job Board alert.
 
 Deliberately NOT a revival of backend/mail.py, which was deleted in 8cef324
 along with its Gmail IMAP inbox and open/click-tracking sidecar. None of that is
@@ -6,7 +6,7 @@ wanted here: this sends one message to one address and nothing else.
 
 Config lives in agent_server/.env (see config.py):
     JOBBOARD_SMTP_HOST / _PORT / _USER / _APP_PASSWORD
-    JOBBOARD_DIGEST_TO
+    JOBBOARD_ALERT_TO
 
 For Gmail, JOBBOARD_SMTP_APP_PASSWORD must be an APP PASSWORD (Google account ->
 Security -> 2-Step Verification -> App passwords), not the account password.
@@ -31,7 +31,7 @@ _TIMEOUT_S = 30.0
 class MailNotConfigured(Exception):
     """SMTP credentials or the recipient are missing.
 
-    Raised BEFORE any connection attempt so the caller can mark the digest run
+    Raised BEFORE any connection attempt so the caller can mark the alert run
     failed with a clear reason — and, crucially, leave the postings unstamped so
     they roll into the next successful send.
     """
@@ -47,7 +47,7 @@ def is_configured() -> bool:
         CONFIG.jobboard_smtp_host
         and CONFIG.jobboard_smtp_user
         and CONFIG.jobboard_smtp_app_password
-        and CONFIG.jobboard_digest_to
+        and CONFIG.jobboard_alert_to
     )
 
 
@@ -71,13 +71,13 @@ def send_mail(
                 ("JOBBOARD_SMTP_HOST", CONFIG.jobboard_smtp_host),
                 ("JOBBOARD_SMTP_USER", CONFIG.jobboard_smtp_user),
                 ("JOBBOARD_SMTP_APP_PASSWORD", CONFIG.jobboard_smtp_app_password),
-                ("JOBBOARD_DIGEST_TO", CONFIG.jobboard_digest_to),
+                ("JOBBOARD_ALERT_TO", CONFIG.jobboard_alert_to),
             )
             if not value
         ]
         raise MailNotConfigured(f"missing SMTP config: {', '.join(missing)}")
 
-    recipient = to or CONFIG.jobboard_digest_to
+    recipient = to or CONFIG.jobboard_alert_to
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = formataddr((from_name, CONFIG.jobboard_smtp_user))
@@ -116,4 +116,4 @@ def send_mail(
     except (smtplib.SMTPException, OSError, ssl.SSLError) as exc:
         raise MailSendError(f"SMTP send failed: {exc.__class__.__name__}: {exc}") from exc
 
-    log.info("jobboard.digest_mailed", subject=subject)
+    log.info("jobboard.alert_mailed", subject=subject)

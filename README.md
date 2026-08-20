@@ -6,7 +6,7 @@ A personal job-application toolkit with three surfaces — a Next.js web app, a 
 - **Resume builder** — edit a resume as structured data, export an ATS-friendly PDF, with AI assists for bullets, summaries, and JD tailoring.
 - **Scoring** — rank a JD against every resume variant with a rubric-based fit score and a per-category breakdown (skill / experience / impact / education).
 - **Tracking** — log every application, its status, linked contacts, and an audit trail of everything generated.
-- **Job Board** — watch companies' career pages, get new matching roles collected every 3 hours and emailed as a digest every 6.
+- **Job Board** — watch companies' career pages, get new matching roles collected on a schedule you set and emailed as an alert at the times you choose.
 
 Generation runs through a pluggable provider chain (Anthropic, Bedrock, Groq, Google Gemini / Vertex AI, NVIDIA NIM). Cover letters and resumes are compiled locally with [Tectonic](https://tectonic-typesetting.github.io/). Everything lives in a local Postgres database (`apply_tools`) — schema owned by Prisma, read by the FastAPI backend via SQLAlchemy. The web app and extension only talk to `127.0.0.1`; nothing is hosted.
 
@@ -84,17 +84,17 @@ pip install -e .
 cd .. && agent_server/venv/bin/python -m agent_server.migrations.run
 ```
 
-For the digest email, add these to `agent_server/.env` (a Gmail **app password**,
+For the alert email, add these to `agent_server/.env` (a Gmail **app password**,
 not your account password — Google Account → Security → 2-Step Verification →
 App passwords):
 
 ```bash
 JOBBOARD_SMTP_USER=you@gmail.com
 JOBBOARD_SMTP_APP_PASSWORD=xxxxxxxxxxxxxxxx
-JOBBOARD_DIGEST_TO=you@gmail.com
+JOBBOARD_ALERT_TO=you@gmail.com
 ```
 
-Without them the monitor still runs and stores roles; only the digest is skipped
+Without them the monitor still runs and stores roles; only the alert is skipped
 (and the postings it would have reported stay queued for the next successful send).
 
 ### 7. Load the browser extension
@@ -140,7 +140,7 @@ AI assists (all routed through the same provider/fallback chain as the rest of t
 ### Job Board (`/job-board`)
 
 Add a company's career page and it is re-scraped every 3 hours; anything new that
-matches your target roles is stored, and a digest email lands every 6 hours with
+matches your target roles is stored, and an alert email lands at your chosen times with
 the count and one block per role.
 
 **Target roles** — Data Scientist, Data Analyst, AI Engineer, Founding Engineer,
@@ -175,12 +175,12 @@ a parser miss must never hide a real job.
   band, age, sort, "new only", "hide applied".
 
 Nothing is ever deleted. Postings outside a retention window or above an
-experience ceiling are **archived** — they leave the feed and digests but the
+experience ceiling are **archived** — they leave the feed and alerts but the
 row survives, so widening either setting brings them straight back. Anything
 already sent to the tracker is exempt from every sweep.
 
 The first scan of a new company records its entire current board as *not new*,
-so adding a company never floods your next digest with its back catalogue.
+so adding a company never floods your next alert with its back catalogue.
 
 ### Extension popup
 
@@ -217,16 +217,27 @@ Valid values are `anthropic`, `bedrock`, `groq`, `gemini`, `vertex`, and `nvidia
 
 `DATABASE_URL` is read by both the backend and the frontend and must match between `backend/.env` and `frontend/.env`.
 
-**Job Board** — all in `agent_server/.env`; the schedule knobs are rarely worth changing.
+**Job Board** — all in `agent_server/.env`.
+
+*When to scrape, and when to alert.* Every time below is read in
+`JOBBOARD_TIMEZONE`, so it keeps meaning the same wall-clock hour across a DST
+shift. Narrowing any of these never loses roles: the alert window is a
+watermark, so anything found outside alert hours rolls into the next alert.
 
 | Var | Default | Meaning |
 | --- | --- | --- |
 | `JOBBOARD_ENABLED` | `true` | Master switch for both schedules |
+| `JOBBOARD_TIMEZONE` | `UTC` | IANA zone all schedule times are read in |
 | `JOBBOARD_MONITOR_INTERVAL_H` | `3` | How often career pages are re-scraped |
-| `JOBBOARD_DIGEST_INTERVAL_H` | `6` | How often the digest is sent |
+| `JOBBOARD_MONITOR_ACTIVE_START` | `07:00` | Earliest hour a scrape may run |
+| `JOBBOARD_MONITOR_ACTIVE_END` | `23:00` | Latest hour a scrape may run (set equal to start for 24/7) |
+| `JOBBOARD_MONITOR_DAYS` | `*` | Days scraping runs — `*`, `mon-fri`, or `mon,wed,fri` |
+| `JOBBOARD_ALERT_AT` | `09:00,18:00` | Times of day the alert email is sent. **Wins over the interval below** |
+| `JOBBOARD_ALERT_DAYS` | `*` | Days the alert is sent |
+| `JOBBOARD_ALERT_INTERVAL_H` | `6` | Fallback only, used when `JOBBOARD_ALERT_AT` is blank |
 | `JOBBOARD_TODAY_ONLY` | `true` in code, **set to `false`** in `.env.example` | When `true`, only same-day postings match — so a scan run in the evening reports nothing. Dedup already prevents repeats, so `false` is the useful setting |
 | `JOBBOARD_MAX_PAGES` | `10` | Page cap for the non-ATS fallback |
-| `JOBBOARD_SMTP_*`, `JOBBOARD_DIGEST_TO` | — | Digest mail transport |
+| `JOBBOARD_SMTP_*`, `JOBBOARD_ALERT_TO` | — | Alert mail transport |
 
 Retention, maximum experience, and the default country list are set in the UI
 (the **Scrape settings** button) rather than by env var, since they are things
@@ -243,16 +254,16 @@ you change while browsing.
 - **`DATABASE_URL is not set`** — the backend reads it from `backend/.env`; make sure that line is present and matches `frontend/.env`.
 - **Prisma "could not create the shadow database"** — the `apply` role needs `CREATEDB`: `psql -d postgres -c "ALTER ROLE apply CREATEDB;"`.
 - **Popup says "offline"** — is `./start.sh` running? Curl `http://127.0.0.1:8001/` directly to confirm.
-- **Job Board says "Agent service offline"** — the agent service on `:8002` isn't up. It needs `agent_server/venv` to exist (see setup step 6); without it, schedules don't run and the Scan/Digest buttons fail.
+- **Job Board says "Agent service offline"** — the agent service on `:8002` isn't up. It needs `agent_server/venv` to exist (see setup step 6); without it, schedules don't run and the Scan/Alert buttons fail.
 - **A scan finds 0 roles across every company** — check `JOBBOARD_TODAY_ONLY`. When `true`, only roles posted *that same day* match, so an evening scan legitimately returns nothing.
 - **A company shows "no matching roles"** — it's being watched, the scrape succeeded, and nothing matched your five target roles. A red "scrape failed" row means the opposite: the board couldn't be read, and the error is shown inline.
-- **Digest never arrives** — `JOBBOARD_SMTP_APP_PASSWORD` must be a Gmail *app password*. Postings aren't lost when a send fails; they roll into the next successful digest.
+- **Alert never arrives** — `JOBBOARD_SMTP_APP_PASSWORD` must be a Gmail *app password*. Postings aren't lost when a send fails; they roll into the next successful alert.
 
 ## Privacy
 
 - API keys live only in `backend/.env`, which is gitignored. Neither the extension nor the web app sees them.
 - The backend and Next.js dev server listen on `127.0.0.1` only by default; do not expose them without adding auth.
-- The Job Board fetches public career pages and their JSON endpoints directly; nothing about you is sent to them. Company logos in the web app and digest email are loaded from a public favicon service by domain.
+- The Job Board fetches public career pages and their JSON endpoints directly; nothing about you is sent to them. Company logos in the web app and alert email are loaded from a public favicon service by domain.
 - Data lives in your local Postgres server. `data/` (saved PDFs, plus any legacy SQLite file), `*.pdf`, `.env`, `node_modules/`, and Python venvs are gitignored. **`backend/template.tex` is NOT gitignored** — replace it with a placeholder before committing if you don't want your real template in git.
 - Resumes are sent to your configured LLM provider as part of every request body. Don't keep anything in a resume you wouldn't want to send to an LLM API.
 - When you click **Auto-detect** on a page that doesn't match a known job board (LinkedIn, Greenhouse, Lever, Ashby, Workday, Indeed), the page's visible text is sent to the extraction provider for company + JD extraction. Groq's free tier may use prompts for service improvement — check their data policy if that matters to you.

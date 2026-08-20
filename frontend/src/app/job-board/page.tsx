@@ -97,7 +97,7 @@ export default async function JobBoardPage({
         <p className="mt-1 text-sm opacity-70">
           Monitoring {serialisedCompanies.filter((c) => c.active).length} career{" "}
           {serialisedCompanies.filter((c) => c.active).length === 1 ? "page" : "pages"}{" "}
-          every 3 hours. Digest every 6 hours.
+          every 3 hours. Alert every 6 hours.
         </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">

@@ -294,7 +294,7 @@ model WatchedCompany {
   countryFilter Json?
   active        Boolean   @default(true)
   // Set once the first-cycle backlog seed completes. Until then the whole board
-  // is written with isNew=false, so adding a company never floods a digest.
+  // is written with isNew=false, so adding a company never floods a alert.
   seededAt      DateTime?
   lastCheckedAt DateTime?
   lastStatus    String?
@@ -330,8 +330,8 @@ model JobPosting {
   firstSeenAt      DateTime  @default(now())
   // false for rows written by a company's seed cycle (pre-existing backlog).
   isNew            Boolean   @default(true)
-  // Stamped when a digest reports this posting, so it is never reported twice.
-  digestRunId      String?
+  // Stamped when a alert reports this posting, so it is never reported twice.
+  alertRunId      String?
   // Set when the posting disappears from the board. Rows are NEVER deleted.
   archivedAt       DateTime?
   jobApplicationId String?
@@ -342,20 +342,20 @@ model JobPosting {
   // THE central invariant: every posting write is an ON CONFLICT DO UPDATE
   // against this index, which is what makes a monitor cycle idempotent.
   @@unique([watchedCompanyId, dedupKey])
-  @@index([digestRunId])
-  // NOTE: three partial indexes (undigested, company-live) exist at the DB level
+  @@index([alertRunId])
+  // NOTE: three partial indexes (unalerted, company-live) exist at the DB level
   // from jobboard_migration.sql. Prisma can't express `WHERE`, so they are not
   // redeclared here — same treatment as Lead.domain's partial unique index.
 }
 
-// One row per digest attempt. finishedAt of the latest status='sent' row is the
-// watermark bounding the next digest window, so a failed or delayed run carries
+// One row per alert attempt. finishedAt of the latest status='sent' row is the
+// watermark bounding the next alert window, so a failed or delayed run carries
 // its postings forward instead of dropping them.
-model DigestRun {
+model AlertRun {
   id           String    @id
   startedAt    DateTime  @default(now())
   finishedAt   DateTime?
-  // null only for the first-ever digest, which has no prior watermark.
+  // null only for the first-ever alert, which has no prior watermark.
   windowStart  DateTime?
   windowEnd    DateTime
   newCount     Int       @default(0)

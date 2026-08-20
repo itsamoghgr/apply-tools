@@ -123,7 +123,7 @@ _DATETIME_COLUMNS = frozenset(
         "sentAt",
         "linkedAt",
         "lastSentAt",
-        # Job Board (WatchedCompany / JobPosting / DigestRun).
+        # Job Board (WatchedCompany / JobPosting / AlertRun).
         "seededAt",
         "lastCheckedAt",
         "postedAt",
@@ -1029,14 +1029,14 @@ def upsert_job_postings(company_id: str, postings: list[dict]) -> dict:
 
     Returns ``{"inserted": int, "updated": int, "new_ids": [...]}`` where
     `new_ids` are the ids of rows that did not previously exist — that is
-    precisely the set of genuinely-new postings the digest should report.
+    precisely the set of genuinely-new postings the alert should report.
 
     ON CONFLICT ("watchedCompanyId", "dedupKey") DO UPDATE refreshes the mutable
     display fields (title / location / url / postedAt / externalId / matchedRole)
     and clears archivedAt, since a role that reappeared on the board is live
     again.
 
-    It deliberately NEVER touches "isNew", "firstSeenAt", or "digestRunId": a
+    It deliberately NEVER touches "isNew", "firstSeenAt", or "alertRunId": a
     board re-listing an old role must not push it back into your inbox.
 
     `isNew` is per-posting and supplied by the caller — the monitor passes False
@@ -1139,16 +1139,16 @@ def archive_missing_postings(company_id: str, live_dedup_keys: list[str]) -> int
         return cur.rowcount
 
 
-def list_undigested_postings(window_start: datetime | None = None) -> list[dict]:
-    """Postings eligible for the next digest, joined to their company.
+def list_unalerted_postings(window_start: datetime | None = None) -> list[dict]:
+    """Postings eligible for the next alert, joined to their company.
 
     Eligibility is the conjunction of three independent conditions:
       isNew            -> not part of a company's seeded backlog
-      digestRunId NULL -> not already reported by an earlier digest
+      alertRunId NULL -> not already reported by an earlier alert
       archivedAt NULL  -> still live on the board
 
-    `window_start` is the watermark (finishedAt of the last SENT digest); NULL
-    on the first-ever run, which makes that digest unbounded-backwards — safe,
+    `window_start` is the watermark (finishedAt of the last SENT alert); NULL
+    on the first-ever run, which makes that alert unbounded-backwards — safe,
     because seeded rows carry isNew = false.
 
     Company name / domain / logoUrl are joined in so the mailer renders without
@@ -1161,7 +1161,7 @@ def list_undigested_postings(window_start: datetime | None = None) -> list[dict]
                c."logoUrl" AS "companyLogoUrl"
         FROM "JobPosting" p
         JOIN "WatchedCompany" c ON c."id" = p."watchedCompanyId"
-        WHERE p."isNew" AND p."digestRunId" IS NULL AND p."archivedAt" IS NULL
+        WHERE p."isNew" AND p."alertRunId" IS NULL AND p."archivedAt" IS NULL
     """
     params: dict[str, Any] = {}
     if window_start is not None:
@@ -1173,13 +1173,13 @@ def list_undigested_postings(window_start: datetime | None = None) -> list[dict]
         return _rows_to_dicts(conn.execute(text(sql), params).fetchall())
 
 
-def create_digest_run(window_start: datetime | None, window_end: datetime) -> str:
-    """Open a DigestRun row (status 'pending'). Returns its id."""
+def create_alert_run(window_start: datetime | None, window_end: datetime) -> str:
+    """Open a AlertRun row (status 'pending'). Returns its id."""
     run_id = secrets.token_urlsafe(12)
     with get_conn() as conn:
         conn.execute(
             text(
-                'INSERT INTO "DigestRun" ("id", "windowStart", "windowEnd", "status") '
+                'INSERT INTO "AlertRun" ("id", "windowStart", "windowEnd", "status") '
                 "VALUES (:id, :ws, :we, 'pending')"
             ),
             {"id": run_id, "ws": window_start, "we": window_end},
@@ -1187,7 +1187,7 @@ def create_digest_run(window_start: datetime | None, window_end: datetime) -> st
     return run_id
 
 
-def close_digest_run(
+def close_alert_run(
     run_id: str,
     *,
     status: str,
@@ -1196,27 +1196,27 @@ def close_digest_run(
     posting_ids: list[str] | None = None,
     error: str | None = None,
 ) -> None:
-    """Close a DigestRun and stamp digestRunId on the postings it reported —
+    """Close a AlertRun and stamp alertRunId on the postings it reported —
     both in ONE transaction.
 
     The atomicity is the point. If the run were marked 'sent' in one transaction
     and the postings stamped in another, a crash in between would leave those
-    postings with digestRunId NULL while the watermark had already advanced past
+    postings with alertRunId NULL while the watermark had already advanced past
     them: they would be silently reported a second time (or, with a different
     ordering, dropped entirely). One transaction makes that window impossible.
 
     Callers pass posting_ids ONLY for status='sent'. On 'failed' the ids are left
-    unstamped on purpose, so the postings roll into the next successful digest
+    unstamped on purpose, so the postings roll into the next successful alert
     instead of being lost to a transient SMTP error.
     """
     if status not in ("sent", "skipped", "failed"):
-        raise ValueError(f"invalid digest status: {status}")
+        raise ValueError(f"invalid alert status: {status}")
 
     ids = list(posting_ids or [])
     with get_conn() as conn:
         conn.execute(
             text(
-                'UPDATE "DigestRun" SET "status" = :status, "newCount" = :new_count, '
+                'UPDATE "AlertRun" SET "status" = :status, "newCount" = :new_count, '
                 '"companyCount" = :company_count, "error" = :error, '
                 '"finishedAt" = CURRENT_TIMESTAMP WHERE "id" = :id'
             ),
@@ -1231,25 +1231,25 @@ def close_digest_run(
         if ids:
             conn.execute(
                 text(
-                    'UPDATE "JobPosting" SET "digestRunId" = :run_id, '
+                    'UPDATE "JobPosting" SET "alertRunId" = :run_id, '
                     '"updatedAt" = CURRENT_TIMESTAMP '
-                    'WHERE "id" = ANY(:ids) AND "digestRunId" IS NULL'
+                    'WHERE "id" = ANY(:ids) AND "alertRunId" IS NULL'
                 ),
                 {"run_id": run_id, "ids": ids},
             )
 
 
-def last_sent_digest_at() -> datetime | None:
-    """finishedAt of the most recent successfully-SENT digest — the watermark.
+def last_sent_alert_at() -> datetime | None:
+    """finishedAt of the most recent successfully-SENT alert — the watermark.
 
-    Deliberately ignores 'skipped' and 'failed' runs: only a digest that
+    Deliberately ignores 'skipped' and 'failed' runs: only an alert that
     actually reached your inbox may advance the window. Returns None before the
     first successful send.
     """
     with get_conn() as conn:
         row = conn.execute(
             text(
-                'SELECT "finishedAt" FROM "DigestRun" '
+                'SELECT "finishedAt" FROM "AlertRun" '
                 "WHERE \"status\" = 'sent' AND \"finishedAt\" IS NOT NULL "
                 'ORDER BY "finishedAt" DESC LIMIT 1'
             )

@@ -94,7 +94,7 @@ _EXCLUSIONS: tuple[str, ...] = (
     # Sales-adjacent qualifiers on "solutions engineer". That alias is kept
     # because at smaller companies a plain "Solutions Engineer" IS the forward
     # deployed role — but "Partner/Pre-Sales Solutions Engineer" is a sales
-    # function, and matching it would put quota-carrying roles in the digest.
+    # function, and matching it would put quota-carrying roles in the alert.
     "partner solutions engineer",
     "pre sales",
     "presales",

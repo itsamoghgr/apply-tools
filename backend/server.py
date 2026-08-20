@@ -21,8 +21,8 @@ from db import (
     archive_stale_postings,
     count_over_experience,
     restore_within_experience,
-    close_digest_run,
-    create_digest_run,
+    close_alert_run,
+    create_alert_run,
     delete_job_application,
     delete_lead,
     delete_setting,
@@ -31,12 +31,12 @@ from db import (
     get_watched_company,
     insert_job_application,
     insert_lead,
-    last_sent_digest_at,
+    last_sent_alert_at,
     link_posting_to_application,
     list_job_applications,
     list_leads,
     list_leads_for_application,
-    list_undigested_postings,
+    list_unalerted_postings,
     list_watched_companies,
     platform_leads_known_domains,
     platform_upsert_lead,
@@ -870,7 +870,7 @@ def leads_upsert(
 # Job Board (career-page monitor) — agent-facing row access.
 #
 # The agent server (port 8002) scrapes each watched company's board every 3h and
-# pushes matching postings here; a 6-hourly digest reports what is new. The agent
+# pushes matching postings here; a 6-hourly alert reports what is new. The agent
 # NEVER connects to this database directly — everything goes through these
 # endpoints, the same rule the lead-intake endpoints above follow.
 #
@@ -921,7 +921,7 @@ class JobPostingIn(BaseModel):
     # ISO-3166 alpha-2 parsed from `location`; None when it can't be resolved.
     country: str | None = Field(default=None, max_length=2)
     # False for a company's first (seed) cycle, so its pre-existing backlog is
-    # recorded without ever being reported by a digest.
+    # recorded without ever being reported by an alert.
     is_new: bool = True
 
 
@@ -939,18 +939,18 @@ class JobPostingsArchiveRequest(BaseModel):
     live_dedup_keys: list[str] = Field(default_factory=list, max_length=2000)
 
 
-class DigestRunCreateRequest(BaseModel):
-    # null on the first-ever digest, which has no prior watermark.
+class AlertRunCreateRequest(BaseModel):
+    # null on the first-ever alert, which has no prior watermark.
     window_start: datetime | None = None
     window_end: datetime
 
 
-class DigestRunCloseRequest(BaseModel):
+class AlertRunCloseRequest(BaseModel):
     status: Literal["sent", "skipped", "failed"]
     new_count: int = Field(default=0, ge=0)
     company_count: int = Field(default=0, ge=0)
     # Supplied ONLY for status='sent'. On failure the ids are left unstamped on
-    # purpose, so those postings roll into the next successful digest.
+    # purpose, so those postings roll into the next successful alert.
     posting_ids: list[str] = Field(default_factory=list, max_length=2000)
     error: str | None = Field(default=None, max_length=2000)
 
@@ -1045,7 +1045,7 @@ def jobboard_upsert_postings(
     """Bulk-upsert one company's postings.
 
     `new_ids` is exactly the set of genuinely-new postings — the rows that did
-    not previously exist — which is what the digest reports.
+    not previously exist — which is what the alert reports.
     """
     _require_agent_token(x_agent_token)
     if get_watched_company(req.company_id) is None:
@@ -1161,57 +1161,57 @@ def settings_put(key: str, body: dict[str, Any]) -> dict[str, bool]:
     return {"ok": True}
 
 
-@app.get("/api/v1/jobboard/postings/undigested")
-def jobboard_undigested_postings(
+@app.get("/api/v1/jobboard/postings/unalerted")
+def jobboard_unalerted_postings(
     since: datetime | None = None,
     x_agent_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Postings eligible for the next digest, joined to their company."""
+    """Postings eligible for the next alert, joined to their company."""
     _require_agent_token(x_agent_token)
     try:
-        postings = list_undigested_postings(window_start=since)
+        postings = list_unalerted_postings(window_start=since)
     except Exception as e:
         raise _to_http_error(e)
     return {"postings": postings}
 
 
-@app.get("/api/v1/jobboard/digest-runs/watermark")
-def jobboard_digest_watermark(
+@app.get("/api/v1/jobboard/alert-runs/watermark")
+def jobboard_alert_watermark(
     x_agent_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """finishedAt of the last SENT digest — the window start for the next one."""
+    """finishedAt of the last SENT alert — the window start for the next one."""
     _require_agent_token(x_agent_token)
     try:
-        at = last_sent_digest_at()
+        at = last_sent_alert_at()
     except Exception as e:
         raise _to_http_error(e)
     return {"watermark": at.isoformat() if at else None}
 
 
-@app.post("/api/v1/jobboard/digest-runs")
-def jobboard_create_digest_run(
-    req: DigestRunCreateRequest,
+@app.post("/api/v1/jobboard/alert-runs")
+def jobboard_create_alert_run(
+    req: AlertRunCreateRequest,
     x_agent_token: str | None = Header(default=None),
 ) -> dict[str, Any]:
-    """Open a DigestRun row before attempting a send."""
+    """Open a AlertRun row before attempting a send."""
     _require_agent_token(x_agent_token)
     try:
-        run_id = create_digest_run(req.window_start, req.window_end)
+        run_id = create_alert_run(req.window_start, req.window_end)
     except Exception as e:
         raise _to_http_error(e)
     return {"ok": True, "id": run_id}
 
 
-@app.post("/api/v1/jobboard/digest-runs/{run_id}/close")
-def jobboard_close_digest_run(
+@app.post("/api/v1/jobboard/alert-runs/{run_id}/close")
+def jobboard_close_alert_run(
     run_id: str,
-    req: DigestRunCloseRequest,
+    req: AlertRunCloseRequest,
     x_agent_token: str | None = Header(default=None),
 ) -> dict[str, bool]:
-    """Close a DigestRun and stamp its postings — atomically. See close_digest_run."""
+    """Close a AlertRun and stamp its postings — atomically. See close_alert_run."""
     _require_agent_token(x_agent_token)
     try:
-        close_digest_run(
+        close_alert_run(
             run_id,
             status=req.status,
             new_count=req.new_count,
