@@ -6,6 +6,10 @@ Endpoints:
   GET  /health           — liveness probe (also accepts HEAD)
   HEAD /health           — same
 
+  /api/v1/jobboard/*     — career-page monitor triggers + run history
+                           (see api/jobboard.py; the 3h/6h schedules are
+                           started in the lifespan handler below)
+
 The pipeline runs as a FastAPI BackgroundTask so the POST returns immediately.
 """
 
@@ -17,12 +21,16 @@ from typing import Any
 import asyncio
 import json
 
+from contextlib import asynccontextmanager
+
 from fastapi import BackgroundTasks, FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from agent_server.api.jobboard import router as jobboard_router
 from agent_server.config import CONFIG
 from agent_server.db.agent_db import audit_since, create_job, get_job, seen_add
+from agent_server.jobboard.scheduler import shutdown_scheduler, start_scheduler
 from agent_server.log import configure_logging, get_logger
 from agent_server.orchestrator.runner import launch_pipeline
 from agent_server.stages.normalize import normalize_domain
@@ -32,11 +40,31 @@ configure_logging()
 
 logger = get_logger(__name__)
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Own the Job Board schedules for the life of the process.
+
+    Starting here (rather than at import) keeps `import app` side-effect free,
+    so the test suite and any tooling that imports the module do not
+    accidentally spin up background timers.
+    """
+    start_scheduler()
+    try:
+        yield
+    finally:
+        shutdown_scheduler()
+
+
 app = FastAPI(
     title="Lead-Generation Agent Server",
     version="0.1.0",
     description="Phase-1 skeleton: full pipeline with stubbed stages.",
+    lifespan=lifespan,
 )
+
+# Career-page monitor routes (triggers, run history, ATS detection).
+app.include_router(jobboard_router)
 
 
 # ---------------------------------------------------------------------------
@@ -272,14 +300,14 @@ def verify_email(body: VerifyEmailRequest) -> dict[str, Any]:
     try:
         from agent_server.agents.contact import find_contact
         from agent_server.agents.deps import AgentDeps
-        from agent_server.agents.llm import AnthropicLLM
+        from agent_server.agents.llm import build_llm
         from agent_server.stages.normalize import normalize_domain as _nd
         from agent_server.web import fetch_page, search
 
         deps = AgentDeps(
             search=search,
             fetch_page=fetch_page,
-            llm=AnthropicLLM(),
+            llm=build_llm(),
             audit=lambda *a, **k: None,  # on-demand: no job to attach traces to
             normalize_domain=_nd,
         )

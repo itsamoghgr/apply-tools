@@ -75,6 +75,21 @@ class Config:
     # Model id used when llm_provider == "anthropic" (direct API).
     llm_model: str = os.environ.get("AGENT_LLM_MODEL", "claude-opus-4-8")
 
+    # Google Gemini (AGENT_LLM_PROVIDER=gemini). Uses an AI Studio API key via
+    # Gemini's OpenAI-compatible endpoint — NOT Vertex AI, which authenticates
+    # with ADC/service accounts instead. Key: https://aistudio.google.com/apikey
+    gemini_api_key: str | None = os.environ.get("GEMINI_API_KEY") or None
+    gemini_model: str = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+    # Vertex AI (AGENT_LLM_PROVIDER=vertex) — the same Gemini models billed to a
+    # GCP project, authenticated with Application Default Credentials instead of
+    # an API key. Required when an org policy disallows API keys.
+    #   gcloud auth application-default login
+    #   gcloud config set project <PROJECT_ID>
+    vertex_project: str | None = os.environ.get("VERTEX_PROJECT") or None
+    vertex_location: str = os.environ.get("VERTEX_LOCATION", "us-central1")
+    vertex_model: str = os.environ.get("VERTEX_MODEL", "google/gemini-2.5-flash")
+
     # Structured-floor sources
     product_hunt_token: str | None = os.environ.get("PRODUCT_HUNT_TOKEN") or None
     yc_oss_url: str = os.environ.get(
@@ -104,6 +119,44 @@ class Config:
         "head of engineering,vp engineering,engineering manager,cto,"
         "director of engineering,founder",
     )
+
+    # ── Job Board (career-page monitor) ────────────────────────────────────
+    # A watchlist-driven pipeline, separate from the lead-gen hunt above: it
+    # only visits career pages the user explicitly added. See
+    # docs/job_board_design.md.
+    jobboard_enabled: bool = (
+        os.environ.get("JOBBOARD_ENABLED", "true").lower() == "true"
+    )
+    jobboard_monitor_interval_h: int = _int("JOBBOARD_MONITOR_INTERVAL_H", 3)
+    jobboard_digest_interval_h: int = _int("JOBBOARD_DIGEST_INTERVAL_H", 6)
+    # Fallback pagination cap for custom (non-ATS) career pages. ATS boards
+    # return everything in one call and never paginate.
+    jobboard_max_pages: int = _int("JOBBOARD_MAX_PAGES", 10)
+    # Prefer a same-day view when the source can provide one.
+    jobboard_today_only: bool = (
+        os.environ.get("JOBBOARD_TODAY_ONLY", "true").lower() == "true"
+    )
+    # Mail a "nothing new" heartbeat instead of skipping an empty digest.
+    jobboard_digest_heartbeat: bool = (
+        os.environ.get("JOBBOARD_DIGEST_HEARTBEAT", "false").lower() == "true"
+    )
+    jobboard_company_sleep_min_s: float = float(
+        os.environ.get("JOBBOARD_COMPANY_SLEEP_MIN_S", "1.0")
+    )
+    jobboard_company_sleep_max_s: float = float(
+        os.environ.get("JOBBOARD_COMPANY_SLEEP_MAX_S", "3.0")
+    )
+
+    # Digest mail transport. A small self-contained SMTP sender lives in
+    # jobboard/mailer.py — deliberately NOT a revival of backend/mail.py, whose
+    # Gmail-inbox and click-tracking baggage was removed in 8cef324.
+    jobboard_smtp_host: str = os.environ.get("JOBBOARD_SMTP_HOST", "smtp.gmail.com")
+    jobboard_smtp_port: int = _int("JOBBOARD_SMTP_PORT", 465)
+    jobboard_smtp_user: str | None = os.environ.get("JOBBOARD_SMTP_USER") or None
+    jobboard_smtp_app_password: str | None = (
+        os.environ.get("JOBBOARD_SMTP_APP_PASSWORD") or None
+    )
+    jobboard_digest_to: str | None = os.environ.get("JOBBOARD_DIGEST_TO") or None
 
     @property
     def roster_role_keywords(self) -> frozenset[str]:
