@@ -15,6 +15,7 @@ import {
   Users,
   FilePlus2,
   User,
+  Radar,
 } from "lucide-react";
 import { ThemeToggle } from "./ThemeToggle";
 import { LOGO_LOCKUP_INNER } from "./logoLockupInner";
@@ -42,6 +43,7 @@ type NavItem = {
 const NAV: NavItem[] = [
   { href: "/", label: "Home", icon: Home, exact: true },
   { href: "/applications", label: "Applications", icon: Briefcase },
+  { href: "/job-board", label: "Job Board", icon: Radar },
   { href: "/leads", label: "Leads", icon: Users },
   { href: "/resumes", label: "Resumes", icon: FileText },
   { href: "/resume-builder", label: "Resume Builder", icon: FilePlus2 },
