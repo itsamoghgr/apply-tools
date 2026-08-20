@@ -1,6 +1,9 @@
 # Secrets
 .env
 backend/.env
+# Timestamped .env backups — these hold real keys.
+*.env.bak*
+.env.bak*
 
 # Python
 __pycache__/
