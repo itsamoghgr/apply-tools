@@ -16,8 +16,14 @@ type Run = {
 
 type Status = {
   enabled: boolean;
+  timezone: string;
   monitor_interval_h: number;
+  monitor_active_start: string;
+  monitor_active_end: string;
+  monitor_days: string;
   alert_interval_h: number;
+  alert_at: string;
+  alert_days: string;
   jobs: { id: string; next_run_at: string | null }[];
   last_monitor: Run | null;
   last_alert: Run | null;

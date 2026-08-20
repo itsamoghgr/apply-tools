@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/prisma";
 import RefreshOnFocus from "@/components/RefreshOnFocus";
 import StatusStrip from "./StatusStrip";
+import ScheduleNote from "./ScheduleNote";
 import GlobalSettings from "./GlobalSettings";
 import RolesFeed from "./RolesFeed";
 
@@ -94,11 +95,9 @@ export default async function JobBoardPage({
       <header className="mb-5 flex flex-wrap items-end justify-between gap-3">
         <div>
         <h1 className="text-2xl font-semibold tracking-tight">Job Board</h1>
-        <p className="mt-1 text-sm opacity-70">
-          Monitoring {serialisedCompanies.filter((c) => c.active).length} career{" "}
-          {serialisedCompanies.filter((c) => c.active).length === 1 ? "page" : "pages"}{" "}
-          every 3 hours. Alert every 6 hours.
-        </p>
+        <ScheduleNote
+          pageCount={serialisedCompanies.filter((c) => c.active).length}
+        />
         </div>
         <div className="flex flex-wrap items-center gap-2">
         <StatusStrip />
