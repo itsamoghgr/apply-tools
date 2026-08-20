@@ -4,6 +4,7 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
+import { SCHEDULE_KEY, type Schedule } from "./constants";
 
 // Watchlist CRUD runs through Prisma directly, the same way /applications and
 // /resumes do. The agent service (:8002) is only involved for things it alone
@@ -367,5 +368,82 @@ export async function setGlobalCountries(codes: string[]): Promise<FormState> {
   return {
     ok: true,
     message: `Countries: ${label}${parts.length ? ` — ${parts.join(", ")}` : ""}.`,
+  };
+}
+
+
+// ---------------------------------------------------------------------------
+// Schedule — when to scan, and when to alert
+// ---------------------------------------------------------------------------
+
+const HHMM = /^([01]?\d|2[0-3]):[0-5]\d$/;
+const DAYS = /^(\*|(mon|tue|wed|thu|fri|sat|sun)(-(mon|tue|wed|thu|fri|sat|sun))?(,(mon|tue|wed|thu|fri|sat|sun)(-(mon|tue|wed|thu|fri|sat|sun))?)*)$/;
+
+const ScheduleSchema = z.object({
+  timezone: z.string().min(1).max(64),
+  monitorIntervalH: z.number().int().min(1).max(24),
+  monitorStart: z.string().regex(HHMM, "Use HH:MM."),
+  monitorEnd: z.string().regex(HHMM, "Use HH:MM."),
+  monitorDays: z.string().regex(DAYS, "Use *, mon-fri, or mon,wed,fri."),
+  alertAt: z.string(),
+  alertDays: z.string().regex(DAYS, "Use *, mon-fri, or mon,wed,fri."),
+});
+
+/**
+ * Save when scanning and alerting happen.
+ *
+ * Stored as one JSON Setting row rather than seven, so a save is atomic: a
+ * half-applied schedule (new times, old timezone) is not a state the scheduler
+ * should ever be able to observe.
+ *
+ * Narrowing the schedule cannot lose roles — the alert window is a watermark
+ * over the last SENT alert, so anything found outside alert hours is reported
+ * by the next one. That is why this saves without a confirmation prompt.
+ */
+export async function setSchedule(input: Schedule): Promise<FormState> {
+  const parsed = ScheduleSchema.safeParse(input);
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0]?.message ?? "Invalid schedule." };
+  }
+  const value = parsed.data;
+
+  // At least one valid alert time, or the alert silently never fires. An empty
+  // list is allowed and means "fall back to the interval", but a list of only
+  // junk is a typo we should reject rather than honour.
+  const times = value.alertAt.split(",").map((t) => t.trim()).filter(Boolean);
+  if (times.length && !times.every((t) => HHMM.test(t))) {
+    return { error: "Alert times must look like 09:00, 18:30." };
+  }
+  try {
+    new Intl.DateTimeFormat("en", { timeZone: value.timezone });
+  } catch {
+    return { error: `Unknown timezone "${value.timezone}".` };
+  }
+
+  await prisma.setting.upsert({
+    where: { key: SCHEDULE_KEY },
+    create: { key: SCHEDULE_KEY, value: JSON.stringify(value) },
+    update: { value: JSON.stringify(value) },
+  });
+
+  // Apply it now rather than at the next restart. A failure here is not a save
+  // failure: the setting IS stored, so the schedule takes effect on next boot.
+  let applied = true;
+  try {
+    const res = await fetch(`${AGENT_URL}/api/v1/jobboard/schedule/reload`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    applied = res.ok;
+  } catch {
+    applied = false;
+  }
+
+  revalidatePath("/job-board");
+  return {
+    ok: true,
+    message: applied
+      ? "Schedule updated."
+      : "Schedule saved — it applies when the agent service restarts.",
   };
 }

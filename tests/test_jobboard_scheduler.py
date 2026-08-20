@@ -23,6 +23,18 @@ def clean_scheduler():
     sch.shutdown_scheduler()
 
 
+@pytest.fixture(autouse=True)
+def no_stored_schedule(monkeypatch):
+    """Default every test to the ENV schedule.
+
+    resolve_schedule() layers the user's saved settings over the env defaults,
+    which without this would make these tests read the developer's real
+    database — so whether they passed depended on what was saved in the UI.
+    Tests that care about stored settings patch this themselves.
+    """
+    monkeypatch.setattr(sch.pc, "schedule_settings", lambda: {})
+
+
 def _config_with(**kw):
     return dataclasses.replace(sch.CONFIG, **kw)
 
@@ -163,6 +175,72 @@ def test_alert_first_run_is_offset_after_monitor(monkeypatch):
     scheduler = sch.start_scheduler()
     by_id = {job.id: job for job in scheduler.get_jobs()}
     assert by_id[sch.ALERT_JOB_ID].next_run_time > by_id[sch.MONITOR_JOB_ID].next_run_time
+
+
+def test_saved_settings_override_env(monkeypatch):
+    """What the user picks in the UI beats the env defaults."""
+    monkeypatch.setattr(sch, "CONFIG", _config_with(
+        jobboard_enabled=True, jobboard_timezone="UTC",
+        jobboard_alert_at="09:00", jobboard_monitor_interval_h=3))
+    monkeypatch.setattr(sch.pc, "schedule_settings", lambda: {
+        "timezone": "Europe/London", "monitorIntervalH": 2,
+        "monitorStart": "09:00", "monitorEnd": "17:00",
+        "monitorDays": "mon-fri", "alertAt": "08:00,20:00",
+        "alertDays": "mon-fri",
+    })
+    schedule = sch.resolve_schedule()
+    assert schedule.source == "settings"
+    assert schedule.timezone == "Europe/London"
+    # 17 included: the window end is inclusive, so a 17:00 scan still runs.
+    assert schedule.monitor_hours == "9,11,13,15,17"
+    assert schedule.alert_at == [(8, 0), (20, 0)]
+    assert schedule.alert_days == "mon-fri"
+
+
+def test_each_field_falls_back_independently(monkeypatch):
+    """A partial save keeps the env value for everything it didn't set."""
+    monkeypatch.setattr(sch, "CONFIG", _config_with(
+        jobboard_enabled=True, jobboard_timezone="America/New_York",
+        jobboard_monitor_interval_h=3, jobboard_monitor_active_start="07:00",
+        jobboard_monitor_active_end="23:00"))
+    monkeypatch.setattr(sch.pc, "schedule_settings",
+                        lambda: {"alertAt": "12:00"})
+    schedule = sch.resolve_schedule()
+    assert schedule.alert_at == [(12, 0)]          # from settings
+    assert schedule.timezone == "America/New_York"  # inherited from env
+    assert schedule.monitor_hours == "7,10,13,16,19,22"
+
+
+def test_unreadable_settings_fall_back_to_env(monkeypatch):
+    """A platform outage must leave a working schedule, not none at all."""
+    def boom():
+        raise RuntimeError("platform down")
+
+    monkeypatch.setattr(sch, "CONFIG", _config_with(
+        jobboard_enabled=True, jobboard_alert_at="09:00"))
+    monkeypatch.setattr(sch.pc, "schedule_settings", boom)
+    schedule = sch.resolve_schedule()
+    assert schedule.source == "env"
+    assert schedule.alert_at == [(9, 0)]
+
+
+def test_reschedule_applies_new_settings_without_restart(monkeypatch):
+    """Saving in the UI takes effect immediately."""
+    monkeypatch.setattr(sch, "CONFIG", _config_with(
+        jobboard_enabled=True, jobboard_alert_at="09:00"))
+    sch.start_scheduler()
+    before = {j["id"] for j in sch.job_status()}
+    assert "jobboard_alert_1700" not in before
+
+    monkeypatch.setattr(sch.pc, "schedule_settings",
+                        lambda: {"alertAt": "09:00,17:00"})
+    after = {j["id"] for j in sch.reschedule()}
+    assert "jobboard_alert_1700" in after
+
+
+def test_reschedule_is_a_noop_when_not_running(monkeypatch):
+    monkeypatch.setattr(sch, "CONFIG", _config_with(jobboard_enabled=False))
+    assert sch.reschedule() == []
 
 
 def test_disabled_config_starts_nothing(monkeypatch):

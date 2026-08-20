@@ -11,6 +11,8 @@ useful to do, and the caller records the failure on the run row.
 
 from __future__ import annotations
 
+import json
+
 from datetime import datetime
 from typing import Any
 
@@ -180,6 +182,33 @@ MAX_YEARS_KEY = "jobboard.maxYears"
 # 0 means "no limit" rather than "zero years": an unset threshold must not
 # silently reject everything.
 NO_EXPERIENCE_LIMIT = 0
+
+
+SCHEDULE_KEY = "jobboard.schedule"
+
+
+def schedule_settings() -> dict:
+    """The user's schedule, as set in the UI — when to scan, and when to alert.
+
+    Returns {} when unset or unreadable, which the caller reads as "fall back to
+    the env defaults". A settings outage must never leave the service with NO
+    schedule, so every failure path here widens to the configured default rather
+    than narrowing to nothing.
+
+    Shape (every key optional):
+        {"timezone": "America/New_York",
+         "monitorIntervalH": 3, "monitorStart": "07:00", "monitorEnd": "23:00",
+         "monitorDays": "*", "alertAt": "09:00,18:00", "alertDays": "*"}
+    """
+    try:
+        data = _request("GET", f"/settings/{SCHEDULE_KEY}")
+        raw = (data.get("value") or "").strip()
+        if not raw:
+            return {}
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except (PlatformError, TypeError, ValueError, json.JSONDecodeError):
+        return {}
 
 
 def retention_weeks() -> int:

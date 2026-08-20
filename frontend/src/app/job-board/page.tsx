@@ -2,6 +2,8 @@ import { prisma } from "@/lib/prisma";
 import RefreshOnFocus from "@/components/RefreshOnFocus";
 import StatusStrip from "./StatusStrip";
 import ScheduleNote from "./ScheduleNote";
+import { SCHEDULE_KEY, type Schedule } from "./constants";
+import ScheduleSettings from "./ScheduleSettings";
 import GlobalSettings from "./GlobalSettings";
 import RolesFeed from "./RolesFeed";
 
@@ -22,7 +24,7 @@ export default async function JobBoardPage({
     ...(sp.company ? { watchedCompanyId: sp.company } : {}),
   };
 
-  const [postings, companies, roleGroups, retention, maxYearsSetting, countriesSetting] =
+  const [postings, companies, roleGroups, retention, maxYearsSetting, countriesSetting, scheduleSetting] =
     await Promise.all([
     prisma.jobPosting.findMany({
       where,
@@ -42,7 +44,27 @@ export default async function JobBoardPage({
     prisma.setting.findUnique({ where: { key: "jobboard.retentionWeeks" } }),
     prisma.setting.findUnique({ where: { key: "jobboard.maxYears" } }),
     prisma.setting.findUnique({ where: { key: "jobboard.countries" } }),
+    prisma.setting.findUnique({ where: { key: SCHEDULE_KEY } }),
   ]);
+
+  const schedule: Schedule = {
+    timezone: "America/New_York",
+    monitorIntervalH: 3,
+    monitorStart: "07:00",
+    monitorEnd: "23:00",
+    monitorDays: "*",
+    alertAt: "09:00,18:00",
+    alertDays: "*",
+    // A stored row overrides the defaults field by field, so a partial save
+    // (only alert times, say) keeps the rest rather than blanking it.
+    ...(() => {
+      try {
+        return scheduleSetting?.value ? JSON.parse(scheduleSetting.value) : {};
+      } catch {
+        return {};
+      }
+    })(),
+  };
 
   const retentionWeeks = Number(retention?.value ?? 4) || 4;
   const maxYears = Number(maxYearsSetting?.value ?? 0) || 0;
@@ -101,6 +123,7 @@ export default async function JobBoardPage({
         </div>
         <div className="flex flex-wrap items-center gap-2">
         <StatusStrip />
+        <ScheduleSettings initial={schedule} />
         <GlobalSettings
           retentionWeeks={retentionWeeks}
           maxYears={maxYears}

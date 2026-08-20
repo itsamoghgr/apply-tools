@@ -37,7 +37,11 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
-from agent_server.config import CONFIG
+from dataclasses import dataclass
+from zoneinfo import ZoneInfo
+
+from agent_server.config import CONFIG, monitor_hours_expr, parse_days, parse_times
+from agent_server.jobboard import platform_client as pc
 from agent_server.log import get_logger
 
 logger = get_logger(__name__)
@@ -82,6 +86,72 @@ def _run_alert() -> None:
         logger.error("jobboard.scheduled_alert_crashed", error=str(exc), exc_info=True)
 
 
+@dataclass(frozen=True)
+class Schedule:
+    """The effective schedule — UI settings layered over the env defaults."""
+    timezone: str
+    monitor_interval_h: int
+    monitor_start: str
+    monitor_end: str
+    monitor_days: str | None
+    alert_at: list[tuple[int, int]]
+    alert_days: str | None
+    alert_interval_h: int
+    source: str  # "settings" | "env"
+
+    @property
+    def monitor_hours(self) -> str:
+        return monitor_hours_expr(
+            self.monitor_interval_h, self.monitor_start, self.monitor_end
+        )
+
+    @property
+    def tzinfo(self) -> ZoneInfo:
+        try:
+            return ZoneInfo(self.timezone)
+        except Exception:  # noqa: BLE001
+            return ZoneInfo("UTC")
+
+
+def resolve_schedule() -> Schedule:
+    """Read the user's schedule from the platform, falling back to env.
+
+    Every field falls back INDEPENDENTLY, so a settings row that only sets the
+    alert times still inherits the env scrape window. A read failure yields the
+    env schedule rather than no schedule at all.
+    """
+    try:
+        raw = pc.schedule_settings()
+    except Exception:  # noqa: BLE001 — the platform being down must not stop boot
+        raw = {}
+
+    def pick(key: str, default):
+        value = raw.get(key)
+        return default if value in (None, "") else value
+
+    try:
+        interval = int(pick("monitorIntervalH", CONFIG.jobboard_monitor_interval_h))
+    except (TypeError, ValueError):
+        interval = CONFIG.jobboard_monitor_interval_h
+    try:
+        alert_interval = int(pick("alertIntervalH", CONFIG.jobboard_alert_interval_h))
+    except (TypeError, ValueError):
+        alert_interval = CONFIG.jobboard_alert_interval_h
+
+    alert_at_raw = str(pick("alertAt", CONFIG.jobboard_alert_at))
+    return Schedule(
+        timezone=str(pick("timezone", CONFIG.jobboard_timezone)),
+        monitor_interval_h=max(1, interval),
+        monitor_start=str(pick("monitorStart", CONFIG.jobboard_monitor_active_start)),
+        monitor_end=str(pick("monitorEnd", CONFIG.jobboard_monitor_active_end)),
+        monitor_days=parse_days(str(pick("monitorDays", CONFIG.jobboard_monitor_days))),
+        alert_at=parse_times(alert_at_raw),
+        alert_days=parse_days(str(pick("alertDays", CONFIG.jobboard_alert_days))),
+        alert_interval_h=max(1, alert_interval),
+        source="settings" if raw else "env",
+    )
+
+
 def start_scheduler() -> BackgroundScheduler | None:
     """Start the Job Board schedules. Idempotent; returns None when disabled."""
     global _scheduler
@@ -92,18 +162,19 @@ def start_scheduler() -> BackgroundScheduler | None:
     if _scheduler is not None:
         return _scheduler
 
-    tz = CONFIG.tzinfo
+    schedule = resolve_schedule()
+    tz = schedule.tzinfo
     scheduler = BackgroundScheduler(timezone=tz)
     now = datetime.now(timezone.utc)
 
     # SCRAPE — every Nth hour, but only within the active window/days.
     monitor_kwargs: dict = {
-        "hour": CONFIG.monitor_hour_expr,
+        "hour": schedule.monitor_hours,
         "minute": 0,
         "timezone": tz,
     }
-    if CONFIG.monitor_day_of_week:
-        monitor_kwargs["day_of_week"] = CONFIG.monitor_day_of_week
+    if schedule.monitor_days:
+        monitor_kwargs["day_of_week"] = schedule.monitor_days
     scheduler.add_job(
         _run_monitor,
         CronTrigger(**monitor_kwargs),
@@ -129,12 +200,12 @@ def start_scheduler() -> BackgroundScheduler | None:
     # One job PER TIME, not one cron with hour and minute lists: APScheduler
     # crosses those fields, so hour="9,18" minute="0,30" would fire four times a
     # day (09:00, 09:30, 18:00, 18:30) instead of the two the user asked for.
-    times = CONFIG.alert_times
+    times = schedule.alert_at
     if times:
         for index, (hour, minute) in enumerate(times):
             alert_kwargs: dict = {"hour": hour, "minute": minute, "timezone": tz}
-            if CONFIG.alert_day_of_week:
-                alert_kwargs["day_of_week"] = CONFIG.alert_day_of_week
+            if schedule.alert_days:
+                alert_kwargs["day_of_week"] = schedule.alert_days
             scheduler.add_job(
                 _run_alert,
                 CronTrigger(**alert_kwargs),
@@ -148,7 +219,7 @@ def start_scheduler() -> BackgroundScheduler | None:
         scheduler.add_job(
             _run_alert,
             IntervalTrigger(
-                hours=max(1, CONFIG.jobboard_alert_interval_h),
+                hours=schedule.alert_interval_h,
                 start_date=now + timedelta(minutes=30),
                 timezone=tz,
             ),
@@ -164,12 +235,32 @@ def start_scheduler() -> BackgroundScheduler | None:
     logger.info(
         "jobboard.scheduler_started",
         timezone=str(tz),
-        monitor_hours=CONFIG.monitor_hour_expr,
-        monitor_days=CONFIG.monitor_day_of_week or "*",
-        alert_at=CONFIG.jobboard_alert_at if times else f"every {CONFIG.jobboard_alert_interval_h}h",
-        alert_days=CONFIG.alert_day_of_week or "*",
+        source=schedule.source,
+        monitor_hours=schedule.monitor_hours,
+        monitor_days=schedule.monitor_days or "*",
+        alert_at=(",".join(f"{h:02d}:{m:02d}" for h, m in times)
+                  if times else f"every {schedule.alert_interval_h}h"),
+        alert_days=schedule.alert_days or "*",
     )
     return scheduler
+
+
+def reschedule() -> list[dict]:
+    """Re-read the schedule and re-register the jobs, without a restart.
+
+    Called after the UI saves new settings. Implemented as stop-and-start rather
+    than mutating triggers in place: the alert is one job PER TIME, so the job
+    SET itself changes when the times change, and rebuilding is both simpler and
+    less error-prone than diffing. Nothing is lost by doing so — the watermark
+    lives in Postgres, so a job that has not run yet simply runs at its next
+    slot, and postings found meanwhile roll into the next alert.
+    """
+    if _scheduler is None:
+        # Not running (disabled, or never started) — nothing to reschedule.
+        return []
+    shutdown_scheduler()
+    start_scheduler()
+    return job_status()
 
 
 def shutdown_scheduler() -> None:

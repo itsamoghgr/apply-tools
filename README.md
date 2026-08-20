@@ -219,10 +219,14 @@ Valid values are `anthropic`, `bedrock`, `groq`, `gemini`, `vertex`, and `nvidia
 
 **Job Board** — all in `agent_server/.env`.
 
-*When to scrape, and when to alert.* Every time below is read in
-`JOBBOARD_TIMEZONE`, so it keeps meaning the same wall-clock hour across a DST
-shift. Narrowing any of these never loses roles: the alert window is a
-watermark, so anything found outside alert hours rolls into the next alert.
+*When to scrape, and when to alert.* These are normally set in the UI — the
+**Schedule** button next to Scrape settings — which stores them and applies them
+without a restart. The env vars below are the DEFAULTS used until something is
+saved there, and each field falls back independently, so a partial save keeps
+the rest. Every time is read in the configured timezone, so it keeps meaning the
+same wall-clock hour across a DST shift. Narrowing any of these never loses
+roles: the alert window is a watermark, so anything found outside alert hours
+rolls into the next alert.
 
 | Var | Default | Meaning |
 | --- | --- | --- |
@@ -241,7 +245,8 @@ watermark, so anything found outside alert hours rolls into the next alert.
 
 Retention, maximum experience, and the default country list are set in the UI
 (the **Scrape settings** button) rather than by env var, since they are things
-you change while browsing.
+you change while browsing. The scan/alert schedule is set the same way, under
+**Schedule**.
 
 ## Troubleshooting
 

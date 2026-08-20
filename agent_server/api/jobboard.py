@@ -109,6 +109,18 @@ def detect_career_url(req: DetectRequest) -> dict[str, Any]:
     return result
 
 
+@router.post("/schedule/reload", summary="Re-read the schedule after a UI save")
+def reload_schedule() -> dict[str, Any]:
+    """Apply new schedule settings immediately instead of at the next restart.
+
+    The UI writes the setting through Prisma, then calls this so the change is
+    visible right away. Safe to call when the scheduler is disabled or not
+    running: it reports that instead of failing.
+    """
+    jobs = jb_scheduler.reschedule()
+    return {"ok": True, "running": bool(jobs), "jobs": jobs}
+
+
 @router.get("/runs", summary="Recent monitor / alert runs")
 def list_runs(kind: str | None = None, limit: int = 20) -> dict[str, Any]:
     runs = jb_db.recent_runs(kind=kind, limit=min(limit, 100))
@@ -123,18 +135,22 @@ def run_companies(run_id: str) -> dict[str, Any]:
 @router.get("/status", summary="Scheduler + last-run status")
 def status() -> dict[str, Any]:
     """Powers the UI header strip: what ran, and what runs next."""
+    schedule = jb_scheduler.resolve_schedule()
     monitor_runs = jb_db.recent_runs(kind="monitor", limit=1)
     alert_runs = jb_db.recent_runs(kind="alert", limit=1)
     return {
         "enabled": CONFIG.jobboard_enabled,
-        "timezone": CONFIG.jobboard_timezone,
-        "monitor_interval_h": CONFIG.jobboard_monitor_interval_h,
-        "monitor_active_start": CONFIG.jobboard_monitor_active_start,
-        "monitor_active_end": CONFIG.jobboard_monitor_active_end,
-        "monitor_days": CONFIG.monitor_day_of_week or "*",
-        "alert_interval_h": CONFIG.jobboard_alert_interval_h,
-        "alert_at": CONFIG.jobboard_alert_at,
-        "alert_days": CONFIG.alert_day_of_week or "*",
+        # The EFFECTIVE schedule (UI settings over env defaults), so the page
+        # shows what will actually happen rather than what env alone says.
+        "timezone": schedule.timezone,
+        "schedule_source": schedule.source,
+        "monitor_interval_h": schedule.monitor_interval_h,
+        "monitor_active_start": schedule.monitor_start,
+        "monitor_active_end": schedule.monitor_end,
+        "monitor_days": schedule.monitor_days or "*",
+        "alert_interval_h": schedule.alert_interval_h,
+        "alert_at": ",".join(f"{h:02d}:{m:02d}" for h, m in schedule.alert_at),
+        "alert_days": schedule.alert_days or "*",
         "jobs": jb_scheduler.job_status(),
         "last_monitor": monitor_runs[0] if monitor_runs else None,
         "last_alert": alert_runs[0] if alert_runs else None,

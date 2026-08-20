@@ -31,3 +31,19 @@ export const COUNTRY_OPTIONS = [
   { code: "FR", name: "France" },
   { code: "PL", name: "Poland" },
 ] as const;
+
+/** Setting row holding the scan/alert schedule as JSON. Lives here rather than
+ *  in actions.ts because a "use server" module may only export async
+ *  functions. */
+export const SCHEDULE_KEY = "jobboard.schedule";
+
+/** The scan/alert schedule as stored in the SCHEDULE_KEY setting row. */
+export type Schedule = {
+  timezone: string;
+  monitorIntervalH: number;
+  monitorStart: string;
+  monitorEnd: string;
+  monitorDays: string;
+  alertAt: string;
+  alertDays: string;
+};

@@ -26,6 +26,27 @@ def _int(name: str, default: int) -> int:
         return default
 
 
+def monitor_hours_expr(interval_h: int, start: str, end: str) -> str:
+    """An active window + an interval as an APScheduler `hour` field.
+
+    3h over 07:00-23:00 -> "7,10,13,16,19,22". Equal or unparseable bounds mean
+    no window, i.e. every Nth hour of the day.
+    """
+    start_t = parse_hhmm(start)
+    end_t = parse_hhmm(end)
+    step = max(1, interval_h)
+    if start_t is None or end_t is None or start_t[0] == end_t[0]:
+        return f"*/{step}"
+    start_h, end_h = start_t[0], end_t[0]
+    # An end before the start is an overnight window (e.g. 22:00-06:00).
+    hours = (
+        list(range(start_h, end_h + 1))
+        if start_h <= end_h
+        else list(range(start_h, 24)) + list(range(0, end_h + 1))
+    )
+    return ",".join(str(h) for h in hours[::step])
+
+
 _DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
@@ -245,26 +266,12 @@ class Config:
 
     @property
     def monitor_hour_expr(self) -> str:
-        """The active window as an APScheduler `hour` field.
-
-        Built from the interval so both knobs still apply: an interval of 3 over
-        a 07:00-23:00 window yields "7,10,13,16,19,22". A window whose start and
-        end are equal (or unparseable) means no window, so every Nth hour of the
-        day qualifies.
-        """
-        start = parse_hhmm(self.jobboard_monitor_active_start)
-        end = parse_hhmm(self.jobboard_monitor_active_end)
-        step = max(1, self.jobboard_monitor_interval_h)
-        if start is None or end is None or start[0] == end[0]:
-            return f"*/{step}"
-        start_h, end_h = start[0], end[0]
-        # An end before the start is an overnight window (e.g. 22:00-06:00).
-        hours = (
-            list(range(start_h, end_h + 1))
-            if start_h <= end_h
-            else list(range(start_h, 24)) + list(range(0, end_h + 1))
+        """The active window as an APScheduler `hour` field."""
+        return monitor_hours_expr(
+            self.jobboard_monitor_interval_h,
+            self.jobboard_monitor_active_start,
+            self.jobboard_monitor_active_end,
         )
-        return ",".join(str(h) for h in hours[::step])
 
     @property
     def monitor_day_of_week(self) -> str | None:
