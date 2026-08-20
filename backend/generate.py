@@ -77,6 +77,51 @@ NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
 NIM_MODEL = os.environ.get("NIM_MODEL", "meta/llama-3.3-70b-instruct")
 NIM_MAX_TOKENS = 4096
 
+# Google Gemini. Reached through its OpenAI-COMPATIBLE endpoint rather than the
+# google-genai SDK: the `openai` client is already a dependency (NIM uses it),
+# the request/response shape is identical to the NIM path, and JSON mode works
+# the same way — so this adds a provider without adding a package.
+#
+# GEMINI_API_KEY is an AI Studio key (https://aistudio.google.com/apikey).
+# Vertex AI is a DIFFERENT product with ADC/service-account auth; it is not what
+# this path speaks.
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MAX_TOKENS = 4096
+
+# Vertex AI — the SAME Gemini models, but billed to a Google Cloud project (so
+# GCP credits apply) and authenticated with Application Default Credentials
+# instead of an API key. Required when an org policy disallows API keys, which
+# is the case here.
+#
+# Setup:
+#   gcloud auth application-default login
+#   gcloud config set project <PROJECT_ID>
+#   gcloud services enable aiplatform.googleapis.com
+#
+# Like the AI Studio path above, this speaks Vertex's OpenAI-COMPATIBLE endpoint
+# so it can reuse the same `openai` client; only the base URL and the auth token
+# differ. The token is short-lived and refreshed on each call (see
+# _vertex_access_token), which is the whole point of ADC — no long-lived secret
+# ever touches disk or .env.
+# Read at CALL time, not import time — matching how every other provider reads
+# its credentials (_require_groq_key, _require_nim_key). Freezing these at import
+# meant an edited .env needed a process restart for Vertex but not for the other
+# providers, which is a trap nobody would expect.
+def _vertex_project() -> str:
+    return os.environ.get("VERTEX_PROJECT", "")
+
+
+def _vertex_location() -> str:
+    return os.environ.get("VERTEX_LOCATION", "us-central1")
+
+
+def _vertex_model() -> str:
+    return os.environ.get("VERTEX_MODEL", "google/gemini-2.5-flash")
+
+
+VERTEX_MAX_TOKENS = 4096
+
 # AWS Bedrock (boto3, Converse API). Auth via the standard AWS credential
 # chain (env vars / ~/.aws/credentials / IAM role); region from BEDROCK_REGION
 # or AWS_REGION (default us-east-1). Generation/score/answer use Claude Sonnet;
@@ -375,6 +420,19 @@ def _require_groq_key() -> str:
     return api_key
 
 
+def _require_gemini_key() -> str:
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        # "not set" is load-bearing: _provider_unconfigured() matches on it so an
+        # unconfigured Gemini is SKIPPED in the fallback chain, not treated as a
+        # hard failure that aborts the walk.
+        raise RuntimeError(
+            "GEMINI_API_KEY not set. Add it to backend/.env "
+            "(get one at https://aistudio.google.com/apikey)."
+        )
+    return api_key
+
+
 def _require_nim_key() -> str:
     api_key = os.environ.get("NVIDIA_API_KEY")
     if not api_key:
@@ -542,6 +600,140 @@ def _call_nim(
     return payload, raw_text
 
 
+def _vertex_access_token() -> str:
+    """Mint a short-lived OAuth token from Application Default Credentials.
+
+    ADC resolution order (google.auth.default): GOOGLE_APPLICATION_CREDENTIALS
+    -> gcloud user credentials (`gcloud auth application-default login`) ->
+    attached service account on GCP. Tokens expire in ~1h, so this refreshes on
+    each call rather than caching — cheap (a local signature, not a round trip
+    once warm) and immune to serving a stale token after a long idle period.
+    """
+    try:
+        import google.auth  # noqa: PLC0415 - optional dep, only for the vertex path
+        import google.auth.transport.requests  # noqa: PLC0415
+    except ImportError as exc:
+        # "not set" is deliberate: an optional dependency that isn't installed is
+        # an UNCONFIGURED provider, not a failed request. Without this wording the
+        # fallback chain would abort here instead of hopping to the next provider.
+        raise RuntimeError(
+            f"Vertex AI dependencies not set ({exc}). "
+            "Run: pip install google-auth requests"
+        ) from exc
+
+    project = _vertex_project()
+    if not project:
+        # Phrased with "not set" so _provider_unconfigured() skips this hop in
+        # the fallback chain instead of aborting the walk.
+        raise RuntimeError(
+            "VERTEX_PROJECT not set. Add it to backend/.env and run "
+            "`gcloud auth application-default login`."
+        )
+
+    try:
+        credentials, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        credentials.refresh(google.auth.transport.requests.Request())
+    except Exception as exc:
+        raise RuntimeError(
+            f"Vertex AI credentials not set / unusable: {exc}. Run "
+            "`gcloud auth application-default login`."
+        ) from exc
+
+    if not credentials.token:
+        raise RuntimeError("Vertex AI credentials not set: ADC returned no token.")
+    return credentials.token
+
+
+def _call_vertex(
+    system_prompt: str,
+    user_message: str,
+    required_keys: set[str],
+    *,
+    extra_messages: list[dict[str, str]] | None = None,
+    model: str | None = None,
+    max_tokens: int | None = None,
+    timeout: float = LLM_TIMEOUT_SECS,
+) -> tuple[dict[str, Any], str]:
+    """Vertex AI Gemini (OpenAI-compatible), JSON-parsed and key-validated.
+
+    Same models as the AI Studio path, but billed to VERTEX_PROJECT so Google
+    Cloud credits apply, and authenticated with ADC rather than an API key.
+    """
+    token = _vertex_access_token()
+    project = _vertex_project()
+    location = _vertex_location()
+    base_url = (
+        f"https://{location}-aiplatform.googleapis.com/v1/projects/"
+        f"{project}/locations/{location}/endpoints/openapi"
+    )
+    client = OpenAI(base_url=base_url, api_key=token, timeout=timeout)
+
+    msgs: list[dict[str, str]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+    if extra_messages:
+        msgs.extend(extra_messages)
+
+    try:
+        response = client.chat.completions.create(
+            model=model or _vertex_model(),
+            max_tokens=max_tokens or VERTEX_MAX_TOKENS,
+            response_format={"type": "json_object"},
+            messages=msgs,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Vertex AI request failed: {exc}") from exc
+
+    raw_text = response.choices[0].message.content or ""
+    payload = _parse_claude_json(raw_text)
+    _validate_keys(payload, required_keys)
+    return payload, raw_text
+
+
+def _call_gemini(
+    system_prompt: str,
+    user_message: str,
+    required_keys: set[str],
+    *,
+    extra_messages: list[dict[str, str]] | None = None,
+    model: str | None = None,
+    max_tokens: int | None = None,
+    timeout: float = LLM_TIMEOUT_SECS,
+) -> tuple[dict[str, Any], str]:
+    """Google Gemini chat completion (OpenAI-compatible), JSON-parsed and key-validated.
+
+    Identical in shape to _call_nim — same client, same JSON mode, same
+    validation — because Gemini exposes an OpenAI-compatible surface.
+    """
+    api_key = _require_gemini_key()
+    client = OpenAI(base_url=GEMINI_BASE_URL, api_key=api_key, timeout=timeout)
+
+    msgs: list[dict[str, str]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+    if extra_messages:
+        msgs.extend(extra_messages)
+
+    try:
+        response = client.chat.completions.create(
+            model=model or GEMINI_MODEL,
+            max_tokens=max_tokens or GEMINI_MAX_TOKENS,
+            response_format={"type": "json_object"},
+            messages=msgs,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Gemini request failed: {exc}") from exc
+
+    raw_text = response.choices[0].message.content or ""
+    payload = _parse_claude_json(raw_text)
+    _validate_keys(payload, required_keys)
+    return payload, raw_text
+
+
 def _call_bedrock(
     system_prompt: str,
     user_message: str,
@@ -620,6 +812,10 @@ def _dispatch_provider(
         return _call_nim(system_prompt, user_message, required_keys, **kwargs)
     if provider == "groq":
         return _call_groq(system_prompt, user_message, required_keys, **kwargs)
+    if provider == "gemini":
+        return _call_gemini(system_prompt, user_message, required_keys, **kwargs)
+    if provider == "vertex":
+        return _call_vertex(system_prompt, user_message, required_keys, **kwargs)
     if provider == "bedrock":
         return _call_bedrock(system_prompt, user_message, required_keys, **kwargs)
     return _call_claude(system_prompt, user_message, required_keys, **kwargs)
@@ -635,7 +831,12 @@ def _dispatch_provider(
 # that just failed), and we keep going even if an intermediate fallback also
 # fails recoverably — that's the bug this replaces, where groq quota-out +
 # nvidia timeout dead-ended with no further hop.
-FALLBACK_CHAIN = ("bedrock", "groq", "anthropic", "nvidia")
+# Gemini sits after the paid backstop and before NVIDIA: fast with a generous
+# free tier, but newest here and unproven in this chain, so it does not
+# displace Bedrock/Anthropic as primaries. An unset GEMINI_API_KEY makes it a
+# no-op hop (_provider_unconfigured skips it), so adding it cannot break a
+# working setup.
+FALLBACK_CHAIN = ("bedrock", "groq", "anthropic", "vertex", "gemini", "nvidia")
 
 # JD auto-detect (extract) leads with Bedrock (Llama 3.3 on a reliable endpoint).
 # Groq was primary, but a whole JD page + reserved output exceeds its 8000 TPM
@@ -645,7 +846,7 @@ FALLBACK_CHAIN = ("bedrock", "groq", "anthropic", "nvidia")
 # NIM LAST: its public endpoint frequently times out (>45s), so we must NOT fall
 # to it ahead of Bedrock/Anthropic — that dead-ended every auto-detect on a hung
 # hop. Used only by extract_jd_from_page, not generation/scoring.
-EXTRACT_FALLBACK_CHAIN = ("bedrock", "groq", "anthropic", "nvidia")
+EXTRACT_FALLBACK_CHAIN = ("bedrock", "groq", "anthropic", "vertex", "gemini", "nvidia")
 
 # Substrings that mark an exception as "provider is unusable right now"
 # rather than "the request itself is malformed". Lowercased before match.

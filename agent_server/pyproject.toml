@@ -13,6 +13,9 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "psycopg[binary]>=3.1.0",
     "anthropic>=0.39.0",
+    "openai>=1.0.0",         # Gemini via its OpenAI-compatible endpoint
+    "google-auth>=2.30.0",   # Vertex AI (ADC) auth
+    "requests>=2.31.0",      # required by google.auth.transport.requests
     "boto3>=1.34.0",            # AWS Bedrock (Claude) for the runtime agents
     "dnspython>=2.4.0",         # MX lookup for free SMTP-tier email validation
     # web tooling
@@ -22,6 +25,7 @@ dependencies = [
     "beautifulsoup4>=4.12.0",
     "playwright>=1.44.0",       # headless, JS-heavy content pages only
     "feedparser>=6.0.0",        # funding RSS
+    "apscheduler>=3.10.0",      # Job Board 3h monitor / 6h digest schedules
 ]
 
 [project.optional-dependencies]

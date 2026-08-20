@@ -16,22 +16,37 @@ from log import configure_logging, get_logger
 from db import (
     UniqueViolation,
     add_job_application_lead,
+    archive_missing_postings,
+    archive_over_experience,
+    archive_stale_postings,
+    count_over_experience,
+    restore_within_experience,
+    close_digest_run,
+    create_digest_run,
     delete_job_application,
     delete_lead,
     delete_setting,
     get_lead,
     get_setting,
+    get_watched_company,
     insert_job_application,
     insert_lead,
+    last_sent_digest_at,
+    link_posting_to_application,
     list_job_applications,
     list_leads,
     list_leads_for_application,
+    list_undigested_postings,
+    list_watched_companies,
     platform_leads_known_domains,
     platform_upsert_lead,
     remove_job_application_lead,
     set_setting,
     update_job_application,
     update_lead,
+    update_watched_company,
+    upsert_job_postings,
+    upsert_watched_company,
 )
 from generate import (
     AI_PROVIDER,
@@ -306,6 +321,8 @@ PROVIDER_LABELS = {
     "groq": "Groq",
     "nvidia": "NVIDIA NIM",
     "bedrock": "Claude (Bedrock)",
+    "gemini": "Gemini (AI Studio)",
+    "vertex": "Gemini (Vertex AI)",
 }
 
 
@@ -847,6 +864,383 @@ def leads_upsert(
     except Exception as e:
         raise _to_http_error(e)
     return {"ok": True, **result}
+
+
+# -----------------------------------------------------------------------------
+# Job Board (career-page monitor) — agent-facing row access.
+#
+# The agent server (port 8002) scrapes each watched company's board every 3h and
+# pushes matching postings here; a 6-hourly digest reports what is new. The agent
+# NEVER connects to this database directly — everything goes through these
+# endpoints, the same rule the lead-intake endpoints above follow.
+#
+# The UI does NOT use these: Next.js reads/writes WatchedCompany and JobPosting
+# straight through Prisma, as /applications and /resumes already do.
+#
+# Auth is the same optional shared secret (X-Agent-Token / PLATFORM_API_TOKEN).
+# -----------------------------------------------------------------------------
+
+
+class WatchedCompanyUpsertRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=300)
+    career_url: str = Field(..., min_length=1, max_length=2000)
+    domain: str | None = Field(default=None, max_length=255)
+    logo_url: str | None = Field(default=None, max_length=2000)
+    ats: str | None = Field(default=None, max_length=50)
+    ats_slug: str | None = Field(default=None, max_length=200)
+    role_filter: list[str] | None = Field(default=None, max_length=50)
+    # Scrape config: discard postings older than N days / outside these ISO
+    # country codes. None = no restriction.
+    max_age_days: int | None = Field(default=None, ge=1, le=3650)
+    country_filter: list[str] | None = Field(default=None, max_length=60)
+    active: bool = True
+
+
+class WatchedCompanyPatchRequest(BaseModel):
+    """Post-cycle status stamp. Every field optional — the monitor sends only
+    what changed, and an explicitly-null lastError clears a recovered company."""
+
+    last_checked_at: datetime | None = None
+    last_status: str | None = Field(default=None, max_length=20)
+    last_error: str | None = Field(default=None, max_length=2000)
+    seeded_at: datetime | None = None
+    active: bool | None = None
+
+
+class JobPostingIn(BaseModel):
+    dedup_key: str = Field(..., min_length=1, max_length=200)
+    external_id: str | None = Field(default=None, max_length=200)
+    title: str = Field(..., min_length=1, max_length=300)
+    matched_role: str = Field(..., min_length=1, max_length=100)
+    location: str | None = Field(default=None, max_length=300)
+    url: str = Field(..., min_length=1, max_length=2000)
+    posted_at: datetime | None = None
+    # Minimum years of experience parsed from the job description. None means
+    # the posting doesn't state one — never a guess.
+    min_years: int | None = Field(default=None, ge=0, le=50)
+    # ISO-3166 alpha-2 parsed from `location`; None when it can't be resolved.
+    country: str | None = Field(default=None, max_length=2)
+    # False for a company's first (seed) cycle, so its pre-existing backlog is
+    # recorded without ever being reported by a digest.
+    is_new: bool = True
+
+
+class JobPostingsUpsertRequest(BaseModel):
+    company_id: str = Field(..., min_length=1, max_length=64)
+    # A single Lever board can return 300+ postings (palantir: 309), so this cap
+    # is a real bound. The monitor chunks anything larger.
+    postings: list[JobPostingIn] = Field(default_factory=list, max_length=500)
+
+
+class JobPostingsArchiveRequest(BaseModel):
+    company_id: str = Field(..., min_length=1, max_length=64)
+    # Dedup keys still live on the board. An EMPTY list is a no-op, never
+    # "archive everything" — see archive_missing_postings.
+    live_dedup_keys: list[str] = Field(default_factory=list, max_length=2000)
+
+
+class DigestRunCreateRequest(BaseModel):
+    # null on the first-ever digest, which has no prior watermark.
+    window_start: datetime | None = None
+    window_end: datetime
+
+
+class DigestRunCloseRequest(BaseModel):
+    status: Literal["sent", "skipped", "failed"]
+    new_count: int = Field(default=0, ge=0)
+    company_count: int = Field(default=0, ge=0)
+    # Supplied ONLY for status='sent'. On failure the ids are left unstamped on
+    # purpose, so those postings roll into the next successful digest.
+    posting_ids: list[str] = Field(default_factory=list, max_length=2000)
+    error: str | None = Field(default=None, max_length=2000)
+
+
+class PostingLinkRequest(BaseModel):
+    job_application_id: str = Field(..., min_length=1, max_length=64)
+
+
+@app.get("/api/v1/jobboard/companies")
+def jobboard_list_companies(
+    active: bool = True,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """The monitor's work list."""
+    _require_agent_token(x_agent_token)
+    try:
+        companies = list_watched_companies(active_only=active)
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"companies": companies}
+
+
+@app.post("/api/v1/jobboard/companies/upsert")
+def jobboard_upsert_company(
+    req: WatchedCompanyUpsertRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Idempotently upsert a watched company, keyed on careerUrl."""
+    _require_agent_token(x_agent_token)
+    try:
+        result = upsert_watched_company(
+            {
+                "name": req.name,
+                "careerUrl": req.career_url,
+                "domain": req.domain,
+                "logoUrl": req.logo_url,
+                "ats": req.ats,
+                "atsSlug": req.ats_slug,
+                "roleFilter": req.role_filter,
+                "maxAgeDays": req.max_age_days,
+                "countryFilter": req.country_filter,
+                "active": req.active,
+            }
+        )
+    except UniqueViolation as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"ok": True, **result}
+
+
+@app.patch("/api/v1/jobboard/companies/{company_id}")
+def jobboard_patch_company(
+    company_id: str,
+    req: WatchedCompanyPatchRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, bool]:
+    """Stamp per-cycle status onto a watched company.
+
+    Uses exclude_unset so an omitted key leaves the column alone while an
+    explicit null clears it — that distinction is how lastError is reset once a
+    previously-failing board starts working again.
+    """
+    _require_agent_token(x_agent_token)
+    supplied = req.model_dump(exclude_unset=True)
+    field_map = {
+        "last_checked_at": "lastCheckedAt",
+        "last_status": "lastStatus",
+        "last_error": "lastError",
+        "seeded_at": "seededAt",
+        "active": "active",
+    }
+    fields = {field_map[k]: v for k, v in supplied.items() if k in field_map}
+    if not fields:
+        raise HTTPException(status_code=422, detail="no updatable fields supplied")
+    try:
+        ok = update_watched_company(company_id, fields)
+    except Exception as e:
+        raise _to_http_error(e)
+    if not ok:
+        raise HTTPException(status_code=404, detail="watched company not found")
+    return {"ok": True}
+
+
+@app.post("/api/v1/jobboard/postings/upsert")
+def jobboard_upsert_postings(
+    req: JobPostingsUpsertRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Bulk-upsert one company's postings.
+
+    `new_ids` is exactly the set of genuinely-new postings — the rows that did
+    not previously exist — which is what the digest reports.
+    """
+    _require_agent_token(x_agent_token)
+    if get_watched_company(req.company_id) is None:
+        raise HTTPException(status_code=404, detail="watched company not found")
+    try:
+        result = upsert_job_postings(
+            req.company_id,
+            [
+                {
+                    "dedupKey": p.dedup_key,
+                    "externalId": p.external_id,
+                    "title": p.title,
+                    "matchedRole": p.matched_role,
+                    "location": p.location,
+                    "url": p.url,
+                    "postedAt": p.posted_at,
+                    "minYears": p.min_years,
+                    "country": p.country,
+                    "isNew": p.is_new,
+                }
+                for p in req.postings
+            ],
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"ok": True, **result}
+
+
+@app.post("/api/v1/jobboard/postings/archive")
+def jobboard_archive_postings(
+    req: JobPostingsArchiveRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Mark postings absent from the latest fetch as archived. Never deletes."""
+    _require_agent_token(x_agent_token)
+    try:
+        archived = archive_missing_postings(req.company_id, req.live_dedup_keys)
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"ok": True, "archived": archived}
+
+
+class ArchiveStaleRequest(BaseModel):
+    # Retention window in weeks. Scrape-level, not per-company.
+    weeks: int = Field(..., ge=1, le=52)
+
+
+@app.post("/api/v1/jobboard/postings/archive-stale")
+def jobboard_archive_stale(
+    req: ArchiveStaleRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Archive postings older than the retention window. Never deletes."""
+    _require_agent_token(x_agent_token)
+    try:
+        archived = archive_stale_postings(req.weeks)
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"ok": True, "archived": archived}
+
+
+class ExperienceThresholdRequest(BaseModel):
+    # Maximum years of experience to keep. Scrape-level, not per-company.
+    max_years: int = Field(..., ge=0, le=50)
+
+
+@app.post("/api/v1/jobboard/postings/apply-experience-threshold")
+def jobboard_apply_experience(
+    req: ExperienceThresholdRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Apply a max-experience threshold to stored postings.
+
+    Archives what now exceeds it and restores what now fits, so the setting is
+    reversible in both directions. Never deletes.
+    """
+    _require_agent_token(x_agent_token)
+    try:
+        archived = archive_over_experience(req.max_years)
+        restored = restore_within_experience(req.max_years)
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"ok": True, "archived": archived, "restored": restored}
+
+
+@app.get("/api/v1/jobboard/postings/over-experience")
+def jobboard_count_over_experience(
+    max_years: int = 4,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Preview how many live postings a threshold would archive."""
+    _require_agent_token(x_agent_token)
+    try:
+        return {"count": count_over_experience(max_years)}
+    except Exception as e:
+        raise _to_http_error(e)
+
+
+@app.get("/settings/{key}")
+def settings_get(key: str) -> dict[str, Any]:
+    """Read one Setting value (used for scrape-level Job Board config)."""
+    return {"key": key, "value": get_setting(key)}
+
+
+@app.put("/settings/{key}")
+def settings_put(key: str, body: dict[str, Any]) -> dict[str, bool]:
+    value = body.get("value")
+    if value is None:
+        raise HTTPException(status_code=422, detail="value is required")
+    set_setting(key, str(value))
+    return {"ok": True}
+
+
+@app.get("/api/v1/jobboard/postings/undigested")
+def jobboard_undigested_postings(
+    since: datetime | None = None,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Postings eligible for the next digest, joined to their company."""
+    _require_agent_token(x_agent_token)
+    try:
+        postings = list_undigested_postings(window_start=since)
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"postings": postings}
+
+
+@app.get("/api/v1/jobboard/digest-runs/watermark")
+def jobboard_digest_watermark(
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """finishedAt of the last SENT digest — the window start for the next one."""
+    _require_agent_token(x_agent_token)
+    try:
+        at = last_sent_digest_at()
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"watermark": at.isoformat() if at else None}
+
+
+@app.post("/api/v1/jobboard/digest-runs")
+def jobboard_create_digest_run(
+    req: DigestRunCreateRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Open a DigestRun row before attempting a send."""
+    _require_agent_token(x_agent_token)
+    try:
+        run_id = create_digest_run(req.window_start, req.window_end)
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"ok": True, "id": run_id}
+
+
+@app.post("/api/v1/jobboard/digest-runs/{run_id}/close")
+def jobboard_close_digest_run(
+    run_id: str,
+    req: DigestRunCloseRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, bool]:
+    """Close a DigestRun and stamp its postings — atomically. See close_digest_run."""
+    _require_agent_token(x_agent_token)
+    try:
+        close_digest_run(
+            run_id,
+            status=req.status,
+            new_count=req.new_count,
+            company_count=req.company_count,
+            posting_ids=req.posting_ids,
+            error=req.error,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"ok": True}
+
+
+@app.post("/api/v1/jobboard/postings/{posting_id}/link")
+def jobboard_link_posting(
+    posting_id: str,
+    req: PostingLinkRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, bool]:
+    """Point a posting at the JobApplication created from it ("Track")."""
+    _require_agent_token(x_agent_token)
+    try:
+        ok = link_posting_to_application(posting_id, req.job_application_id)
+    except Exception as e:
+        raise _to_http_error(e)
+    if not ok:
+        raise HTTPException(status_code=404, detail="posting not found")
+    return {"ok": True}
 
 
 @app.exception_handler(404)

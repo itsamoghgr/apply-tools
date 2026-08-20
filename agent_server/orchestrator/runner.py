@@ -14,7 +14,7 @@ import random
 
 from agent_server.agents.deps import AgentDeps
 from agent_server.agents.discovery import run_discovery
-from agent_server.agents.llm import AnthropicLLM
+from agent_server.agents.llm import build_llm
 from agent_server.agents.research import run_research
 from agent_server.contracts.records import (
     CandidateCompany,
@@ -233,7 +233,7 @@ def _build_deps(job_id: str) -> AgentDeps:
     return AgentDeps(
         search=search,
         fetch_page=fetch_page,
-        llm=AnthropicLLM(),
+        llm=build_llm(),
         audit=_audit,
         normalize_domain=normalize_domain,
     )

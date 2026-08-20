@@ -125,3 +125,36 @@ class AnthropicLLM:
             stop_reason=response.stop_reason,
         )
         return result
+
+
+# ---------------------------------------------------------------------------
+# Provider selection
+# ---------------------------------------------------------------------------
+
+
+def build_llm() -> Any:
+    """Return the LLM client for CONFIG.llm_provider.
+
+    One place where provider selection happens, so call sites just ask for "the
+    LLM" and never branch. Every client returned satisfies the same LLMClient
+    Protocol (CONTRACTS.md §8) and returns the same normalised
+    {"text", "tool_calls"} shape, so the agents cannot tell them apart.
+
+      anthropic | bedrock -> AnthropicLLM   (Claude, direct API or AWS)
+      gemini              -> GeminiLLM      (Google AI Studio key)
+
+    An unknown value falls back to AnthropicLLM rather than raising: a typo in
+    an env var should degrade to the default provider, not take the service down
+    at import time.
+    """
+    provider = (CONFIG.llm_provider or "").lower()
+    if provider in ("gemini", "vertex"):
+        from agent_server.agents.gemini_llm import GeminiLLM  # local: optional dep
+
+        # One client for both: same models and wire format, differing only in
+        # base URL and auth (API key vs ADC token).
+        log.debug("llm_provider_selected", provider=provider)
+        return GeminiLLM()
+    if provider not in ("anthropic", "bedrock"):
+        log.warning("llm_provider_unknown", provider=provider, using="anthropic")
+    return AnthropicLLM()
