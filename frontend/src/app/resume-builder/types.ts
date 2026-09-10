@@ -227,6 +227,13 @@ export const SECTION_LABELS: Record<SectionKey, string> = {
 // One entry in a profile's ordered section list: which section, shown or hidden.
 export type SectionMeta = { key: SectionKey; visible: boolean };
 
+// The LaTeX shell a resume renders with. The authoritative list (with display
+// names and descriptions) lives in backend/resume_templates.py and is served by
+// GET /resume-builder/templates — the builder fetches it rather than hardcoding,
+// so a template added on the backend shows up without a frontend change.
+// This slug is the only piece the client needs to persist.
+export const DEFAULT_TEMPLATE = "classic";
+
 export type ResumeProfileData = {
   header: ResumeHeader;
   summary: string;
@@ -237,6 +244,9 @@ export type ResumeProfileData = {
   // Ordered, visibility-aware section list. Always fully populated after
   // normalizeProfile (missing/legacy keys are appended in default order).
   sectionOrder: SectionMeta[];
+  // Slug of the LaTeX shell used for PDF render. Not validated here — the
+  // backend resolves an unknown slug to the default rather than failing.
+  template: string;
 };
 
 // Default section list: the canonical order, all visible. Used when a profile
@@ -287,6 +297,7 @@ export const emptyProfile = (): ResumeProfileData => ({
   skills: [],
   projects: [],
   sectionOrder: defaultSectionOrder(),
+  template: DEFAULT_TEMPLATE,
 });
 
 // Reconcile a possibly-partial/legacy sectionOrder against the known section
@@ -372,6 +383,8 @@ export function normalizeProfile(raw: unknown): ResumeProfileData {
     },
     summary: str(p.summary),
     sectionOrder: normalizeSectionOrder(p.sectionOrder),
+    // Blank/absent (legacy rows, AI drafts) → the default shell.
+    template: str(p.template).trim() || DEFAULT_TEMPLATE,
     education: arr<Record<string, unknown>>(p.education).map((e) => ({
       ...dateParts(e),
       school: str(e.school),

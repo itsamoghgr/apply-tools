@@ -1,5 +1,4 @@
 const BACKEND = "http://127.0.0.1:8001";
-const LINKEDIN_INVITE_LIMIT = 300;
 const LINKEDIN_INVITE_WARN = 280;
 
 // Default timeouts (ms). The backend caps a single LLM call at ~45s, so
@@ -26,18 +25,12 @@ let _providerLabel = "AI";
 let _extractProviderLabel = "AI";
 
 // Storage keys. The shared company + JD live in one place; only the truly
-// tab-local fields (intent, outreach profile, question text, tracker
+// tab-local fields (question text, tracker
 // extras) are persisted per-tab.
 const STORAGE_KEYS = {
   activeTab: "activeTab",
   resumeId: "resume.id",
   shared: { company: "shared.company", jd: "shared.jd" },
-  email: { intent: "email.intent" },
-  outreach: {
-    channel: "outreach.channel",
-    profile: "outreach.profile",
-    context: "outreach.context",
-  },
   question: { text: "question.text" },
   track: {
     role: "track.role",
@@ -46,6 +39,11 @@ const STORAGE_KEYS = {
     status: "track.status",
     interview: "track.interview",
     notes: "track.notes",
+    // Id of the JobApplication this popup session already created (via cover
+    // letter or Track), plus the company it was created for. Stored together so
+    // a stale id can never be reused for a different company.
+    appId: "track.appId",
+    appIdCompany: "track.appIdCompany",
   },
   lead: {
     name: "lead.name",
@@ -191,6 +189,41 @@ async function storageSet(items) {
   }
 }
 
+// ---------- tracked application id ----------
+// Generating a cover letter and hitting Track are two steps of one workflow, and
+// either can come first. Whichever runs first creates the JobApplication row and
+// stashes its id here; the second one PATCHes that row instead of creating a
+// duplicate. The id is stored alongside the company it belongs to because
+// chrome.storage.local outlives the popup — without that check, reopening the
+// popup for a different company would PATCH the previous company's row.
+
+async function rememberTrackedApp(id, company) {
+  if (!id) return;
+  await storageSet({
+    [STORAGE_KEYS.track.appId]: id,
+    [STORAGE_KEYS.track.appIdCompany]: (company || "").trim(),
+  });
+}
+
+async function getTrackedAppId(company) {
+  const data = await storageGet([
+    STORAGE_KEYS.track.appId,
+    STORAGE_KEYS.track.appIdCompany,
+  ]);
+  const id = data[STORAGE_KEYS.track.appId];
+  const forCompany = data[STORAGE_KEYS.track.appIdCompany];
+  if (!id || !forCompany) return null;
+  // Only reuse the row when it's still the same application.
+  if (forCompany.trim().toLowerCase() !== (company || "").trim().toLowerCase()) {
+    return null;
+  }
+  return id;
+}
+
+async function forgetTrackedApp() {
+  await storageRemove([STORAGE_KEYS.track.appId, STORAGE_KEYS.track.appIdCompany]);
+}
+
 // ---------- textarea autosize ----------
 // Popup has no scroll: textareas grow with content instead of using
 // internal scrollbars. Call autosize() any time a textarea's value
@@ -301,8 +334,13 @@ function persistShared() {
   });
 }
 
-sharedCompany.addEventListener("input", () => {
+sharedCompany.addEventListener("input", async () => {
   persistShared();
+  // Editing the company means we're no longer working on the row we stashed.
+  // Drop it rather than leaving a stale id that could reactivate later.
+  if (!(await getTrackedAppId(getSharedCompany()))) {
+    await forgetTrackedApp();
+  }
 });
 sharedJd.addEventListener("input", () => {
   persistShared();
@@ -314,7 +352,7 @@ sharedJd.addEventListener("input", () => {
 const tabs = document.querySelectorAll(".tab");
 const panels = document.querySelectorAll(".panel");
 // Tabs that don't use the shared JD context (just hide the JD block when active).
-const TABS_WITHOUT_JD = new Set(["outreach", "lead", "chat"]);
+const TABS_WITHOUT_JD = new Set(["lead", "chat"]);
 const jdContext = $("jdContext");
 
 function activateTab(name) {
@@ -1017,10 +1055,11 @@ coverSubmit.addEventListener("click", async () => {
   }
 });
 
-// Save a generated cover letter onto a tracked JobApplication. If a job for this
-// company already exists (matched by company name, case-insensitive), update it;
-// otherwise create a new tracked application carrying the letter. Keeps the
-// extension's cover letter in sync with the web app's /applications tracker.
+// Save a generated cover letter onto a tracked JobApplication. If this popup
+// session already created a row for this company (via Track), update it in
+// place; otherwise create one and remember its id so a later Track fills in the
+// same row. Keeps the extension's cover letter in sync with the web app's
+// /applications tracker.
 async function saveCoverLetterToTracker(company, jd, resumeId, body, meta) {
   const payload = {
     coverLetter: body,
@@ -1028,23 +1067,7 @@ async function saveCoverLetterToTracker(company, jd, resumeId, body, meta) {
     jobDescription: jd || null,
   };
 
-  // Look for an existing tracked job for this company to update in place.
-  let existingId = null;
-  try {
-    const listRes = await fetch(`${BACKEND}/track`);
-    if (listRes.ok) {
-      const { applications = [] } = await listRes.json();
-      const match = applications.find(
-        (a) =>
-          (a.companyName || "").trim().toLowerCase() ===
-          company.trim().toLowerCase(),
-      );
-      if (match) existingId = match.id;
-    }
-  } catch (_e) {
-    // Non-fatal: if the lookup fails we just create a new tracked row below.
-  }
-
+  const existingId = await getTrackedAppId(company);
   if (existingId) {
     const res = await fetch(`${BACKEND}/track/${existingId}`, {
       method: "PATCH",
@@ -1066,6 +1089,8 @@ async function saveCoverLetterToTracker(company, jd, resumeId, body, meta) {
     }),
   });
   if (!res.ok) throw new Error((await readErrorDetail(res)) || `HTTP ${res.status}`);
+  const { id } = await res.json();
+  await rememberTrackedApp(id, company);
 }
 
 coverTextBtn.addEventListener("click", async () => {
@@ -1107,152 +1132,6 @@ coverTextBtn.addEventListener("click", async () => {
   } finally {
     coverSubmit.disabled = false;
     coverTextBtn.disabled = false;
-  }
-});
-
-// ============================================================================
-// Email tab
-// ============================================================================
-
-const emailIntent = $("email-intent");
-const emailSubmit = $("emailSubmit");
-const emailStatus = $("emailStatus");
-const emailResult = $("emailResult");
-const emailSubjectOut = $("email-subject-out");
-const emailBodyOut = $("email-body-out");
-
-emailIntent.addEventListener("input", () => {
-  storageSet({ [STORAGE_KEYS.email.intent]: emailIntent.value });
-});
-
-emailSubmit.addEventListener("click", async () => {
-  const company = getSharedCompany();
-  const jd = getSharedJd();
-  const intent = emailIntent.value.trim();
-  if (!company || !jd) {
-    setStatus(emailStatus, "Fill in company and job description above.", "err");
-    return;
-  }
-
-  emailSubmit.disabled = true;
-  setStatus(emailStatus, "Generating email...", "working");
-  emailResult.classList.add("hidden");
-
-  try {
-    const res = await fetchWithTimeout(`${BACKEND}/email`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        company,
-        job_description: jd,
-        intent: intent || null,
-        resume_id: getResumeId(),
-      }),
-    });
-    if (!res.ok) {
-      const detail = await readErrorDetail(res);
-      throw new Error(detail || `HTTP ${res.status}`);
-    }
-    const data = await res.json();
-    emailSubjectOut.value = data.subject || "";
-    emailBodyOut.value = data.body || "";
-    emailResult.classList.remove("hidden");
-    autosize(emailBodyOut);
-    setStatus(emailStatus, "Done. Edit if you want, then copy.", "ok");
-  } catch (err) {
-    setStatus(emailStatus, `Failed: ${err.message || err}`, "err");
-  } finally {
-    emailSubmit.disabled = false;
-  }
-});
-
-// ============================================================================
-// Outreach tab (uses its own profile + context, not the shared JD)
-// ============================================================================
-
-const outreachChannel = $("outreach-channel");
-const outreachProfile = $("outreach-profile");
-const outreachContext = $("outreach-context");
-const outreachSubmit = $("outreachSubmit");
-const outreachStatus = $("outreachStatus");
-const outreachResult = $("outreachResult");
-const outreachSubjectRow = $("outreachSubjectRow");
-const outreachSubjectOut = $("outreach-subject-out");
-const outreachMessageOut = $("outreach-message-out");
-const outreachCharCount = $("outreachCharCount");
-
-function updateCharCount() {
-  if (outreachChannel.value !== "linkedin_invitation") {
-    outreachCharCount.textContent = "";
-    outreachCharCount.className = "char-count";
-    return;
-  }
-  const len = outreachMessageOut.value.length;
-  outreachCharCount.textContent = `${len}/${LINKEDIN_INVITE_LIMIT}`;
-  let cls = "char-count";
-  if (len > LINKEDIN_INVITE_LIMIT) cls += " over";
-  else if (len > LINKEDIN_INVITE_WARN) cls += " warn";
-  outreachCharCount.className = cls;
-}
-
-outreachMessageOut.addEventListener("input", updateCharCount);
-outreachChannel.addEventListener("change", () => {
-  storageSet({ [STORAGE_KEYS.outreach.channel]: outreachChannel.value });
-  updateCharCount();
-});
-outreachProfile.addEventListener("input", () => {
-  storageSet({ [STORAGE_KEYS.outreach.profile]: outreachProfile.value });
-});
-outreachContext.addEventListener("input", () => {
-  storageSet({ [STORAGE_KEYS.outreach.context]: outreachContext.value });
-});
-
-outreachSubmit.addEventListener("click", async () => {
-  const channel = outreachChannel.value;
-  const profile = outreachProfile.value.trim();
-  const context = outreachContext.value.trim();
-  if (!profile) {
-    setStatus(outreachStatus, "Paste the target person's profile.", "err");
-    return;
-  }
-
-  outreachSubmit.disabled = true;
-  setStatus(outreachStatus, "Generating message...", "working");
-  outreachResult.classList.add("hidden");
-
-  try {
-    const res = await fetchWithTimeout(`${BACKEND}/outreach`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        profile_text: profile,
-        channel,
-        context: context || null,
-        resume_id: getResumeId(),
-      }),
-    });
-    if (!res.ok) {
-      const detail = await readErrorDetail(res);
-      throw new Error(detail || `HTTP ${res.status}`);
-    }
-    const data = await res.json();
-
-    const isEmail = channel === "email";
-    outreachSubjectRow.style.display = isEmail ? "" : "none";
-    outreachSubjectOut.style.display = isEmail ? "" : "none";
-    if (isEmail) outreachSubjectOut.value = data.subject || "";
-
-    outreachMessageOut.value = data.message || "";
-    outreachResult.classList.remove("hidden");
-    autosize(outreachMessageOut);
-    updateCharCount();
-
-    const cc = typeof data.char_count === "number" ? ` (${data.char_count} chars)` : "";
-    setStatus(outreachStatus, `Done${cc}. Edit if you want, then copy.`, "ok");
-  } catch (err) {
-    setStatus(outreachStatus, `Failed: ${err.message || err}`, "err");
-  } finally {
-    outreachSubmit.disabled = false;
   }
 });
 
@@ -1527,6 +1406,9 @@ async function resetTrackForm() {
     STORAGE_KEYS.track.notes,
     STORAGE_KEYS.shared.company,
     STORAGE_KEYS.shared.jd,
+    // This application is finished — the next one starts a fresh row.
+    STORAGE_KEYS.track.appId,
+    STORAGE_KEYS.track.appIdCompany,
   ]);
 }
 
@@ -1564,11 +1446,22 @@ trackSubmit.addEventListener("click", async () => {
   setStatus(trackStatusEl, "Saving...", "working");
 
   try {
-    const res = await fetch(`${BACKEND}/track`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    // A cover letter generated earlier in this session already created the row —
+    // fill it in rather than creating a second one for the same application.
+    // No need to remember the id when we create it here: resetTrackForm() below
+    // ends the application, so the next cover letter starts a fresh row.
+    const existingId = await getTrackedAppId(company);
+    const res = existingId
+      ? await fetch(`${BACKEND}/track/${existingId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        })
+      : await fetch(`${BACKEND}/track`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
     if (!res.ok) {
       const detail = await readErrorDetail(res);
       throw new Error(detail || `HTTP ${res.status}`);
@@ -1905,10 +1798,6 @@ async function restoreAll() {
     STORAGE_KEYS.activeTab,
     STORAGE_KEYS.shared.company,
     STORAGE_KEYS.shared.jd,
-    STORAGE_KEYS.email.intent,
-    STORAGE_KEYS.outreach.channel,
-    STORAGE_KEYS.outreach.profile,
-    STORAGE_KEYS.outreach.context,
     STORAGE_KEYS.question.text,
     STORAGE_KEYS.track.role,
     STORAGE_KEYS.track.location,
@@ -1928,12 +1817,6 @@ async function restoreAll() {
 
   if (data[STORAGE_KEYS.shared.company]) sharedCompany.value = data[STORAGE_KEYS.shared.company];
   if (data[STORAGE_KEYS.shared.jd]) sharedJd.value = data[STORAGE_KEYS.shared.jd];
-
-  if (data[STORAGE_KEYS.email.intent]) emailIntent.value = data[STORAGE_KEYS.email.intent];
-
-  if (data[STORAGE_KEYS.outreach.channel]) outreachChannel.value = data[STORAGE_KEYS.outreach.channel];
-  if (data[STORAGE_KEYS.outreach.profile]) outreachProfile.value = data[STORAGE_KEYS.outreach.profile];
-  if (data[STORAGE_KEYS.outreach.context]) outreachContext.value = data[STORAGE_KEYS.outreach.context];
 
   if (data[STORAGE_KEYS.question.text]) questionText.value = data[STORAGE_KEYS.question.text];
 
@@ -1960,7 +1843,7 @@ async function restoreAll() {
   const activeTab = data[STORAGE_KEYS.activeTab];
   if (
     activeTab &&
-    ["cover", "email", "outreach", "score", "question", "track", "lead", "chat"].includes(activeTab)
+    ["cover", "score", "question", "track", "lead", "chat"].includes(activeTab)
   ) {
     activateTab(activeTab);
   } else {

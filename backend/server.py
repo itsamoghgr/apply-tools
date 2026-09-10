@@ -2,47 +2,51 @@
 
 from __future__ import annotations
 
-import asyncio
 import os
 import re
 from datetime import datetime, timezone
-from enum import Enum
 from typing import Any, Literal
 
-import httpx
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
-import tracking
 from log import configure_logging, get_logger
 from db import (
     UniqueViolation,
     add_job_application_lead,
+    archive_missing_postings,
+    archive_over_experience,
+    archive_stale_postings,
+    count_over_experience,
+    restore_within_experience,
+    close_alert_run,
+    create_alert_run,
     delete_job_application,
     delete_lead,
-    delete_reach_out,
     delete_setting,
-    find_or_create_lead_by_email,
     get_lead,
-    get_reach_out,
     get_setting,
+    get_watched_company,
     insert_job_application,
     insert_lead,
-    insert_reach_out,
+    last_sent_alert_at,
+    link_posting_to_application,
     list_job_applications,
     list_leads,
     list_leads_for_application,
-    list_reach_outs,
-    list_reach_outs_for_application,
+    list_unalerted_postings,
+    list_watched_companies,
     platform_leads_known_domains,
     platform_upsert_lead,
     remove_job_application_lead,
     set_setting,
     update_job_application,
     update_lead,
-    update_reach_out,
+    update_watched_company,
+    upsert_job_postings,
+    upsert_watched_company,
 )
 from generate import (
     AI_PROVIDER,
@@ -51,17 +55,16 @@ from generate import (
     answer_application_question,
     chat_reply,
     extract_jd_from_page,
-    generate_application_email,
     generate_cover_letter,
     generate_cover_letter_text,
     render_cover_letter_pdf,
-    generate_outreach_message,
     list_resumes,
     score_jd_fit,
     score_jd_fit_all,
 )
 from latex_utils import LatexCompileError
 from resume_render import render_resume_pdf_with_pages
+from resume_templates import list_templates
 from resume_ai import (
     draft_profile_from_notes,
     highlight_bullet,
@@ -70,16 +73,6 @@ from resume_ai import (
     suggest_skills,
     tailor_profile,
 )
-from mail import (
-    GmailAuthError,
-    GmailReadError,
-    GmailSendError,
-    fetch_inbox,
-    fetch_message,
-    send_gmail,
-)
-
-
 configure_logging()
 logger = get_logger(__name__)
 
@@ -115,26 +108,6 @@ class CoverLetterPdfRequest(BaseModel):
     role_title: str = Field(default="", max_length=300)
     hiring_manager: str = Field(default="", max_length=200)
     body: str = Field(..., min_length=1, max_length=20000)
-
-
-class EmailRequest(BaseModel):
-    company: str = Field(..., min_length=1, max_length=200)
-    job_description: str = Field(..., min_length=1, max_length=20000)
-    intent: str | None = Field(default=None, max_length=2000)
-    resume_id: str | None = RESUME_ID_FIELD
-
-
-class OutreachChannel(str, Enum):
-    linkedin_invitation = "linkedin_invitation"
-    linkedin_message = "linkedin_message"
-    email = "email"
-
-
-class OutreachRequest(BaseModel):
-    profile_text: str = Field(..., min_length=1, max_length=30000)
-    channel: OutreachChannel
-    context: str | None = Field(default=None, max_length=2000)
-    resume_id: str | None = RESUME_ID_FIELD
 
 
 class ScoreRequest(BaseModel):
@@ -295,6 +268,24 @@ def _safe_filename_part(s: str) -> str:
     return cleaned or "Company"
 
 
+def _resume_filename(full_name: str, resume_name: str) -> str:
+    """`<first>_<last>_resume_<roletag>` (lowercase, underscores) — mirrors the
+    frontend blob-download naming. The person part is first + last name only;
+    any middle names/initials are dropped. The role tag (e.g. "ds12") is parsed
+    out of the resume name by lowercasing and dropping non-alphanumerics."""
+    words = [
+        re.sub(r"[^a-z0-9]+", "", w) for w in full_name.lower().split()
+    ]
+    words = [w for w in words if w]
+    if len(words) > 1:
+        person = f"{words[0]}_{words[-1]}"
+    else:
+        person = words[0] if words else ""
+    role_tag = re.sub(r"[^a-z0-9]+", "", resume_name.lower())
+    base = f"{person}_resume" if person else "resume"
+    return f"{base}_{role_tag}" if role_tag else base
+
+
 def _to_http_error(exc: Exception, fallback_status: int = 500) -> HTTPException:
     """Translate generation errors into HTTP responses."""
     if isinstance(exc, FileNotFoundError):
@@ -331,6 +322,8 @@ PROVIDER_LABELS = {
     "groq": "Groq",
     "nvidia": "NVIDIA NIM",
     "bedrock": "Claude (Bedrock)",
+    "gemini": "Gemini (AI Studio)",
+    "vertex": "Gemini (Vertex AI)",
 }
 
 
@@ -401,32 +394,6 @@ def cover_letter_pdf(req: CoverLetterPdfRequest) -> Response:
     )
 
 
-@app.post("/email")
-def email(req: EmailRequest) -> dict[str, str]:
-    try:
-        return generate_application_email(
-            req.company,
-            req.job_description,
-            req.intent,
-            resume_id=req.resume_id,
-        )
-    except Exception as e:
-        raise _to_http_error(e)
-
-
-@app.post("/outreach")
-def outreach(req: OutreachRequest) -> dict[str, Any]:
-    try:
-        return generate_outreach_message(
-            req.profile_text,
-            req.channel.value,
-            req.context,
-            resume_id=req.resume_id,
-        )
-    except Exception as e:
-        raise _to_http_error(e)
-
-
 @app.post("/score")
 def score(req: ScoreRequest) -> dict[str, Any]:
     try:
@@ -480,6 +447,16 @@ def chat(req: ChatRequest) -> dict[str, str]:
 # -----------------------------------------------------------------------------
 
 
+@app.get("/resume-builder/templates")
+def resume_builder_templates() -> dict[str, Any]:
+    """The LaTeX shells a resume can be rendered with, for the builder's picker.
+
+    Served from the backend registry so the list can never drift from the
+    templates that actually exist on disk.
+    """
+    return {"templates": list_templates()}
+
+
 @app.post("/resume-builder/pdf")
 def resume_builder_pdf(req: ResumeProfileRequest) -> Response:
     try:
@@ -487,8 +464,10 @@ def resume_builder_pdf(req: ResumeProfileRequest) -> Response:
     except Exception as e:
         raise _to_http_error(e)
 
-    name = req.filename or (req.profile.get("header") or {}).get("fullName") or "Resume"
-    filename = f"Resume_{_safe_filename_part(str(name))}.pdf"
+    header = req.profile.get("header") or {}
+    full_name = str(header.get("fullName") or "")
+    resume_name = str(req.filename or "")
+    filename = f"{_resume_filename(full_name, resume_name)}.pdf"
     return Response(
         content=pdf_bytes,
         media_type="application/pdf",
@@ -669,7 +648,7 @@ def track_delete(app_id: str) -> dict[str, bool]:
 
 
 # -----------------------------------------------------------------------------
-# JobApplication ↔ Lead links + per-application reach-out history.
+# JobApplication ↔ Lead links.
 # -----------------------------------------------------------------------------
 
 
@@ -719,21 +698,8 @@ def track_unlink_lead(app_id: str, lead_id: str) -> dict[str, bool]:
     return {"ok": True}
 
 
-@app.get("/track/{app_id}/reach-outs")
-def track_list_reach_outs(app_id: str) -> dict[str, Any]:
-    try:
-        return {
-            "reachOuts": [
-                _serialize_reach_out(r) for r in list_reach_outs_for_application(app_id)
-            ]
-        }
-    except Exception as e:
-        raise _to_http_error(e)
-
-
 # -----------------------------------------------------------------------------
-# Leads: master record for "people I might reach out to". Each row can have
-# zero or many ReachOuts pointing at it (auto-linked by recipientEmail).
+# Leads: master record for people attached to applications.
 # -----------------------------------------------------------------------------
 
 
@@ -912,581 +878,379 @@ def leads_upsert(
 
 
 # -----------------------------------------------------------------------------
-# Reach-out flow: draft an outreach email from a LinkedIn profile, edit it,
-# then send via Gmail SMTP using a stored app password.
+# Job Board (career-page monitor) — agent-facing row access.
+#
+# The agent server (port 8002) scrapes each watched company's board every 3h and
+# pushes matching postings here; a 6-hourly alert reports what is new. The agent
+# NEVER connects to this database directly — everything goes through these
+# endpoints, the same rule the lead-intake endpoints above follow.
+#
+# The UI does NOT use these: Next.js reads/writes WatchedCompany and JobPosting
+# straight through Prisma, as /applications and /resumes already do.
+#
+# Auth is the same optional shared secret (X-Agent-Token / PLATFORM_API_TOKEN).
 # -----------------------------------------------------------------------------
 
 
-GMAIL_ADDRESS_KEY = "gmail_address"
-GMAIL_APP_PASSWORD_KEY = "gmail_app_password"
-GMAIL_FROM_NAME_KEY = "gmail_from_name"
+class WatchedCompanyUpsertRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=300)
+    career_url: str = Field(..., min_length=1, max_length=2000)
+    domain: str | None = Field(default=None, max_length=255)
+    logo_url: str | None = Field(default=None, max_length=2000)
+    ats: str | None = Field(default=None, max_length=50)
+    ats_slug: str | None = Field(default=None, max_length=200)
+    role_filter: list[str] | None = Field(default=None, max_length=50)
+    # Scrape config: discard postings older than N days / outside these ISO
+    # country codes. None = no restriction.
+    max_age_days: int | None = Field(default=None, ge=1, le=3650)
+    country_filter: list[str] | None = Field(default=None, max_length=60)
+    active: bool = True
 
 
-REACH_OUT_CHANNELS = ("email", "linkedin_invitation", "linkedin_message")
+class WatchedCompanyPatchRequest(BaseModel):
+    """Post-cycle status stamp. Every field optional — the monitor sends only
+    what changed, and an explicitly-null lastError clears a recovered company."""
+
+    last_checked_at: datetime | None = None
+    last_status: str | None = Field(default=None, max_length=20)
+    last_error: str | None = Field(default=None, max_length=2000)
+    seeded_at: datetime | None = None
+    active: bool | None = None
 
 
-class ReachOutGenerateRequest(BaseModel):
-    recipientName: str = Field(..., min_length=1, max_length=200)
-    # Email is only required for the `email` channel; the LinkedIn channels
-    # are paste-into-LinkedIn flows where we don't have/need an address.
-    recipientEmail: str | None = Field(default=None, max_length=200)
-    linkedinProfile: str = Field(..., min_length=1, max_length=30000)
-    contextNote: str | None = Field(default=None, max_length=2000)
-    resumeId: str | None = RESUME_ID_FIELD
-    jobApplicationId: str | None = Field(default=None, max_length=64)
-    channel: str = Field(default="email", max_length=32)
+class JobPostingIn(BaseModel):
+    dedup_key: str = Field(..., min_length=1, max_length=200)
+    external_id: str | None = Field(default=None, max_length=200)
+    title: str = Field(..., min_length=1, max_length=300)
+    matched_role: str = Field(..., min_length=1, max_length=100)
+    location: str | None = Field(default=None, max_length=300)
+    url: str = Field(..., min_length=1, max_length=2000)
+    posted_at: datetime | None = None
+    # Minimum years of experience parsed from the job description. None means
+    # the posting doesn't state one — never a guess.
+    min_years: int | None = Field(default=None, ge=0, le=50)
+    # ISO-3166 alpha-2 parsed from `location`; None when it can't be resolved.
+    country: str | None = Field(default=None, max_length=2)
+    # False for a company's first (seed) cycle, so its pre-existing backlog is
+    # recorded without ever being reported by an alert.
+    is_new: bool = True
 
 
-class ReachOutBlankRequest(BaseModel):
-    """Create a draft without calling the AI — for users writing from scratch.
-
-    LinkedIn profile + context are optional here (unlike `/generate`), since
-    the user is providing the content themselves. We still persist whatever
-    they did fill in so they can convert this draft to AI-assisted later.
-    """
-    recipientName: str = Field(..., min_length=1, max_length=200)
-    recipientEmail: str | None = Field(default=None, max_length=200)
-    linkedinProfile: str | None = Field(default=None, max_length=30000)
-    contextNote: str | None = Field(default=None, max_length=2000)
-    resumeId: str | None = RESUME_ID_FIELD
-    jobApplicationId: str | None = Field(default=None, max_length=64)
-    channel: str = Field(default="email", max_length=32)
+class JobPostingsUpsertRequest(BaseModel):
+    company_id: str = Field(..., min_length=1, max_length=64)
+    # A single Lever board can return 300+ postings (palantir: 309), so this cap
+    # is a real bound. The monitor chunks anything larger.
+    postings: list[JobPostingIn] = Field(default_factory=list, max_length=500)
 
 
-class ReachOutPatchRequest(BaseModel):
-    recipientName: str | None = Field(default=None, max_length=200)
-    recipientEmail: str | None = Field(default=None, max_length=200)
-    subject: str | None = Field(default=None, max_length=400)
-    body: str | None = Field(default=None, max_length=20000)
-    contextNote: str | None = Field(default=None, max_length=2000)
+class JobPostingsArchiveRequest(BaseModel):
+    company_id: str = Field(..., min_length=1, max_length=64)
+    # Dedup keys still live on the board. An EMPTY list is a no-op, never
+    # "archive everything" — see archive_missing_postings.
+    live_dedup_keys: list[str] = Field(default_factory=list, max_length=2000)
 
 
-class GmailSettingsRequest(BaseModel):
-    address: str = Field(..., min_length=3, max_length=200)
-    appPassword: str = Field(default="", max_length=200)
-    fromName: str | None = Field(default=None, max_length=200)
+class AlertRunCreateRequest(BaseModel):
+    # null on the first-ever alert, which has no prior watermark.
+    window_start: datetime | None = None
+    window_end: datetime
 
 
-def _serialize_reach_out(row: dict) -> dict:
-    """Strip secrets and normalize for the wire.
-
-    Note: tracking aggregates (openCount, clickCount, lastOpenedAt,
-    lastClickedAt) are NOT in the local DB anymore — they live in the
-    sidecar's Postgres and are fetched separately by the dashboard via
-    `/reach-out/aggregates`.
-    """
-    if not row:
-        return row
-    return {
-        "id": row.get("id"),
-        "recipientName": row.get("recipientName"),
-        "recipientEmail": row.get("recipientEmail"),
-        "linkedinProfile": row.get("linkedinProfile"),
-        "contextNote": row.get("contextNote"),
-        "resumeId": row.get("resumeId"),
-        "leadId": row.get("leadId"),
-        "jobApplicationId": row.get("jobApplicationId"),
-        "channel": row.get("channel") or "email",
-        "subject": row.get("subject"),
-        "body": row.get("body"),
-        "status": row.get("status"),
-        "sentAt": row.get("sentAt"),
-        "errorMessage": row.get("errorMessage"),
-        "createdAt": row.get("createdAt"),
-        "updatedAt": row.get("updatedAt"),
-    }
+class AlertRunCloseRequest(BaseModel):
+    status: Literal["sent", "skipped", "failed"]
+    new_count: int = Field(default=0, ge=0)
+    company_count: int = Field(default=0, ge=0)
+    # Supplied ONLY for status='sent'. On failure the ids are left unstamped on
+    # purpose, so those postings roll into the next successful alert.
+    posting_ids: list[str] = Field(default_factory=list, max_length=2000)
+    error: str | None = Field(default=None, max_length=2000)
 
 
-@app.post("/reach-out/generate")
-def reach_out_generate(req: ReachOutGenerateRequest) -> dict[str, Any]:
-    channel = req.channel if req.channel in REACH_OUT_CHANNELS else "email"
-    if channel == "email" and not (req.recipientEmail and req.recipientEmail.strip()):
-        raise HTTPException(
-            status_code=400, detail="Email channel requires a recipient email."
-        )
+class PostingLinkRequest(BaseModel):
+    job_application_id: str = Field(..., min_length=1, max_length=64)
 
-    # Fold the recipient's name into the context so the model addresses them
-    # by name without us having to teach a separate prompt template.
-    context_parts: list[str] = [f"Recipient name: {req.recipientName.strip()}"]
-    if req.contextNote and req.contextNote.strip():
-        context_parts.append(req.contextNote.strip())
-    context = "\n".join(context_parts)
 
+@app.get("/api/v1/jobboard/companies")
+def jobboard_list_companies(
+    active: bool = True,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """The monitor's work list."""
+    _require_agent_token(x_agent_token)
     try:
-        result = generate_outreach_message(
-            req.linkedinProfile,
-            channel,
-            context,
-            resume_id=req.resumeId,
-        )
+        companies = list_watched_companies(active_only=active)
     except Exception as e:
         raise _to_http_error(e)
+    return {"companies": companies}
 
-    subject = (result.get("subject") or "").strip()
-    body = (result.get("message") or "").strip()
-    # Email needs subject + body; LinkedIn invitations are body-only (300
-    # char note, no subject); LinkedIn messages have a subject too.
-    if channel == "linkedin_invitation":
-        if not body:
-            raise HTTPException(
-                status_code=500, detail="Generator did not return a message"
-            )
-    else:
-        if not subject or not body:
-            raise HTTPException(
-                status_code=500, detail="Generator did not return subject and body"
-            )
 
-    # Only auto-link to a Lead when we have an email — that's the join key.
-    lead_id = (
-        find_or_create_lead_by_email(
-            req.recipientName,
-            req.recipientEmail,
-            linkedin_profile=req.linkedinProfile,
-        )
-        if (req.recipientEmail and req.recipientEmail.strip())
-        else None
-    )
-
+@app.post("/api/v1/jobboard/companies/upsert")
+def jobboard_upsert_company(
+    req: WatchedCompanyUpsertRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Idempotently upsert a watched company, keyed on careerUrl."""
+    _require_agent_token(x_agent_token)
     try:
-        new_id = insert_reach_out(
+        result = upsert_watched_company(
             {
-                "recipientName": req.recipientName,
-                "recipientEmail": req.recipientEmail or "",
-                "linkedinProfile": req.linkedinProfile,
-                "contextNote": req.contextNote,
-                "resumeId": req.resumeId,
-                "leadId": lead_id,
-                "jobApplicationId": req.jobApplicationId,
-                "channel": channel,
-                "subject": subject,
-                "body": body,
+                "name": req.name,
+                "careerUrl": req.career_url,
+                "domain": req.domain,
+                "logoUrl": req.logo_url,
+                "ats": req.ats,
+                "atsSlug": req.ats_slug,
+                "roleFilter": req.role_filter,
+                "maxAgeDays": req.max_age_days,
+                "countryFilter": req.country_filter,
+                "active": req.active,
             }
         )
+    except UniqueViolation as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
         raise _to_http_error(e)
+    return {"ok": True, **result}
 
-    return _serialize_reach_out(get_reach_out(new_id) or {})
 
+@app.patch("/api/v1/jobboard/companies/{company_id}")
+def jobboard_patch_company(
+    company_id: str,
+    req: WatchedCompanyPatchRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, bool]:
+    """Stamp per-cycle status onto a watched company.
 
-@app.post("/reach-out/blank")
-def reach_out_blank(req: ReachOutBlankRequest) -> dict[str, Any]:
-    """Create an empty draft so the user can compose subject + body manually.
-
-    Mirrors `/reach-out/generate` but skips the AI call. The frontend uses
-    this when the user clicks "Compose manually" — they then land in the
-    preview/edit step with empty subject and body fields ready to type into.
+    Uses exclude_unset so an omitted key leaves the column alone while an
+    explicit null clears it — that distinction is how lastError is reset once a
+    previously-failing board starts working again.
     """
-    channel = req.channel if req.channel in REACH_OUT_CHANNELS else "email"
-    if channel == "email" and not (req.recipientEmail and req.recipientEmail.strip()):
-        raise HTTPException(
-            status_code=400, detail="Email channel requires a recipient email."
-        )
-
-    lead_id = (
-        find_or_create_lead_by_email(
-            req.recipientName,
-            req.recipientEmail,
-            linkedin_profile=req.linkedinProfile,
-        )
-        if (req.recipientEmail and req.recipientEmail.strip())
-        else None
-    )
-
-    try:
-        new_id = insert_reach_out(
-            {
-                "recipientName": req.recipientName,
-                "recipientEmail": req.recipientEmail or "",
-                "linkedinProfile": req.linkedinProfile or "",
-                "contextNote": req.contextNote,
-                "resumeId": req.resumeId,
-                "leadId": lead_id,
-                "jobApplicationId": req.jobApplicationId,
-                "channel": channel,
-                "subject": "",
-                "body": "",
-            },
-            require_content=False,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise _to_http_error(e)
-
-    return _serialize_reach_out(get_reach_out(new_id) or {})
-
-
-@app.get("/reach-out")
-def reach_out_list() -> dict[str, Any]:
-    try:
-        return {"reachOuts": [_serialize_reach_out(r) for r in list_reach_outs()]}
-    except Exception as e:
-        raise _to_http_error(e)
-
-
-@app.get("/reach-out/{row_id}")
-def reach_out_get(row_id: str) -> dict[str, Any]:
-    row = get_reach_out(row_id)
-    if not row:
-        raise HTTPException(status_code=404, detail=f"No reach-out {row_id}")
-    return _serialize_reach_out(row)
-
-
-@app.patch("/reach-out/{row_id}")
-def reach_out_patch(row_id: str, req: ReachOutPatchRequest) -> dict[str, Any]:
-    existing = get_reach_out(row_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail=f"No reach-out {row_id}")
-    if existing.get("status") == "sent":
-        raise HTTPException(
-            status_code=400, detail="This reach-out has already been sent."
-        )
-    fields = req.model_dump(exclude_unset=True)
+    _require_agent_token(x_agent_token)
+    supplied = req.model_dump(exclude_unset=True)
+    field_map = {
+        "last_checked_at": "lastCheckedAt",
+        "last_status": "lastStatus",
+        "last_error": "lastError",
+        "seeded_at": "seededAt",
+        "active": "active",
+    }
+    fields = {field_map[k]: v for k, v in supplied.items() if k in field_map}
     if not fields:
-        return _serialize_reach_out(existing)
+        raise HTTPException(status_code=422, detail="no updatable fields supplied")
     try:
-        update_reach_out(row_id, fields)
-    except Exception as e:
-        raise _to_http_error(e)
-    return _serialize_reach_out(get_reach_out(row_id) or {})
-
-
-@app.post("/reach-out/{row_id}/mark-sent")
-def reach_out_mark_sent(row_id: str) -> dict[str, Any]:
-    """Mark a LinkedIn draft as sent after the user pastes it on LinkedIn.
-
-    There's no API to actually deliver invites/InMails, so this is a
-    bookkeeping endpoint — the frontend calls it from the Copy & open flow.
-    """
-    row = get_reach_out(row_id)
-    if not row:
-        raise HTTPException(status_code=404, detail=f"No reach-out {row_id}")
-    if (row.get("channel") or "email") == "email":
-        raise HTTPException(
-            status_code=400,
-            detail="Use /send for email reach-outs (it actually delivers via Gmail).",
-        )
-    if row.get("status") == "sent":
-        return _serialize_reach_out(row)
-    sent_at_iso = datetime.now(timezone.utc).isoformat()
-    update_reach_out(
-        row_id,
-        {"status": "sent", "sentAt": sent_at_iso, "errorMessage": None},
-    )
-    return _serialize_reach_out(get_reach_out(row_id) or {})
-
-
-@app.post("/reach-out/{row_id}/send")
-def reach_out_send(row_id: str) -> dict[str, Any]:
-    row = get_reach_out(row_id)
-    if not row:
-        raise HTTPException(status_code=404, detail=f"No reach-out {row_id}")
-    if (row.get("channel") or "email") != "email":
-        raise HTTPException(
-            status_code=400,
-            detail="LinkedIn drafts can't be sent automatically. Copy the text and paste it on LinkedIn, then mark it sent.",
-        )
-    if row.get("status") == "sent":
-        raise HTTPException(status_code=400, detail="Already sent.")
-    # Manual drafts can have empty subject/body until the user fills them
-    # in. Reject the send before it hits Gmail rather than letting Gmail
-    # bounce it back with a less actionable error.
-    if not (row.get("subject") or "").strip():
-        raise HTTPException(
-            status_code=400, detail="Subject is empty. Add one before sending."
-        )
-    if not (row.get("body") or "").strip():
-        raise HTTPException(
-            status_code=400, detail="Body is empty. Write your message before sending."
-        )
-
-    address = get_setting(GMAIL_ADDRESS_KEY)
-    app_password = get_setting(GMAIL_APP_PASSWORD_KEY)
-    from_name = get_setting(GMAIL_FROM_NAME_KEY)
-    if not address or not app_password:
-        raise HTTPException(
-            status_code=400,
-            detail="Gmail isn't connected. Add your address + app password first.",
-        )
-
-    # Build a tracking-enabled HTML alternative. We refuse to send when the
-    # sidecar isn't configured — tracking is the whole point of this flow,
-    # and a silent fallback to untracked email would mislead the UI's
-    # open/click counters.
-    try:
-        plain_body, html_body = tracking.prepare_html(row["body"], row_id)
-    except tracking.TrackingNotConfigured as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        logger.exception("tracked_html_build_failed", reach_out_id=row_id)
-        raise HTTPException(status_code=500, detail=f"Tracking failure: {exc}")
-
-    try:
-        send_gmail(
-            from_addr=address,
-            app_password=app_password,
-            to_addr=row["recipientEmail"],
-            subject=row["subject"],
-            body=plain_body,
-            from_name=from_name,
-            html_body=html_body,
-        )
-    except (GmailAuthError, GmailSendError) as exc:
-        update_reach_out(row_id, {"status": "failed", "errorMessage": str(exc)})
-        status_code = 401 if isinstance(exc, GmailAuthError) else 502
-        raise HTTPException(status_code=status_code, detail=str(exc))
-    except Exception as exc:
-        update_reach_out(row_id, {"status": "failed", "errorMessage": str(exc)})
-        raise _to_http_error(exc)
-
-    sent_at_iso = datetime.now(timezone.utc).isoformat()
-    update_reach_out(
-        row_id,
-        {
-            "status": "sent",
-            "sentAt": sent_at_iso,
-            "errorMessage": None,
-            "htmlBody": html_body,
-        },
-    )
-    return _serialize_reach_out(get_reach_out(row_id) or {})
-
-
-@app.delete("/reach-out/{row_id}")
-def reach_out_delete(row_id: str) -> dict[str, bool]:
-    try:
-        ok = delete_reach_out(row_id)
+        ok = update_watched_company(company_id, fields)
     except Exception as e:
         raise _to_http_error(e)
     if not ok:
-        raise HTTPException(status_code=404, detail=f"No reach-out {row_id}")
+        raise HTTPException(status_code=404, detail="watched company not found")
     return {"ok": True}
 
 
-# -----------------------------------------------------------------------------
-# Sidecar proxies. The local backend doesn't track events directly anymore —
-# /track/open and /track/click run on the deployed sidecar (see
-# tracking-sidecar/) which is reachable from mail clients on the public
-# internet. The dashboard reads back through these proxy routes so it can
-# stay on localhost:8001 and not need the sidecar's bearer token in the
-# browser.
-# -----------------------------------------------------------------------------
+@app.post("/api/v1/jobboard/postings/upsert")
+def jobboard_upsert_postings(
+    req: JobPostingsUpsertRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Bulk-upsert one company's postings.
 
-
-def _sidecar_request(
-    method: str,
-    path: str,
-    *,
-    json: Any = None,
-    timeout: float = 10.0,
-) -> httpx.Response:
-    base = tracking.get_base_url()
-    token = tracking.get_api_token()
-    if not base or not token:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Tracking sidecar is not configured. Set TRACKING_BASE_URL and "
-                "TRACKING_API_TOKEN in backend/.env after deploying the sidecar "
-                "(see tracking-sidecar/README.md)."
-            ),
-        )
-    url = base.rstrip("/") + path
-    headers = {"Authorization": f"Bearer {token}"}
-    try:
-        with httpx.Client(timeout=timeout) as client:
-            return client.request(method, url, headers=headers, json=json)
-    except httpx.HTTPError as exc:
-        # Render's free tier puts the service to sleep; first request after
-        # idle takes ~30-60s. Surface a clean 502 instead of a stack trace.
-        raise HTTPException(
-            status_code=502,
-            detail=f"Tracking sidecar unreachable at {base}: {exc}",
-        )
-
-
-@app.get("/reach-out/{row_id}/events")
-def reach_out_events(row_id: str) -> dict[str, Any]:
-    if not get_reach_out(row_id):
-        raise HTTPException(status_code=404, detail=f"No reach-out {row_id}")
-    res = _sidecar_request("GET", f"/events/{row_id}")
-    if res.status_code >= 400:
-        raise HTTPException(status_code=res.status_code, detail=res.text)
-    return res.json()
-
-
-class AggregatesRequest(BaseModel):
-    ids: list[str] = Field(..., max_length=500)
-
-
-@app.post("/reach-out/aggregates")
-def reach_out_aggregates(req: AggregatesRequest) -> dict[str, Any]:
-    """Batched open/click counts for the list view.
-
-    The frontend calls this once per page render with up to 500 reach-out
-    ids and merges the result client-side. We tolerate a sidecar failure
-    here gracefully (return empty aggregates) so a sleeping Render
-    instance doesn't break the dashboard — it just shows zero counters
-    until the sidecar wakes up.
+    `new_ids` is exactly the set of genuinely-new postings — the rows that did
+    not previously exist — which is what the alert reports.
     """
-    if not req.ids:
-        return {"aggregates": {}}
+    _require_agent_token(x_agent_token)
+    if get_watched_company(req.company_id) is None:
+        raise HTTPException(status_code=404, detail="watched company not found")
     try:
-        res = _sidecar_request("POST", "/aggregates", json={"ids": req.ids})
-    except HTTPException as exc:
-        logger.info("aggregates_fetch_failed", detail=exc.detail)
-        return {"aggregates": {}, "warning": exc.detail}
-    if res.status_code >= 400:
-        logger.warning("sidecar_error", endpoint="/aggregates", status=res.status_code)
-        return {"aggregates": {}, "warning": res.text}
-    return res.json()
-
-
-@app.get("/settings/tracking")
-def settings_tracking() -> dict[str, Any]:
-    """Status endpoint the UI uses to show whether tracking is wired up."""
-    base = tracking.get_base_url()
-    return {
-        "publicUrl": base,
-        "ready": tracking.is_ready(),
-    }
-
-
-@app.get("/settings/gmail")
-def settings_gmail_get() -> dict[str, Any]:
-    address = get_setting(GMAIL_ADDRESS_KEY)
-    app_password = get_setting(GMAIL_APP_PASSWORD_KEY)
-    from_name = get_setting(GMAIL_FROM_NAME_KEY)
-    return {
-        "address": address,
-        "fromName": from_name,
-        "hasPassword": bool(app_password),
-    }
-
-
-@app.put("/settings/gmail")
-def settings_gmail_put(req: GmailSettingsRequest) -> dict[str, Any]:
-    address = req.address.strip()
-    if "@" not in address:
-        raise HTTPException(
-            status_code=400, detail="address must look like an email."
+        result = upsert_job_postings(
+            req.company_id,
+            [
+                {
+                    "dedupKey": p.dedup_key,
+                    "externalId": p.external_id,
+                    "title": p.title,
+                    "matchedRole": p.matched_role,
+                    "location": p.location,
+                    "url": p.url,
+                    "postedAt": p.posted_at,
+                    "minYears": p.min_years,
+                    "country": p.country,
+                    "isNew": p.is_new,
+                }
+                for p in req.postings
+            ],
         )
-    set_setting(GMAIL_ADDRESS_KEY, address)
-    if req.appPassword:
-        # Gmail app passwords are 16 chars, optionally space-separated when
-        # Google shows them. Strip whitespace before storing.
-        cleaned = re.sub(r"\s+", "", req.appPassword)
-        set_setting(GMAIL_APP_PASSWORD_KEY, cleaned)
-    if req.fromName is not None:
-        if req.fromName.strip():
-            set_setting(GMAIL_FROM_NAME_KEY, req.fromName.strip())
-        else:
-            delete_setting(GMAIL_FROM_NAME_KEY)
-    return settings_gmail_get()
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"ok": True, **result}
 
 
-@app.delete("/settings/gmail")
-def settings_gmail_delete() -> dict[str, bool]:
-    delete_setting(GMAIL_ADDRESS_KEY)
-    delete_setting(GMAIL_APP_PASSWORD_KEY)
-    delete_setting(GMAIL_FROM_NAME_KEY)
+@app.post("/api/v1/jobboard/postings/archive")
+def jobboard_archive_postings(
+    req: JobPostingsArchiveRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Mark postings absent from the latest fetch as archived. Never deletes."""
+    _require_agent_token(x_agent_token)
+    try:
+        archived = archive_missing_postings(req.company_id, req.live_dedup_keys)
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"ok": True, "archived": archived}
+
+
+class ArchiveStaleRequest(BaseModel):
+    # Retention window in weeks. Scrape-level, not per-company.
+    weeks: int = Field(..., ge=1, le=52)
+
+
+@app.post("/api/v1/jobboard/postings/archive-stale")
+def jobboard_archive_stale(
+    req: ArchiveStaleRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Archive postings older than the retention window. Never deletes."""
+    _require_agent_token(x_agent_token)
+    try:
+        archived = archive_stale_postings(req.weeks)
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"ok": True, "archived": archived}
+
+
+class ExperienceThresholdRequest(BaseModel):
+    # Maximum years of experience to keep. Scrape-level, not per-company.
+    max_years: int = Field(..., ge=0, le=50)
+
+
+@app.post("/api/v1/jobboard/postings/apply-experience-threshold")
+def jobboard_apply_experience(
+    req: ExperienceThresholdRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Apply a max-experience threshold to stored postings.
+
+    Archives what now exceeds it and restores what now fits, so the setting is
+    reversible in both directions. Never deletes.
+    """
+    _require_agent_token(x_agent_token)
+    try:
+        archived = archive_over_experience(req.max_years)
+        restored = restore_within_experience(req.max_years)
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"ok": True, "archived": archived, "restored": restored}
+
+
+@app.get("/api/v1/jobboard/postings/over-experience")
+def jobboard_count_over_experience(
+    max_years: int = 4,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Preview how many live postings a threshold would archive."""
+    _require_agent_token(x_agent_token)
+    try:
+        return {"count": count_over_experience(max_years)}
+    except Exception as e:
+        raise _to_http_error(e)
+
+
+@app.get("/settings/{key}")
+def settings_get(key: str) -> dict[str, Any]:
+    """Read one Setting value (used for scrape-level Job Board config)."""
+    return {"key": key, "value": get_setting(key)}
+
+
+@app.put("/settings/{key}")
+def settings_put(key: str, body: dict[str, Any]) -> dict[str, bool]:
+    value = body.get("value")
+    if value is None:
+        raise HTTPException(status_code=422, detail="value is required")
+    set_setting(key, str(value))
     return {"ok": True}
 
 
-@app.get("/mail")
-async def mail_inbox(limit: int = 50) -> dict[str, Any]:
-    """Live read of the user's Gmail INBOX over IMAP using the stored app password.
-
-    `imaplib` is sync/blocking, so we hand the call off to FastAPI's worker
-    threadpool via asyncio.to_thread — that way one in-flight inbox or body
-    fetch doesn't park the event loop and stall every other route.
-    """
-    capped = max(1, min(limit, 200))
-    address = get_setting(GMAIL_ADDRESS_KEY)
-    app_password = get_setting(GMAIL_APP_PASSWORD_KEY)
-    if not address or not app_password:
-        return {"configured": False, "address": address, "messages": []}
-
+@app.get("/api/v1/jobboard/postings/unalerted")
+def jobboard_unalerted_postings(
+    since: datetime | None = None,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Postings eligible for the next alert, joined to their company."""
+    _require_agent_token(x_agent_token)
     try:
-        messages = await asyncio.to_thread(
-            fetch_inbox, address, app_password, capped
-        )
-    except GmailAuthError as exc:
-        raise HTTPException(status_code=401, detail=str(exc))
-    except GmailReadError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-    return {"configured": True, "address": address, "messages": messages}
+        postings = list_unalerted_postings(window_start=since)
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"postings": postings}
 
 
-@app.get("/mail/{uid}")
-async def mail_message(uid: str) -> dict[str, Any]:
-    """Fetch one message's full body by IMAP UID. Marks the message as read."""
-    address = get_setting(GMAIL_ADDRESS_KEY)
-    app_password = get_setting(GMAIL_APP_PASSWORD_KEY)
-    if not address or not app_password:
-        raise HTTPException(status_code=400, detail="Gmail isn't connected.")
+@app.get("/api/v1/jobboard/alert-runs/watermark")
+def jobboard_alert_watermark(
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """finishedAt of the last SENT alert — the window start for the next one."""
+    _require_agent_token(x_agent_token)
     try:
-        msg = await asyncio.to_thread(
-            fetch_message, address, app_password, uid
-        )
-    except GmailAuthError as exc:
-        raise HTTPException(status_code=401, detail=str(exc))
-    except GmailReadError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-    if msg is None:
-        raise HTTPException(status_code=404, detail=f"No message with UID {uid}")
-    return msg
+        at = last_sent_alert_at()
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"watermark": at.isoformat() if at else None}
 
 
-class MailSendRequest(BaseModel):
-    to: str = Field(..., min_length=3, max_length=320)
-    subject: str = Field(..., max_length=998)
-    body: str = Field(..., max_length=200_000)
-    inReplyTo: str | None = Field(default=None, max_length=998)
-    references: str | None = Field(default=None, max_length=4000)
-
-
-@app.post("/mail/send")
-def mail_send(req: MailSendRequest) -> dict[str, Any]:
-    """Send a one-off email (reply / forward / new) using stored Gmail creds.
-
-    Unlike /reach-out/{id}/send, this does NOT persist a ReachOut row and
-    does NOT add open/click tracking — it's a plain SMTP send for inbox
-    interactions.
-    """
-    address = get_setting(GMAIL_ADDRESS_KEY)
-    app_password = get_setting(GMAIL_APP_PASSWORD_KEY)
-    from_name = get_setting(GMAIL_FROM_NAME_KEY)
-    if not address or not app_password:
-        raise HTTPException(
-            status_code=400,
-            detail="Gmail isn't connected. Add your address + app password first.",
-        )
-    if "@" not in req.to:
-        raise HTTPException(status_code=400, detail="Recipient must be an email address.")
-    if not req.subject.strip():
-        raise HTTPException(status_code=400, detail="Subject is empty.")
-    if not req.body.strip():
-        raise HTTPException(status_code=400, detail="Body is empty.")
-
+@app.post("/api/v1/jobboard/alert-runs")
+def jobboard_create_alert_run(
+    req: AlertRunCreateRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """Open a AlertRun row before attempting a send."""
+    _require_agent_token(x_agent_token)
     try:
-        send_gmail(
-            from_addr=address,
-            app_password=app_password,
-            to_addr=req.to.strip(),
-            subject=req.subject,
-            body=req.body,
-            from_name=from_name,
-            in_reply_to=req.inReplyTo or None,
-            references=req.references or None,
+        run_id = create_alert_run(req.window_start, req.window_end)
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"ok": True, "id": run_id}
+
+
+@app.post("/api/v1/jobboard/alert-runs/{run_id}/close")
+def jobboard_close_alert_run(
+    run_id: str,
+    req: AlertRunCloseRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, bool]:
+    """Close a AlertRun and stamp its postings — atomically. See close_alert_run."""
+    _require_agent_token(x_agent_token)
+    try:
+        close_alert_run(
+            run_id,
+            status=req.status,
+            new_count=req.new_count,
+            company_count=req.company_count,
+            posting_ids=req.posting_ids,
+            error=req.error,
         )
-    except GmailAuthError as exc:
-        raise HTTPException(status_code=401, detail=str(exc))
-    except GmailSendError as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        raise _to_http_error(e)
+    return {"ok": True}
+
+
+@app.post("/api/v1/jobboard/postings/{posting_id}/link")
+def jobboard_link_posting(
+    posting_id: str,
+    req: PostingLinkRequest,
+    x_agent_token: str | None = Header(default=None),
+) -> dict[str, bool]:
+    """Point a posting at the JobApplication created from it ("Track")."""
+    _require_agent_token(x_agent_token)
+    try:
+        ok = link_posting_to_application(posting_id, req.job_application_id)
+    except Exception as e:
+        raise _to_http_error(e)
+    if not ok:
+        raise HTTPException(status_code=404, detail="posting not found")
     return {"ok": True}
 
 

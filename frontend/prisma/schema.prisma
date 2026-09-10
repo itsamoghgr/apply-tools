@@ -72,6 +72,7 @@ model JobApplication {
   updatedAt         DateTime  @updatedAt
   leads             JobApplicationLead[]
   reachOuts         ReachOut[]
+  jobPostings       JobPosting[]
 
   @@index([createdAt])
   @@index([status])
@@ -199,10 +200,14 @@ model ResumeProfile {
   skills      Json     @default("[]")
   projects    Json     @default("[]")
   sectionOrder Json    @default("[]")
+  // Slug of the LaTeX shell this resume renders with (backend/resume_templates.py).
+  // Unknown/legacy values fall back to the default template at render time, so
+  // this never has to be validated here.
+  template    String   @default("classic")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   // Companion plaintext Resume synced from this profile so it can be selected
-  // in the applications / reach-out / AI pickers. Cascade-deletes with this row.
+  // in the applications / AI pickers. Cascade-deletes with this row.
   resume      Resume?
 
   @@index([updatedAt])
@@ -264,4 +269,104 @@ model Skill {
   order     Int      @default(0)
 
   @@index([profileId, order])
+}
+
+// ── Job Board ─────────────────────────────────────────────────────────────────
+// Career-page monitor. The agent service (agent_server/, port 8002) scrapes each
+// watched company's board every 3h and writes matching postings here over HTTP
+// via backend /api/v1/jobboard/*; the UI reads them directly through Prisma.
+//
+// Schema applied OUT-OF-BAND via frontend/prisma/sql/jobboard_migration.sql
+// (NOT via prisma migrate — this DB has drifted from migration history). Mirror
+// any change into that file by hand and re-run `npx prisma generate`.
+
+// A career page under watch. One row per URL you add.
+model WatchedCompany {
+  id            String    @id
+  name          String
+  careerUrl     String    @unique
+  domain        String?
+  logoUrl       String?
+  // greenhouse | lever | ashby | smartrecruiters | generic — detected from
+  // careerUrl at add time and stored so it stays visible/correctable in the UI.
+  ats           String?
+  atsSlug       String?
+  // null = inherit the global matcher set (Setting 'jobboard.roleMatchers').
+  roleFilter    Json?
+  // Scrape config — these DISCARD at scrape time (see jobboard_migration.sql).
+  maxAgeDays    Int?
+  countryFilter Json?
+  active        Boolean   @default(true)
+  // Set once the first-cycle backlog seed completes. Until then the whole board
+  // is written with isNew=false, so adding a company never floods a alert.
+  seededAt      DateTime?
+  lastCheckedAt DateTime?
+  lastStatus    String?
+  lastError     String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  postings      JobPosting[]
+
+  @@index([active])
+}
+
+// A role found on a watched board that matched the role filter. Non-matching
+// postings are counted for observability but never stored.
+model JobPosting {
+  id               String    @id
+  watchedCompanyId String
+  watchedCompany   WatchedCompany @relation(fields: [watchedCompanyId], references: [id], onDelete: Cascade)
+  // ATS external id when the source provides one, else a sha1 of the normalized
+  // title + location + url path. See agent_server/jobboard/matcher.py.
+  dedupKey         String
+  externalId       String?
+  title            String
+  matchedRole      String
+  location         String?
+  url              String
+  // Source-provided posting date. null when the board doesn't say — novelty is
+  // decided by dedupKey, never by this column.
+  postedAt         DateTime?
+  // Minimum years of experience parsed from the JD; null = not stated.
+  minYears         Int?
+  // ISO-3166 alpha-2 parsed from `location`; null when unresolvable.
+  country          String?
+  firstSeenAt      DateTime  @default(now())
+  // false for rows written by a company's seed cycle (pre-existing backlog).
+  isNew            Boolean   @default(true)
+  // Stamped when a alert reports this posting, so it is never reported twice.
+  alertRunId      String?
+  // Set when the posting disappears from the board. Rows are NEVER deleted.
+  archivedAt       DateTime?
+  jobApplicationId String?
+  jobApplication   JobApplication? @relation(fields: [jobApplicationId], references: [id], onDelete: SetNull)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  // THE central invariant: every posting write is an ON CONFLICT DO UPDATE
+  // against this index, which is what makes a monitor cycle idempotent.
+  @@unique([watchedCompanyId, dedupKey])
+  @@index([alertRunId])
+  // NOTE: three partial indexes (unalerted, company-live) exist at the DB level
+  // from jobboard_migration.sql. Prisma can't express `WHERE`, so they are not
+  // redeclared here — same treatment as Lead.domain's partial unique index.
+}
+
+// One row per alert attempt. finishedAt of the latest status='sent' row is the
+// watermark bounding the next alert window, so a failed or delayed run carries
+// its postings forward instead of dropping them.
+model AlertRun {
+  id           String    @id
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
+  // null only for the first-ever alert, which has no prior watermark.
+  windowStart  DateTime?
+  windowEnd    DateTime
+  newCount     Int       @default(0)
+  companyCount Int       @default(0)
+  // pending | sent | skipped | failed
+  status       String    @default("pending")
+  error        String?
+
+  @@index([startedAt])
 }

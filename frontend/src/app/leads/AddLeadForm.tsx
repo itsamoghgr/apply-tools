@@ -139,7 +139,7 @@ export default function AddLeadForm({ onClose }: { onClose: () => void }) {
 
         <Field
           label="LinkedIn profile (paste from the profile PDF)"
-          help="Paste the raw text. The Reach Out composer reads this when generating personalized emails."
+          help="Paste the raw text from their LinkedIn profile."
         >
           <textarea
             value={form.linkedinProfile}

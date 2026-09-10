@@ -37,6 +37,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { saveResumeProfile, deleteResumeProfile, setResumeProfileActive } from "./actions";
 import Modal from "./Modal";
+import TemplatePicker from "./TemplatePicker";
 import BoldEditor from "./BoldEditor";
 import {
   type ResumeProfileData,
@@ -64,6 +65,25 @@ import {
 // dropping them as items are removed) and gives back a `reorder` helper that
 // moves an item by old→new index. The parent applies the *same* index move to
 // the real data array, so IDs and data stay aligned without touching storage.
+
+// Build the export/download filename: `<first>_<last>_resume_<roletag>`
+// (lowercase, underscores). The person part is first + last name only — any
+// middle names/initials are dropped ("Amogh G Ramagiri" -> "amogh_ramagiri").
+// The role tag (e.g. "ds12") isn't stored separately — we parse it out of the
+// resume name by lowercasing and stripping non-alphanumerics ("DS 12" ->
+// "ds12"). Falls back to "resume" when the name parts are empty.
+function buildResumeFilename(fullName: string, resumeName: string): string {
+  const words = fullName
+    .toLowerCase()
+    .split(/\s+/)
+    .map((w) => w.replace(/[^a-z0-9]+/g, ""))
+    .filter(Boolean);
+  const person =
+    words.length > 1 ? `${words[0]}_${words[words.length - 1]}` : (words[0] ?? "");
+  const roleTag = resumeName.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const base = person ? `${person}_resume` : "resume";
+  return roleTag ? `${base}_${roleTag}` : base;
+}
 
 let _idSeq = 0;
 function nextId(): string {
@@ -519,6 +539,19 @@ export default function ResumeBuilderEditor({
     setDirty(true);
   }
 
+  // Switching template changes how much fits on a page, so the last render's
+  // page count no longer describes this resume. Clear it (rather than leave a
+  // stale value) so export isn't wrongly blocked — or wrongly allowed — until
+  // the next Preview/Export re-renders and reports a fresh count.
+  function setTemplate(slug: string) {
+    if (slug === profile.template) return;
+    setPageCount(null);
+    update((p) => {
+      p.template = slug;
+      return p;
+    });
+  }
+
   function setHeader<K extends keyof ResumeProfileData["header"]>(
     key: K,
     val: string,
@@ -529,7 +562,7 @@ export default function ResumeBuilderEditor({
     });
   }
 
-  // Toggle whether this resume appears in the applications / reach-out / AI
+  // Toggle whether this resume appears in the applications / AI
   // pickers. Optimistic: flip immediately, revert on failure.
   function toggleActive() {
     if (togglingActive) return;
@@ -583,6 +616,12 @@ export default function ResumeBuilderEditor({
   }
 
   async function exportPdf() {
+    // The download filename ends in the role tag parsed from the resume name
+    // (e.g. "ds12"), so a blank name would produce an untagged file. Block it.
+    if (!name.trim()) {
+      toast.error("Name this resume (e.g. “DS 12”) before exporting.");
+      return;
+    }
     setExporting(true);
     try {
       const { blob, pages } = await fetchPdfBlob();
@@ -597,7 +636,7 @@ export default function ResumeBuilderEditor({
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `Resume_${name.replace(/[^A-Za-z0-9._-]+/g, "_")}.pdf`;
+      a.download = `${buildResumeFilename(profile.header.fullName, name)}.pdf`;
       a.click();
       URL.revokeObjectURL(url);
       toast.success("PDF downloaded");
@@ -947,6 +986,11 @@ export default function ResumeBuilderEditor({
         >
           <Gauge className="h-4 w-4" /> Score role
         </button>
+        <TemplatePicker
+          value={profile.template}
+          onChange={setTemplate}
+          disabled={previewing || exporting}
+        />
         <button
           type="button"
           onClick={preview}
@@ -966,7 +1010,7 @@ export default function ResumeBuilderEditor({
           disabled={togglingActive}
           title={
             active
-              ? "This resume is selectable in the applications, reach-out, and AI pickers. Click to hide it."
+              ? "This resume is selectable in the applications and AI pickers. Click to hide it."
               : "This resume is hidden from the pickers. Click to make it selectable."
           }
           className={`btn btn-sm gap-1.5 ${active ? "btn-success btn-outline" : "btn-ghost"}`}

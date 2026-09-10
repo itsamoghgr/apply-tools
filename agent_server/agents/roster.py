@@ -177,14 +177,14 @@ def find_roster(
             find_contact = _fc
             if deps is None:
                 from agent_server.agents.deps import AgentDeps
-                from agent_server.agents.llm import AnthropicLLM
+                from agent_server.agents.llm import build_llm
                 from agent_server.stages.normalize import normalize_domain as _nd
                 from agent_server.web import fetch_page, search
 
                 deps = AgentDeps(
                     search=search,
                     fetch_page=fetch_page,
-                    llm=AnthropicLLM(),
+                    llm=build_llm(),
                     audit=lambda *a, **k: None,
                     normalize_domain=_nd,
                 )

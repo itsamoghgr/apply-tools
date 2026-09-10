@@ -6,8 +6,10 @@ Kept deliberately flat and readable — one place to see every knob the service 
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -22,6 +24,73 @@ def _int(name: str, default: int) -> int:
         return int(os.environ.get(name, default))
     except (TypeError, ValueError):
         return default
+
+
+def monitor_hours_expr(interval_h: int, start: str, end: str) -> str:
+    """An active window + an interval as an APScheduler `hour` field.
+
+    3h over 07:00-23:00 -> "7,10,13,16,19,22". Equal or unparseable bounds mean
+    no window, i.e. every Nth hour of the day.
+    """
+    start_t = parse_hhmm(start)
+    end_t = parse_hhmm(end)
+    step = max(1, interval_h)
+    if start_t is None or end_t is None or start_t[0] == end_t[0]:
+        return f"*/{step}"
+    start_h, end_h = start_t[0], end_t[0]
+    # An end before the start is an overnight window (e.g. 22:00-06:00).
+    hours = (
+        list(range(start_h, end_h + 1))
+        if start_h <= end_h
+        else list(range(start_h, 24)) + list(range(0, end_h + 1))
+    )
+    return ",".join(str(h) for h in hours[::step])
+
+
+_DAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def parse_hhmm(value: str) -> tuple[int, int] | None:
+    """"HH:MM" -> (hour, minute), or None when malformed.
+
+    Returning None rather than raising is deliberate: a typo in a schedule knob
+    must fall back to the default schedule, never stop the service from booting.
+    """
+    m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*", value or "")
+    if not m:
+        return None
+    hour, minute = int(m.group(1)), int(m.group(2))
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return hour, minute
+
+
+def parse_times(value: str) -> list[tuple[int, int]]:
+    """"09:00,18:30" -> [(9,0),(18,30)], sorted, de-duplicated, bad entries dropped."""
+    seen = {parse_hhmm(part) for part in (value or "").split(",") if part.strip()}
+    return sorted(t for t in seen if t is not None)
+
+
+def parse_days(value: str) -> str | None:
+    """A day spec -> an APScheduler day_of_week string, or None for "every day".
+
+    Accepts "mon-fri", "mon,wed,fri", "sat-sun" and "*". Anything unrecognised
+    yields None, which APScheduler reads as every day — the safe direction, since
+    a bad value should widen the schedule, never silently mute alerts.
+    """
+    raw = (value or "").strip().lower()
+    if not raw or raw in ("*", "all", "daily", "everyday", "every day"):
+        return None
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    out: list[str] = []
+    for part in parts:
+        if "-" in part:
+            start, _, end = part.partition("-")
+            if start.strip() in _DAY_NAMES and end.strip() in _DAY_NAMES:
+                out.append(f"{start.strip()}-{end.strip()}")
+        elif part in _DAY_NAMES:
+            out.append(part)
+    return ",".join(out) or None
 
 
 @dataclass(frozen=True)
@@ -75,6 +144,21 @@ class Config:
     # Model id used when llm_provider == "anthropic" (direct API).
     llm_model: str = os.environ.get("AGENT_LLM_MODEL", "claude-opus-4-8")
 
+    # Google Gemini (AGENT_LLM_PROVIDER=gemini). Uses an AI Studio API key via
+    # Gemini's OpenAI-compatible endpoint — NOT Vertex AI, which authenticates
+    # with ADC/service accounts instead. Key: https://aistudio.google.com/apikey
+    gemini_api_key: str | None = os.environ.get("GEMINI_API_KEY") or None
+    gemini_model: str = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+    # Vertex AI (AGENT_LLM_PROVIDER=vertex) — the same Gemini models billed to a
+    # GCP project, authenticated with Application Default Credentials instead of
+    # an API key. Required when an org policy disallows API keys.
+    #   gcloud auth application-default login
+    #   gcloud config set project <PROJECT_ID>
+    vertex_project: str | None = os.environ.get("VERTEX_PROJECT") or None
+    vertex_location: str = os.environ.get("VERTEX_LOCATION", "us-central1")
+    vertex_model: str = os.environ.get("VERTEX_MODEL", "google/gemini-2.5-flash")
+
     # Structured-floor sources
     product_hunt_token: str | None = os.environ.get("PRODUCT_HUNT_TOKEN") or None
     yc_oss_url: str = os.environ.get(
@@ -104,6 +188,103 @@ class Config:
         "head of engineering,vp engineering,engineering manager,cto,"
         "director of engineering,founder",
     )
+
+    # ── Job Board (career-page monitor) ────────────────────────────────────
+    # A watchlist-driven pipeline, separate from the lead-gen hunt above: it
+    # only visits career pages the user explicitly added. See
+    # docs/job_board_design.md.
+    jobboard_enabled: bool = (
+        os.environ.get("JOBBOARD_ENABLED", "true").lower() == "true"
+    )
+
+    # ── When to scrape, and when to alert ──────────────────────────────────
+    # Every schedule knob below is interpreted in `jobboard_timezone`, NOT UTC
+    # and not the machine's zone: "alert me at 09:00" has to mean 09:00 where
+    # the user is, and must keep meaning that across a DST shift.
+    jobboard_timezone: str = os.environ.get("JOBBOARD_TIMEZONE", "UTC")
+
+    # SCRAPE: how often to re-check boards, and the window in which that is
+    # allowed to happen. The active window exists because career pages publish
+    # during business hours — scraping at 04:00 spends requests to learn nothing.
+    # Leaving start == end means "no window", i.e. run around the clock.
+    jobboard_monitor_interval_h: int = _int("JOBBOARD_MONITOR_INTERVAL_H", 3)
+    jobboard_monitor_active_start: str = os.environ.get(
+        "JOBBOARD_MONITOR_ACTIVE_START", "07:00"
+    )
+    jobboard_monitor_active_end: str = os.environ.get(
+        "JOBBOARD_MONITOR_ACTIVE_END", "23:00"
+    )
+    jobboard_monitor_days: str = os.environ.get("JOBBOARD_MONITOR_DAYS", "*")
+
+    # ALERT: explicit times-of-day beat an interval here. An interval drifts —
+    # "every 6h" from a 02:14 boot mails at 02:14 forever — whereas a job hunter
+    # wants the mail at a predictable hour. JOBBOARD_ALERT_AT, when set, wins;
+    # the interval remains as the fallback for anyone who prefers it.
+    jobboard_alert_interval_h: int = _int("JOBBOARD_ALERT_INTERVAL_H", 6)
+    jobboard_alert_at: str = os.environ.get("JOBBOARD_ALERT_AT", "09:00,18:00")
+    jobboard_alert_days: str = os.environ.get("JOBBOARD_ALERT_DAYS", "*")
+    # Fallback pagination cap for custom (non-ATS) career pages. ATS boards
+    # return everything in one call and never paginate.
+    jobboard_max_pages: int = _int("JOBBOARD_MAX_PAGES", 10)
+    # Prefer a same-day view when the source can provide one.
+    jobboard_today_only: bool = (
+        os.environ.get("JOBBOARD_TODAY_ONLY", "true").lower() == "true"
+    )
+    # Mail a "nothing new" heartbeat instead of skipping an empty alert.
+    jobboard_alert_heartbeat: bool = (
+        os.environ.get("JOBBOARD_ALERT_HEARTBEAT", "false").lower() == "true"
+    )
+    jobboard_company_sleep_min_s: float = float(
+        os.environ.get("JOBBOARD_COMPANY_SLEEP_MIN_S", "1.0")
+    )
+    jobboard_company_sleep_max_s: float = float(
+        os.environ.get("JOBBOARD_COMPANY_SLEEP_MAX_S", "3.0")
+    )
+
+    # Alert mail transport. A small self-contained SMTP sender lives in
+    # jobboard/mailer.py — deliberately NOT a revival of backend/mail.py, whose
+    # Gmail-inbox and click-tracking baggage was removed in 8cef324.
+    jobboard_smtp_host: str = os.environ.get("JOBBOARD_SMTP_HOST", "smtp.gmail.com")
+    jobboard_smtp_port: int = _int("JOBBOARD_SMTP_PORT", 465)
+    jobboard_smtp_user: str | None = os.environ.get("JOBBOARD_SMTP_USER") or None
+    jobboard_smtp_app_password: str | None = (
+        os.environ.get("JOBBOARD_SMTP_APP_PASSWORD") or None
+    )
+    jobboard_alert_to: str | None = os.environ.get("JOBBOARD_ALERT_TO") or None
+
+    @property
+    def tzinfo(self) -> ZoneInfo:
+        """`jobboard_timezone` as a real tzinfo, falling back to UTC.
+
+        An unknown zone name must not stop the service booting, so a bad value
+        degrades to UTC rather than raising out of Config construction.
+        """
+        try:
+            return ZoneInfo(self.jobboard_timezone)
+        except Exception:  # noqa: BLE001 — ZoneInfoNotFoundError + bad input
+            return ZoneInfo("UTC")
+
+    @property
+    def monitor_hour_expr(self) -> str:
+        """The active window as an APScheduler `hour` field."""
+        return monitor_hours_expr(
+            self.jobboard_monitor_interval_h,
+            self.jobboard_monitor_active_start,
+            self.jobboard_monitor_active_end,
+        )
+
+    @property
+    def monitor_day_of_week(self) -> str | None:
+        return parse_days(self.jobboard_monitor_days)
+
+    @property
+    def alert_times(self) -> list[tuple[int, int]]:
+        """Explicit alert times-of-day; empty means "use the interval instead"."""
+        return parse_times(self.jobboard_alert_at)
+
+    @property
+    def alert_day_of_week(self) -> str | None:
+        return parse_days(self.jobboard_alert_days)
 
     @property
     def roster_role_keywords(self) -> frozenset[str]:

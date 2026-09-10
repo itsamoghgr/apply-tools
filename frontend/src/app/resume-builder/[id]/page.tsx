@@ -27,9 +27,10 @@ export default async function EditResumeProfilePage({
     skills: row.skills,
     projects: row.projects,
     sectionOrder: row.sectionOrder,
+    template: row.template,
   });
 
-  // Whether this resume shows in the applications / reach-out / AI pickers.
+  // Whether this resume shows in the applications / AI pickers.
   // No companion yet (legacy profile) reads as inactive until toggled/saved.
   const initialActive = row.resume?.isActive ?? false;
 

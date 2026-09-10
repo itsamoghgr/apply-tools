@@ -8,14 +8,6 @@ import LeadsRow from "./LeadsRow";
 import AddLeadForm from "./AddLeadForm";
 import FindEmailsProgress, { type FindRow } from "./FindEmailsProgress";
 
-export type LeadReachOut = {
-  id: string;
-  status: string;
-  subject: string;
-  sentAt: string | null;
-  createdAt: string;
-};
-
 export type Lead = {
   id: string;
   name: string;
@@ -29,7 +21,6 @@ export type Lead = {
   notes: string | null;
   createdAt: string;
   updatedAt: string;
-  reachOuts: LeadReachOut[];
 };
 
 export default function LeadsTable({
@@ -221,7 +212,6 @@ export default function LeadsTable({
                 <th>Company</th>
                 <th>Role</th>
                 <th>LinkedIn</th>
-                <th className="text-center">Reach‑outs</th>
                 <th className="text-center">Replied</th>
                 <th>Updated</th>
                 <th></th>

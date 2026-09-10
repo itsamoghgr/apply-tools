@@ -123,6 +123,16 @@ _DATETIME_COLUMNS = frozenset(
         "sentAt",
         "linkedAt",
         "lastSentAt",
+        # Job Board (WatchedCompany / JobPosting / AlertRun).
+        "seededAt",
+        "lastCheckedAt",
+        "postedAt",
+        "firstSeenAt",
+        "archivedAt",
+        "startedAt",
+        "finishedAt",
+        "windowStart",
+        "windowEnd",
     }
 )
 
@@ -368,178 +378,8 @@ def list_leads_for_application(app_id: str) -> list[dict]:
         return _rows_to_dicts(rows)
 
 
-def list_reach_outs_for_application(app_id: str) -> list[dict]:
-    with get_conn() as conn:
-        rows = conn.execute(
-            text(
-                'SELECT * FROM "ReachOut" WHERE "jobApplicationId" = :app '
-                'ORDER BY "createdAt" DESC'
-            ),
-            {"app": app_id},
-        ).fetchall()
-        return _rows_to_dicts(rows)
-
-
 # -----------------------------------------------------------------------------
-# ReachOut CRUD (LinkedIn-driven outreach emails: draft, edit, send).
-# -----------------------------------------------------------------------------
-
-REACH_OUT_INSERT_COLUMNS = (
-    "recipientName",
-    "recipientEmail",
-    "linkedinProfile",
-    "contextNote",
-    "resumeId",
-    "leadId",
-    "jobApplicationId",
-    "channel",
-    "subject",
-    "body",
-)
-
-REACH_OUT_PATCH_COLUMNS = (
-    "recipientName",
-    "recipientEmail",
-    "linkedinProfile",
-    "contextNote",
-    "resumeId",
-    "channel",
-    "subject",
-    "body",
-    "htmlBody",
-    "status",
-    "sentAt",
-    "errorMessage",
-)
-
-
-def _clean_reach_out_value(col: str, value):
-    if isinstance(value, str):
-        v = value.strip()
-        # recipientName / recipientEmail / linkedinProfile / subject / body
-        # are NOT NULL — keep empty strings out of UPDATEs by callers.
-        if v == "" and col in {
-            "contextNote",
-            "resumeId",
-            "leadId",
-            "jobApplicationId",
-            "errorMessage",
-            "sentAt",
-            "htmlBody",
-        }:
-            return None
-        return v
-    return value
-
-
-def insert_reach_out(fields: dict, *, require_content: bool = True) -> str:
-    """Insert a ReachOut row in 'draft' status. Returns the new id.
-
-    When `require_content` is True (default, used by the AI-generated path),
-    `linkedinProfile`, `subject`, and `body` must each be non-empty strings.
-    Set False for blank manual drafts where the user will fill in subject
-    and body inside the editor before sending — we still write empty
-    strings into those NOT NULL columns to keep the schema simple.
-    """
-    channel = (fields.get("channel") or "email").strip() or "email"
-    # Email channel needs an address; LinkedIn channels don't (the user
-    # pastes the message into LinkedIn manually).
-    base_required = (
-        ("recipientName", "recipientEmail") if channel == "email" else ("recipientName",)
-    )
-    # LinkedIn invitations have no subject (just a 300-char note).
-    if require_content:
-        if channel == "linkedin_invitation":
-            content_required = ("linkedinProfile", "body")
-        else:
-            content_required = ("linkedinProfile", "subject", "body")
-    else:
-        content_required = ()
-    for col in base_required + content_required:
-        v = fields.get(col)
-        if not (isinstance(v, str) and v.strip()):
-            raise ValueError(f"{col} is required")
-
-    row_id = secrets.token_urlsafe(12)
-    cleaned: dict = {"id": row_id}
-    for col in REACH_OUT_INSERT_COLUMNS:
-        if col in fields:
-            cleaned[col] = _clean_reach_out_value(col, fields[col])
-    # Backfill the NOT NULL content columns with empty strings when the
-    # caller skipped them (blank manual draft, or LinkedIn channels where
-    # subject/recipientEmail don't apply).
-    for col in ("recipientEmail", "linkedinProfile", "subject", "body"):
-        cleaned.setdefault(col, "")
-
-    cols = list(cleaned.keys())
-    col_sql = ", ".join(f'"{c}"' for c in cols)
-    bind_sql = ", ".join(f":{c}" for c in cols)
-    with get_conn() as conn:
-        conn.execute(
-            text(
-                f'INSERT INTO "ReachOut" ({col_sql}, "status", "updatedAt") '
-                f"VALUES ({bind_sql}, 'draft', CURRENT_TIMESTAMP)"
-            ),
-            cleaned,
-        )
-    return row_id
-
-
-def get_reach_out(row_id: str) -> dict | None:
-    with get_conn() as conn:
-        row = conn.execute(
-            text('SELECT * FROM "ReachOut" WHERE "id" = :id'), {"id": row_id}
-        ).fetchone()
-        return _row_to_dict(row) if row else None
-
-
-def update_reach_out(row_id: str, fields: dict) -> bool:
-    """Patch a ReachOut row. Only known columns are written. Returns True on hit."""
-    updates: dict = {}
-    for col in REACH_OUT_PATCH_COLUMNS:
-        if col in fields:
-            updates[col] = _clean_reach_out_value(col, fields[col])
-    if not updates:
-        return False
-
-    set_sql = (
-        ", ".join(f'"{c}" = :{c}' for c in updates)
-        + ', "updatedAt" = CURRENT_TIMESTAMP'
-    )
-    params = dict(updates, _id=row_id)
-    with get_conn() as conn:
-        cur = conn.execute(
-            text(f'UPDATE "ReachOut" SET {set_sql} WHERE "id" = :_id'), params
-        )
-        return cur.rowcount > 0
-
-
-def delete_reach_out(row_id: str) -> bool:
-    with get_conn() as conn:
-        cur = conn.execute(
-            text('DELETE FROM "ReachOut" WHERE "id" = :id'), {"id": row_id}
-        )
-        return cur.rowcount > 0
-
-
-def list_reach_outs() -> list[dict]:
-    with get_conn() as conn:
-        rows = conn.execute(
-            text('SELECT * FROM "ReachOut" ORDER BY "createdAt" DESC')
-        ).fetchall()
-        return _rows_to_dicts(rows)
-
-
-# Event recording moved off-box: see tracking-sidecar/main.py. The local
-# backend no longer holds a per-event row or aggregate counters; both are
-# fetched on demand from the sidecar via `/reach-out/{id}/events` and
-# `/reach-out/aggregates`.
-
-
-# -----------------------------------------------------------------------------
-# Lead CRUD (the people you might reach out to). A Lead is the master
-# record; ReachOut rows can reference one via ReachOut.leadId so each
-# Lead's profile shows how many emails were sent to them.
+# Lead CRUD. Leads are people attached to applications.
 # -----------------------------------------------------------------------------
 
 LEAD_INSERT_COLUMNS = (
@@ -662,80 +502,12 @@ def get_lead(lead_id: str) -> dict | None:
 
 
 def list_leads() -> list[dict]:
-    """Return every Lead with reach-out aggregates joined in.
-
-    A single LEFT JOIN keeps this O(N) instead of N+1; we surface
-    `reachOutCount`, `lastSentAt`, and `lastStatus` so the dashboard can
-    show "3 emails, last sent 2d ago" without a follow-up query.
-    """
+    """Return every Lead, newest first."""
     with get_conn() as conn:
         rows = conn.execute(
-            text(
-                """
-                SELECT
-                    l.*,
-                    COALESCE(agg."reachOutCount", 0) AS "reachOutCount",
-                    agg."lastSentAt" AS "lastSentAt",
-                    agg."lastStatus" AS "lastStatus"
-                FROM "Lead" l
-                LEFT JOIN (
-                    SELECT
-                        ro."leadId" AS "leadId",
-                        COUNT(*) AS "reachOutCount",
-                        MAX(ro."sentAt") AS "lastSentAt",
-                        -- pick the status of the most recent reach-out
-                        (SELECT r2."status"
-                           FROM "ReachOut" r2
-                          WHERE r2."leadId" = ro."leadId"
-                          ORDER BY r2."createdAt" DESC, r2."id" DESC
-                          LIMIT 1) AS "lastStatus"
-                    FROM "ReachOut" ro
-                    WHERE ro."leadId" IS NOT NULL
-                    GROUP BY ro."leadId"
-                ) agg ON agg."leadId" = l."id"
-                ORDER BY l."createdAt" DESC
-                """
-            )
+            text('SELECT * FROM "Lead" ORDER BY "createdAt" DESC')
         ).fetchall()
         return _rows_to_dicts(rows)
-
-
-def find_or_create_lead_by_email(
-    name: str,
-    email: str | None,
-    *,
-    linkedin_profile: str | None = None,
-    linkedin_url: str | None = None,
-    current_company: str | None = None,
-    role: str | None = None,
-) -> str | None:
-    """Look up a Lead by email; create one if missing. Returns the lead id,
-    or None when no email was provided (so we don't accidentally create
-    nameless duplicate rows for every blank email).
-
-    Used by the ReachOut create paths to keep the Lead → ReachOut graph
-    populated automatically. Existing Lead rows are NOT mutated here —
-    callers can edit them on the Leads page if their data drifted.
-    """
-    if not (isinstance(email, str) and email.strip()):
-        return None
-    email_clean = email.strip()
-    with get_conn() as conn:
-        row = conn.execute(
-            text('SELECT "id" FROM "Lead" WHERE "email" = :email'),
-            {"email": email_clean},
-        ).fetchone()
-        if row:
-            return row.id
-    fields = {
-        "name": name.strip() if isinstance(name, str) and name.strip() else email_clean,
-        "email": email_clean,
-        "linkedinProfile": linkedin_profile,
-        "linkedinUrl": linkedin_url,
-        "currentCompany": current_company,
-        "role": role,
-    }
-    return insert_lead(fields)
 
 
 def _as_unique_violation(exc: IntegrityError) -> Exception:
@@ -763,7 +535,7 @@ def _as_unique_violation(exc: IntegrityError) -> Exception:
 
 
 # -----------------------------------------------------------------------------
-# Setting key/value store (used for Gmail credentials).
+# Setting key/value store.
 # -----------------------------------------------------------------------------
 
 
@@ -1089,3 +861,510 @@ def platform_upsert_lead(payload: dict) -> dict:
             "founder_person_lead_failed", domain=domain, error=str(exc)
         )
     return result
+
+
+# -----------------------------------------------------------------------------
+# Job Board (career-page monitor).
+#
+# Written by the agent service (agent_server/, port 8002) over HTTP via the
+# /api/v1/jobboard/* endpoints; read directly by the Next.js UI through Prisma.
+# Schema lives in frontend/prisma/sql/jobboard_migration.sql.
+#
+# The load-bearing invariant is the UNIQUE index on
+# ("watchedCompanyId", "dedupKey"): every posting write is an ON CONFLICT DO
+# UPDATE against it, so re-running a monitor cycle — or crashing halfway through
+# one — can never duplicate a posting.
+#
+# Nothing here deletes: postings that vanish from a board are stamped archivedAt.
+# -----------------------------------------------------------------------------
+
+WATCHED_COMPANY_COLUMNS = (
+    "name",
+    "careerUrl",
+    "domain",
+    "logoUrl",
+    "ats",
+    "atsSlug",
+    "active",
+    "maxAgeDays",
+    "seededAt",
+    "lastCheckedAt",
+    "lastStatus",
+    "lastError",
+)
+
+# JSONB columns on WatchedCompany — written with an explicit ::jsonb cast and
+# json.dumps'd, mirroring JOB_APP_JSON_COLUMNS above.
+WATCHED_COMPANY_JSON_COLUMNS = ("roleFilter", "countryFilter")
+
+
+def list_watched_companies(active_only: bool = True) -> list[dict]:
+    """Return watched companies (the monitor's work list), newest first."""
+    sql = 'SELECT * FROM "WatchedCompany"'
+    if active_only:
+        sql += ' WHERE "active" = true'
+    sql += ' ORDER BY "createdAt" DESC'
+    with get_conn() as conn:
+        return _rows_to_dicts(conn.execute(text(sql)).fetchall())
+
+
+def get_watched_company(company_id: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            text('SELECT * FROM "WatchedCompany" WHERE "id" = :id'),
+            {"id": company_id},
+        ).fetchone()
+        return _row_to_dict(row) if row else None
+
+
+def upsert_watched_company(fields: dict) -> dict:
+    """Insert or update a watched company, keyed on careerUrl.
+
+    Returns ``{"id": str, "created": bool}``. Adding the same career page twice
+    edits the existing row rather than raising, mirroring platform_upsert_lead.
+    On update, only the columns actually supplied are overwritten — COALESCE
+    keeps the stored value when an incoming one is NULL, so a partial patch from
+    the monitor can't blank out user-entered fields like `name` or `logoUrl`.
+    """
+    career_url = (fields.get("careerUrl") or "").strip()
+    if not career_url:
+        raise ValueError("careerUrl is required")
+    if not (fields.get("name") or "").strip():
+        raise ValueError("name is required")
+
+    params: dict[str, Any] = {
+        "id": secrets.token_urlsafe(12),
+        "careerUrl": career_url,
+    }
+    for col in WATCHED_COMPANY_COLUMNS:
+        if col == "careerUrl":
+            continue
+        v = fields.get(col)
+        if isinstance(v, str):
+            v = v.strip() or None
+        params[col] = v
+    for col in WATCHED_COMPANY_JSON_COLUMNS:
+        v = fields.get(col)
+        params[col] = None if v is None else json.dumps(v)
+
+    # `active` is NOT NULL with a default — never let an omitted key write NULL.
+    if params.get("active") is None:
+        params["active"] = True
+
+    sql = text(
+        """
+        INSERT INTO "WatchedCompany" (
+            "id", "name", "careerUrl", "domain", "logoUrl", "ats", "atsSlug",
+            "roleFilter", "countryFilter", "maxAgeDays", "active", "seededAt",
+            "lastCheckedAt", "lastStatus", "lastError", "updatedAt"
+        ) VALUES (
+            :id, :name, :careerUrl, :domain, :logoUrl, :ats, :atsSlug,
+            CAST(:roleFilter AS jsonb), CAST(:countryFilter AS jsonb), :maxAgeDays,
+            :active, :seededAt, :lastCheckedAt, :lastStatus, :lastError,
+            CURRENT_TIMESTAMP
+        )
+        ON CONFLICT ("careerUrl") DO UPDATE SET
+            "name"       = COALESCE(EXCLUDED."name",       "WatchedCompany"."name"),
+            "domain"     = COALESCE(EXCLUDED."domain",     "WatchedCompany"."domain"),
+            "logoUrl"    = COALESCE(EXCLUDED."logoUrl",    "WatchedCompany"."logoUrl"),
+            "ats"        = COALESCE(EXCLUDED."ats",        "WatchedCompany"."ats"),
+            "atsSlug"    = COALESCE(EXCLUDED."atsSlug",    "WatchedCompany"."atsSlug"),
+            "roleFilter" = COALESCE(EXCLUDED."roleFilter", "WatchedCompany"."roleFilter"),
+            "countryFilter" = COALESCE(EXCLUDED."countryFilter", "WatchedCompany"."countryFilter"),
+            "maxAgeDays" = COALESCE(EXCLUDED."maxAgeDays", "WatchedCompany"."maxAgeDays"),
+            "active"     = EXCLUDED."active",
+            "updatedAt"  = CURRENT_TIMESTAMP
+        RETURNING "id", (xmax = 0) AS created
+        """
+    )
+    try:
+        with get_conn() as conn:
+            row = conn.execute(sql, params).fetchone()
+    except IntegrityError as exc:
+        raise _as_unique_violation(exc) from exc
+    return {"id": row.id, "created": bool(row.created)}
+
+
+def update_watched_company(company_id: str, fields: dict) -> bool:
+    """Patch a WatchedCompany. Only known columns are written.
+
+    Used by the monitor to stamp lastCheckedAt / lastStatus / lastError /
+    seededAt after each company, and by the UI to toggle `active`. Returns True
+    if a row was updated.
+
+    Unlike upsert_watched_company, an explicit None here DOES clear the column —
+    that is how lastError is reset after a company recovers.
+    """
+    updates: dict[str, Any] = {}
+    for col in WATCHED_COMPANY_COLUMNS:
+        if col not in fields:
+            continue
+        v = fields[col]
+        if isinstance(v, str):
+            v = v.strip() or None
+        updates[col] = v
+
+    json_cols = [c for c in WATCHED_COMPANY_JSON_COLUMNS if c in fields]
+    for col in json_cols:
+        v = fields[col]
+        updates[col] = None if v is None else json.dumps(v)
+
+    if not updates:
+        return False
+
+    def _assign(c: str) -> str:
+        return f'"{c}" = CAST(:{c} AS jsonb)' if c in json_cols else f'"{c}" = :{c}'
+
+    set_sql = ", ".join(_assign(c) for c in updates) + ', "updatedAt" = CURRENT_TIMESTAMP'
+    params = dict(updates, _id=company_id)
+    with get_conn() as conn:
+        cur = conn.execute(
+            text(f'UPDATE "WatchedCompany" SET {set_sql} WHERE "id" = :_id'), params
+        )
+        return cur.rowcount > 0
+
+
+def upsert_job_postings(company_id: str, postings: list[dict]) -> dict:
+    """Bulk-upsert postings for one company, in ONE transaction.
+
+    Returns ``{"inserted": int, "updated": int, "new_ids": [...]}`` where
+    `new_ids` are the ids of rows that did not previously exist — that is
+    precisely the set of genuinely-new postings the alert should report.
+
+    ON CONFLICT ("watchedCompanyId", "dedupKey") DO UPDATE refreshes the mutable
+    display fields (title / location / url / postedAt / externalId / matchedRole)
+    and clears archivedAt, since a role that reappeared on the board is live
+    again.
+
+    It deliberately NEVER touches "isNew", "firstSeenAt", or "alertRunId": a
+    board re-listing an old role must not push it back into your inbox.
+
+    `isNew` is per-posting and supplied by the caller — the monitor passes False
+    for every row during a company's first (seed) cycle so the pre-existing
+    backlog is recorded without ever being reported.
+
+    Postgres's `xmax = 0` on the RETURNING row distinguishes a fresh INSERT from
+    a conflict-UPDATE, so the caller learns what was new without a second query.
+    """
+    if not postings:
+        return {"inserted": 0, "updated": 0, "new_ids": []}
+
+    sql = text(
+        """
+        INSERT INTO "JobPosting" (
+            "id", "watchedCompanyId", "dedupKey", "externalId", "title",
+            "matchedRole", "location", "url", "postedAt", "minYears", "country",
+            "isNew", "updatedAt"
+        ) VALUES (
+            :id, :watchedCompanyId, :dedupKey, :externalId, :title,
+            :matchedRole, :location, :url, :postedAt, :minYears, :country,
+            :isNew, CURRENT_TIMESTAMP
+        )
+        ON CONFLICT ("watchedCompanyId", "dedupKey") DO UPDATE SET
+            "title"       = EXCLUDED."title",
+            "matchedRole" = EXCLUDED."matchedRole",
+            "location"    = COALESCE(EXCLUDED."location",   "JobPosting"."location"),
+            "url"         = EXCLUDED."url",
+            "postedAt"    = COALESCE(EXCLUDED."postedAt",   "JobPosting"."postedAt"),
+            "minYears"    = COALESCE(EXCLUDED."minYears",   "JobPosting"."minYears"),
+            "country"     = COALESCE(EXCLUDED."country",    "JobPosting"."country"),
+            "externalId"  = COALESCE(EXCLUDED."externalId", "JobPosting"."externalId"),
+            "archivedAt"  = NULL,
+            "updatedAt"   = CURRENT_TIMESTAMP
+        RETURNING "id", (xmax = 0) AS created
+        """
+    )
+
+    inserted = 0
+    updated = 0
+    new_ids: list[str] = []
+
+    # One connection => one transaction for the whole batch: a mid-batch failure
+    # rolls the entire company's postings back rather than leaving them half
+    # written. The next cycle re-upserts them harmlessly.
+    with get_conn() as conn:
+        for p in postings:
+            dedup_key = (p.get("dedupKey") or "").strip()
+            title = (p.get("title") or "").strip()
+            url = (p.get("url") or "").strip()
+            if not (dedup_key and title and url):
+                raise ValueError("dedupKey, title and url are required on every posting")
+
+            params = {
+                "id": secrets.token_urlsafe(12),
+                "watchedCompanyId": company_id,
+                "dedupKey": dedup_key,
+                "externalId": p.get("externalId"),
+                "title": title,
+                "matchedRole": (p.get("matchedRole") or "").strip() or "unknown",
+                "location": p.get("location"),
+                "url": url,
+                "postedAt": p.get("postedAt"),
+                "minYears": p.get("minYears"),
+                "country": p.get("country"),
+                "isNew": bool(p.get("isNew", True)),
+            }
+            row = conn.execute(sql, params).fetchone()
+            if row.created:
+                inserted += 1
+                new_ids.append(row.id)
+            else:
+                updated += 1
+
+    return {"inserted": inserted, "updated": updated, "new_ids": new_ids}
+
+
+def archive_missing_postings(company_id: str, live_dedup_keys: list[str]) -> int:
+    """Stamp archivedAt on postings absent from the latest fetch. Never deletes.
+
+    Returns the number archived.
+
+    An EMPTY key list is treated as a no-op rather than "archive everything".
+    That guard matters: a career page that 500s or returns an empty body would
+    otherwise wipe the whole board's live status in one cycle.
+    """
+    keys = [k for k in (live_dedup_keys or []) if isinstance(k, str) and k.strip()]
+    if not keys:
+        return 0
+    with get_conn() as conn:
+        cur = conn.execute(
+            text(
+                'UPDATE "JobPosting" SET "archivedAt" = CURRENT_TIMESTAMP, '
+                '"updatedAt" = CURRENT_TIMESTAMP '
+                'WHERE "watchedCompanyId" = :cid AND "archivedAt" IS NULL '
+                'AND NOT ("dedupKey" = ANY(:keys))'
+            ),
+            {"cid": company_id, "keys": keys},
+        )
+        return cur.rowcount
+
+
+def list_unalerted_postings(window_start: datetime | None = None) -> list[dict]:
+    """Postings eligible for the next alert, joined to their company.
+
+    Eligibility is the conjunction of three independent conditions:
+      isNew            -> not part of a company's seeded backlog
+      alertRunId NULL -> not already reported by an earlier alert
+      archivedAt NULL  -> still live on the board
+
+    `window_start` is the watermark (finishedAt of the last SENT alert); NULL
+    on the first-ever run, which makes that alert unbounded-backwards — safe,
+    because seeded rows carry isNew = false.
+
+    Company name / domain / logoUrl are joined in so the mailer renders without
+    a second query.
+    """
+    sql = """
+        SELECT p.*,
+               c."name"    AS "companyName",
+               c."domain"  AS "companyDomain",
+               c."logoUrl" AS "companyLogoUrl"
+        FROM "JobPosting" p
+        JOIN "WatchedCompany" c ON c."id" = p."watchedCompanyId"
+        WHERE p."isNew" AND p."alertRunId" IS NULL AND p."archivedAt" IS NULL
+    """
+    params: dict[str, Any] = {}
+    if window_start is not None:
+        sql += ' AND p."firstSeenAt" > :window_start'
+        params["window_start"] = window_start
+    sql += ' ORDER BY c."name" ASC, p."firstSeenAt" DESC'
+
+    with get_conn() as conn:
+        return _rows_to_dicts(conn.execute(text(sql), params).fetchall())
+
+
+def create_alert_run(window_start: datetime | None, window_end: datetime) -> str:
+    """Open a AlertRun row (status 'pending'). Returns its id."""
+    run_id = secrets.token_urlsafe(12)
+    with get_conn() as conn:
+        conn.execute(
+            text(
+                'INSERT INTO "AlertRun" ("id", "windowStart", "windowEnd", "status") '
+                "VALUES (:id, :ws, :we, 'pending')"
+            ),
+            {"id": run_id, "ws": window_start, "we": window_end},
+        )
+    return run_id
+
+
+def close_alert_run(
+    run_id: str,
+    *,
+    status: str,
+    new_count: int = 0,
+    company_count: int = 0,
+    posting_ids: list[str] | None = None,
+    error: str | None = None,
+) -> None:
+    """Close a AlertRun and stamp alertRunId on the postings it reported —
+    both in ONE transaction.
+
+    The atomicity is the point. If the run were marked 'sent' in one transaction
+    and the postings stamped in another, a crash in between would leave those
+    postings with alertRunId NULL while the watermark had already advanced past
+    them: they would be silently reported a second time (or, with a different
+    ordering, dropped entirely). One transaction makes that window impossible.
+
+    Callers pass posting_ids ONLY for status='sent'. On 'failed' the ids are left
+    unstamped on purpose, so the postings roll into the next successful alert
+    instead of being lost to a transient SMTP error.
+    """
+    if status not in ("sent", "skipped", "failed"):
+        raise ValueError(f"invalid alert status: {status}")
+
+    ids = list(posting_ids or [])
+    with get_conn() as conn:
+        conn.execute(
+            text(
+                'UPDATE "AlertRun" SET "status" = :status, "newCount" = :new_count, '
+                '"companyCount" = :company_count, "error" = :error, '
+                '"finishedAt" = CURRENT_TIMESTAMP WHERE "id" = :id'
+            ),
+            {
+                "id": run_id,
+                "status": status,
+                "new_count": new_count,
+                "company_count": company_count,
+                "error": error,
+            },
+        )
+        if ids:
+            conn.execute(
+                text(
+                    'UPDATE "JobPosting" SET "alertRunId" = :run_id, '
+                    '"updatedAt" = CURRENT_TIMESTAMP '
+                    'WHERE "id" = ANY(:ids) AND "alertRunId" IS NULL'
+                ),
+                {"run_id": run_id, "ids": ids},
+            )
+
+
+def last_sent_alert_at() -> datetime | None:
+    """finishedAt of the most recent successfully-SENT alert — the watermark.
+
+    Deliberately ignores 'skipped' and 'failed' runs: only an alert that
+    actually reached your inbox may advance the window. Returns None before the
+    first successful send.
+    """
+    with get_conn() as conn:
+        row = conn.execute(
+            text(
+                'SELECT "finishedAt" FROM "AlertRun" '
+                "WHERE \"status\" = 'sent' AND \"finishedAt\" IS NOT NULL "
+                'ORDER BY "finishedAt" DESC LIMIT 1'
+            )
+        ).fetchone()
+        return row.finishedAt if row else None
+
+
+def link_posting_to_application(posting_id: str, job_application_id: str) -> bool:
+    """Point a posting at the JobApplication created from it ("Track" action)."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            text(
+                'UPDATE "JobPosting" SET "jobApplicationId" = :app_id, '
+                '"updatedAt" = CURRENT_TIMESTAMP WHERE "id" = :id'
+            ),
+            {"id": posting_id, "app_id": job_application_id},
+        )
+        return cur.rowcount > 0
+
+
+def archive_stale_postings(weeks: int) -> int:
+    """Archive live postings older than `weeks`, by posted date.
+
+    ARCHIVES, never deletes: the row stays and only leaves the live feed, so
+    widening the retention window later brings the postings straight back. A
+    posting with no posted date falls back to when we first saw it.
+
+    Rows already linked to a JobApplication are exempt — you acted on those, and
+    a retention sweep must not quietly retire something in your tracker.
+    """
+    if weeks < 1:
+        return 0
+    with get_conn() as conn:
+        cur = conn.execute(
+            text(
+                'UPDATE "JobPosting" SET "archivedAt" = CURRENT_TIMESTAMP, '
+                '"updatedAt" = CURRENT_TIMESTAMP '
+                'WHERE "archivedAt" IS NULL '
+                'AND "jobApplicationId" IS NULL '
+                'AND COALESCE("postedAt", "firstSeenAt") < '
+                "  CURRENT_TIMESTAMP - make_interval(weeks => :weeks)"
+            ),
+            {"weeks": weeks},
+        )
+        return cur.rowcount
+
+
+def archive_over_experience(max_years: int) -> int:
+    """Archive live postings that REQUIRE MORE than `max_years` of experience.
+
+    ARCHIVES, never deletes — raising the threshold later brings them straight
+    back, so this setting is safe to experiment with.
+
+    Postings with NO stated requirement are KEPT. "Not stated" is not evidence
+    of seniority: a third of postings simply don't publish a number, and many
+    are junior-friendly. Only roles we KNOW exceed the threshold are removed.
+
+    Rows already linked to a JobApplication are exempt, so a threshold change
+    never retires something sitting in your tracker.
+    """
+    with get_conn() as conn:
+        cur = conn.execute(
+            text(
+                'UPDATE "JobPosting" SET "archivedAt" = CURRENT_TIMESTAMP, '
+                '"updatedAt" = CURRENT_TIMESTAMP '
+                'WHERE "archivedAt" IS NULL '
+                'AND "jobApplicationId" IS NULL '
+                'AND "minYears" IS NOT NULL AND "minYears" > :max_years'
+            ),
+            {"max_years": max_years},
+        )
+        return cur.rowcount
+
+
+def restore_within_experience(max_years: int) -> int:
+    """Un-archive postings that fit a RAISED experience threshold.
+
+    The counterpart that makes the setting reversible: only rows archived by an
+    earlier, stricter threshold come back — anything retired by the retention
+    window stays archived, because that is a separate (time-based) decision.
+    """
+    with get_conn() as conn:
+        cur = conn.execute(
+            text(
+                'UPDATE "JobPosting" SET "archivedAt" = NULL, '
+                '"updatedAt" = CURRENT_TIMESTAMP '
+                'WHERE "archivedAt" IS NOT NULL '
+                'AND "minYears" IS NOT NULL AND "minYears" <= :max_years '
+                'AND COALESCE("postedAt", "firstSeenAt") > '
+                "  CURRENT_TIMESTAMP - make_interval(weeks => :weeks)"
+            ),
+            {"max_years": max_years, "weeks": _retention_weeks_setting()},
+        )
+        return cur.rowcount
+
+
+def _retention_weeks_setting() -> int:
+    """Current retention window, so a restore can't resurrect stale postings."""
+    raw = get_setting("jobboard.retentionWeeks")
+    try:
+        weeks = int(raw) if raw else 4
+    except (TypeError, ValueError):
+        weeks = 4
+    return weeks if 1 <= weeks <= 52 else 4
+
+
+def count_over_experience(max_years: int) -> int:
+    """How many LIVE postings a threshold would archive — for a UI preview."""
+    with get_conn() as conn:
+        row = conn.execute(
+            text(
+                'SELECT count(*) AS n FROM "JobPosting" '
+                'WHERE "archivedAt" IS NULL AND "jobApplicationId" IS NULL '
+                'AND "minYears" IS NOT NULL AND "minYears" > :max_years'
+            ),
+            {"max_years": max_years},
+        ).fetchone()
+        return int(row.n)
