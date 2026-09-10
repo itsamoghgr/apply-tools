@@ -1,0 +1,156 @@
+%-------------------------
+% Resume in Latex
+% Based off of: https://github.com/sb2nov/resume
+% License : MIT
+%
+% This file is the rendering shell for the Resume Builder. Everything in the
+% preamble (packages, margins, \resume* custom commands) is fixed; only the
+% body sections between \begin{document} and \end{document} are produced from
+% structured data by backend/resume_render.py. Do NOT hand-edit the {{...}}
+% placeholders — they are filled in programmatically.
+%------------------------
+
+\documentclass[letterpaper,10pt]{article}
+
+\usepackage{latexsym}
+\usepackage[empty]{fullpage}
+\usepackage{titlesec}
+\usepackage{marvosym}
+\usepackage[usenames,dvipsnames]{color}
+\usepackage{verbatim}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{fancyhdr}
+\usepackage[english]{babel}
+\usepackage{tabularx}
+% NOTE: fontawesome5 was in the source template but no \fa… icons are used.
+% It requires loadable OTF fonts that Tectonic's XeTeX can't resolve in this
+% environment (aborts with SIGABRT), so it's intentionally omitted.
+\usepackage{multicol}
+\usepackage{setspace}
+\setstretch{1.02}
+\setlength{\multicolsep}{-3.0pt}
+\setlength{\columnsep}{-1pt}
+% glyphtounicode / \pdfgentounicode are pdfTeX-only primitives used to make the
+% PDF ATS-parsable. Tectonic compiles with XeTeX (which emits unicode-mapped
+% PDFs natively and does NOT define these), so we load them only when running
+% under pdfTeX. Without this guard XeTeX aborts on an undefined control sequence.
+\ifdefined\pdfgentounicode
+  \input{glyphtounicode}
+\fi
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+% Optimized margins for professional appearance
+\addtolength{\oddsidemargin}{-0.55in}
+\addtolength{\evensidemargin}{-0.55in}
+\addtolength{\textwidth}{1.1in}
+\addtolength{\topmargin}{-0.65in}
+\addtolength{\textheight}{1.4in}
+
+\urlstyle{same}
+
+\raggedbottom
+\raggedright
+\setlength{\tabcolsep}{0in}
+
+% Section heading look — the original: a \titlerule with a trailing \vspace{-4pt}
+% that sets the rule weight and the gap below the heading. The rule thickness is
+% stated EXPLICITLY (0.4pt) rather than left to \titlerule's default, which
+% inherits \arrayrulewidth and can render heavier than intended. The rule MUST
+% be brace-wrapped — titlesec delimits its [after] option with brackets, so a
+% bare \titlerule[0.4pt] inside it ends the option early and the compile dies
+% with "Missing \begin{document}". `before`=0 because the
+% gap ABOVE a section is owned by \sectionsep (below), not by titlespacing;
+% `after`=8pt with the -4pt nets the original below-rule spacing.
+\titleformat{\section}{
+  \scshape\raggedright\large\bfseries
+}{}{0em}{}[{\color{black}\titlerule[0.4pt]} \vspace{-4pt}]
+\titlespacing*{\section}{0pt}{0pt}{8pt}
+
+% Uniform inter-section spacing (order-independent). The gap ABOVE every section
+% is emitted by \sectionsep — placed BEFORE each section block (including the
+% first) by the renderer — rather than baked into each section relative to its
+% neighbour. \addvspace MERGES with any pending vertical glue instead of stacking,
+% so residual glue can't double the gap. This works together with two things in
+% resume_render.py: (a) sections don't emit a trailing negative \vspace on their
+% LAST entry (which used to leak into the next section and is why gaps were
+% uneven), and (b) the header's -8pt is offset just below so the first section
+% matches the rest. Tune \sectiongap to retune all inter-section gaps at once.
+\newlength{\sectiongap}\setlength{\sectiongap}{7pt}
+\newcommand{\sectionsep}{\par\addvspace{\sectiongap}}
+
+% Ensure that generate pdf is machine readable/ATS parsable (pdfTeX only)
+\ifdefined\pdfgentounicode \pdfgentounicode=1 \fi
+
+%-------------------------
+% Custom commands with balanced spacing
+\newcommand{\resumeItem}[1]{
+  \item\small{
+    {#1 \vspace{-2pt}}
+  }
+}
+
+% Either ROW is emitted only when it has content. An entry may legitimately have
+% no title (#1) or no location (#4) — the renderer always passes all four fields,
+% empty string included — and without these guards such an entry rendered a blank
+% line, leaving the dates or location floating alone beside empty space.
+%
+% Both rows are guarded because which row goes blank depends on which field is
+% missing: the role is on row 1 and the company on row 2, so a title-less entry
+% empties the FIRST row while a location-less one empties the second.
+\newcommand{\resumeSubheading}[4]{
+  \vspace{-2pt}\item
+    \begin{tabular*}{1.0\textwidth}[t]{l@{\extracolsep{\fill}}r}
+      \ifx\relax#1\relax\ifx\relax#2\relax\else
+      \textbf{#1} & \textbf{\small #2} \\\fi\else
+      \textbf{#1} & \textbf{\small #2} \\\fi
+      \ifx\relax#3\relax\ifx\relax#4\relax\else
+      \textit{\small#3} & \textit{\small #4} \\\fi\else
+      \textit{\small#3} & \textit{\small #4} \\\fi
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeProjectHeading}[2]{
+    \item
+    \begin{tabular*}{1.001\textwidth}{l@{\extracolsep{\fill}}r}
+      \small#1 & \textbf{\small #2}\\
+    \end{tabular*}\vspace{-7pt}
+}
+
+% Education entries render through their own macro so a template CAN style them
+% differently from experience (see compact.tex). This shell wants them identical,
+% so it simply aliases the two.
+\newcommand{\resumeEducationSubheading}[4]{\resumeSubheading{#1}{#2}{#3}{#4}}
+
+\renewcommand\labelitemi{$\vcenter{\hbox{\tiny$\bullet$}}$}
+\renewcommand\labelitemii{$\vcenter{\hbox{\tiny$\bullet$}}$}
+
+\newcommand{\resumeSubHeadingListStart}{\begin{itemize}[leftmargin=0.0in, label={}]}
+\newcommand{\resumeSubHeadingListEnd}{\end{itemize}}
+\newcommand{\resumeItemListStart}{\begin{itemize}}
+\newcommand{\resumeItemListEnd}{\end{itemize}\vspace{-5pt}}
+
+%-------------------------------------------
+%%%%%%  RESUME STARTS HERE  %%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\begin{document}
+
+%----------HEADING----------
+\begin{center}
+    {\Huge \scshape {{FULL_NAME}}} \\ \vspace{3pt}
+    \small {{CONTACT_LINE}}
+    \vspace{-8pt}
+\end{center}
+% Partially offset the header's trailing -8pt so the gap above the FIRST section
+% matches the others (measured: this lands the first-section gap on the same
+% baseline as the \sectionsep gap the body sections get).
+\par\vspace{1pt}
+
+{{SECTIONS}}
+
+\end{document}

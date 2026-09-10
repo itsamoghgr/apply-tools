@@ -1,0 +1,139 @@
+%-------------------------
+% Resume Builder shell: "Modern"
+%
+% Sans-serif section headings in a navy accent, a letter-spaced name, and a
+% thin coloured rule under each heading. Body text stays roman for readability.
+%
+% CONTRACT — every shell must define \sectionsep and the \resume* macros used by
+% backend/resume_render.py (\resumeItem, \resumeSubheading, \resumeProjectHeading,
+% \resumeSubHeadingListStart/End, \resumeItemListStart/End) and expose the three
+% {{...}} placeholders. Only the body between \begin{document} and \end{document}
+% is generated; do NOT hand-edit the placeholders.
+%------------------------
+
+\documentclass[letterpaper,10pt]{article}
+
+\usepackage{latexsym}
+\usepackage[empty]{fullpage}
+\usepackage{titlesec}
+\usepackage{marvosym}
+\usepackage[usenames,dvipsnames]{color}
+\usepackage{verbatim}
+\usepackage{enumitem}
+\usepackage[hidelinks]{hyperref}
+\usepackage{fancyhdr}
+\usepackage[english]{babel}
+\usepackage{tabularx}
+% fontawesome5 is deliberately NOT loaded — its OTF fonts are unresolvable under
+% Tectonic's XeTeX and abort the compile. See resume_templates.py.
+\usepackage{multicol}
+\usepackage{setspace}
+\setstretch{1.02}
+\setlength{\multicolsep}{-3.0pt}
+\setlength{\columnsep}{-1pt}
+% pdfTeX-only primitives; guarded so XeTeX doesn't abort. See classic.tex.
+\ifdefined\pdfgentounicode
+  \input{glyphtounicode}
+\fi
+
+% Accent used by the heading text and rule. Defined with \definecolor (not a
+% package option) so no extra font/package resolution is involved.
+\definecolor{accent}{RGB}{31,58,95}
+
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot{}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\addtolength{\oddsidemargin}{-0.55in}
+\addtolength{\evensidemargin}{-0.55in}
+\addtolength{\textwidth}{1.1in}
+\addtolength{\topmargin}{-0.65in}
+\addtolength{\textheight}{1.4in}
+
+\urlstyle{same}
+
+\raggedbottom
+\raggedright
+\setlength{\tabcolsep}{0in}
+
+% Heading: sans-serif, accent-coloured, over a 0.5pt accent rule. \titlerule
+% takes the rule height as an optional arg; the colour comes from the group.
+\titleformat{\section}{
+  \sffamily\raggedright\large\bfseries\color{accent}
+}{}{0em}{}[{\color{accent}\titlerule[0.5pt]}\vspace{-4pt}]
+\titlespacing*{\section}{0pt}{0pt}{8pt}
+
+% See classic.tex for why the gap above a section is owned by \sectionsep and
+% why \addvspace (not \vspace) is required here.
+\newlength{\sectiongap}\setlength{\sectiongap}{8pt}
+\newcommand{\sectionsep}{\par\addvspace{\sectiongap}}
+
+\ifdefined\pdfgentounicode \pdfgentounicode=1 \fi
+
+%-------------------------
+% Layout macros — same contract as classic. Entry titles pick up the accent so
+% the eye can scan employers/schools quickly.
+\newcommand{\resumeItem}[1]{
+  \item\small{
+    {#1 \vspace{-2pt}}
+  }
+}
+
+% Either ROW is emitted only when it has content. An entry may legitimately have
+% no title (#1) or no location (#4) — the renderer always passes all four fields,
+% empty string included — and without these guards such an entry rendered a blank
+% line, leaving the dates or location floating alone beside empty space.
+%
+% Both rows are guarded because which row goes blank depends on which field is
+% missing: the role is on row 1 and the company on row 2, so a title-less entry
+% empties the FIRST row while a location-less one empties the second.
+\newcommand{\resumeSubheading}[4]{
+  \vspace{-2pt}\item
+    \begin{tabular*}{1.0\textwidth}[t]{l@{\extracolsep{\fill}}r}
+      \ifx\relax#1\relax\ifx\relax#2\relax\else
+      \textbf{\color{accent}#1} & \textbf{\small #2} \\\fi\else
+      \textbf{\color{accent}#1} & \textbf{\small #2} \\\fi
+      \ifx\relax#3\relax\ifx\relax#4\relax\else
+      \textit{\small#3} & \textit{\small #4} \\\fi\else
+      \textit{\small#3} & \textit{\small #4} \\\fi
+    \end{tabular*}\vspace{-7pt}
+}
+
+\newcommand{\resumeProjectHeading}[2]{
+    \item
+    \begin{tabular*}{1.001\textwidth}{l@{\extracolsep{\fill}}r}
+      \small#1 & \textbf{\small #2}\\
+    \end{tabular*}\vspace{-7pt}
+}
+
+% Education entries render through their own macro so a template CAN style them
+% differently from experience (see compact.tex). This shell wants them identical,
+% so it simply aliases the two.
+\newcommand{\resumeEducationSubheading}[4]{\resumeSubheading{#1}{#2}{#3}{#4}}
+
+\renewcommand\labelitemi{$\vcenter{\hbox{\tiny$\bullet$}}$}
+\renewcommand\labelitemii{$\vcenter{\hbox{\tiny$\bullet$}}$}
+
+\newcommand{\resumeSubHeadingListStart}{\begin{itemize}[leftmargin=0.0in, label={}]}
+\newcommand{\resumeSubHeadingListEnd}{\end{itemize}}
+\newcommand{\resumeItemListStart}{\begin{itemize}}
+\newcommand{\resumeItemListEnd}{\end{itemize}\vspace{-5pt}}
+
+%-------------------------------------------
+\begin{document}
+
+%----------HEADING----------
+\begin{center}
+    {\Huge \sffamily\bfseries \color{accent} {{FULL_NAME}}} \\ \vspace{4pt}
+    \small {{CONTACT_LINE}}
+    \vspace{-8pt}
+\end{center}
+% Offsets the header's trailing -8pt so the gap above the FIRST section matches
+% the \sectionsep gap every later section gets. See classic.tex.
+\par\vspace{1pt}
+
+{{SECTIONS}}
+
+\end{document}

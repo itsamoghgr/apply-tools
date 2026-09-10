@@ -126,7 +126,24 @@ Open <http://localhost:3001> for the web app, or click the extension icon. Both 
 
 ### Resume Builder (`/resume-builder`)
 
-Build a resume from structured fields — header/contact, professional summary, education, experience (with per-bullet editing), technical skills, and projects — then export a polished, ATS-friendly PDF compiled from the [`sb2nov`](https://github.com/sb2nov/resume)-style template at [`backend/resume_template.tex`](backend/resume_template.tex). Each saved resume lives in the `ResumeProfile` table with its sections stored as JSON.
+Build a resume from structured fields — header/contact, professional summary, education, experience (with per-bullet editing), technical skills, and projects — then export a polished, ATS-friendly PDF. Each saved resume lives in the `ResumeProfile` table with its sections stored as JSON.
+
+**Templates.** The toolbar's template picker chooses which LaTeX shell the PDF renders with; the list is served by `GET /resume-builder/templates` from the registry in [`backend/resume_templates.py`](backend/resume_templates.py), so it can't drift from the shells on disk. Four ship today:
+
+| Slug | Look |
+| --- | --- |
+| `classic` | The original [`sb2nov`](https://github.com/sb2nov/resume) style — small-caps headings over a full-width rule. The default, and the fallback for any unknown slug. |
+| `compact` | Classic, with each **experience** entry's heading collapsed to one line — `Data Scientist Intern, Fulton Bank` on the left, `May 2025 – Dec 2025, Lancaster, PA` on the right. Education keeps classic's two-line layout, since long degree titles wrap badly on one line. |
+| `modern` | Sans-serif headings and employer names in a navy accent, over a thin rule. |
+| `serif` | Book-style roman text (`newpxtext`) with centred small-caps headings and no rules. |
+
+Templates vary the *shell only* — preamble, margins, fonts, section-heading style, and the `\resume*` layout macros (which is how `compact` restructures an entry heading without touching the renderer). The per-section LaTeX is emitted once by `resume_render.py` and shared by all of them, so every template consumes the same profile through the same escaping path. A resume's chosen slug is stored on `ResumeProfile.template` (defaulting to `classic`, so existing resumes are unaffected); switching templates clears the cached page count, since a denser shell changes what fits on one page.
+
+Experience entries lead with the **role**, bold, and the company second (`Data Scientist Intern, Fulton Bank`) — a recruiter scans for the role before the employer. Education is deliberately the opposite, leading with the school, since a degree name is generic while the institution is the distinguishing fact. An entry with no title promotes the company into the bold slot so no blank line appears.
+
+Education entries render through `\resumeEducationSubheading` rather than `\resumeSubheading`, so a shell can style the two differently — `compact` is the reason the split exists; the other shells just alias one to the other. All entries in a section share a single `itemize` list, so consecutive entries sit at uniform spacing (education used to open a list per entry, which charged an extra inter-list gap between schools).
+
+To add one, drop a `.tex` into `backend/resume_templates/` and register it — see that module's docstring for the placeholder and macro contract, then run `backend/test_resume_templates.py` to confirm it compiles.
 
 AI assists (all routed through the same provider/fallback chain as the rest of the app):
 
@@ -135,7 +152,7 @@ AI assists (all routed through the same provider/fallback chain as the rest of t
 - **Draft from notes** — paste an old resume or a brain-dump; AI extracts structured education/experience/skills/projects to pre-fill the builder.
 - **Tailor to JD** — paste a job description; AI reorders and rewrites your *existing* bullets and skills to foreground what the role wants, without inventing experience.
 
-> The template loads `glyphtounicode`/`\pdfgentounicode` only under pdfTeX and omits `fontawesome5` (unused), since Tectonic compiles with XeTeX — both are guarded so the same `.tex` compiles cleanly here.
+> Every template loads `glyphtounicode`/`\pdfgentounicode` only under pdfTeX and omits `fontawesome5`, since Tectonic compiles with XeTeX (the latter's OTF fonts are unresolvable there and abort the compile). `test_resume_templates.py` asserts both guards on every shell.
 
 ### Job Board (`/job-board`)
 

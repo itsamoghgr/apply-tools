@@ -66,6 +66,7 @@ export async function setResumeProfileActive(
         skills: rp.skills,
         projects: rp.projects,
         sectionOrder: rp.sectionOrder,
+        template: rp.template,
       });
       const label = rp.name.trim() || "Untitled resume";
       await prisma.resume.create({
@@ -110,6 +111,7 @@ export async function createResumeProfile(
         skills: src.skills,
         projects: src.projects,
         sectionOrder: src.sectionOrder,
+        template: src.template,
       });
     }
   }
@@ -145,6 +147,7 @@ export async function saveResumeProfile(
         skills: p.skills,
         projects: p.projects,
         sectionOrder: p.sectionOrder,
+        template: p.template,
       },
     });
     await syncCompanionResume(id, name, p);

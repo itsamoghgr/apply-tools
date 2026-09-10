@@ -64,6 +64,7 @@ from generate import (
 )
 from latex_utils import LatexCompileError
 from resume_render import render_resume_pdf_with_pages
+from resume_templates import list_templates
 from resume_ai import (
     draft_profile_from_notes,
     highlight_bullet,
@@ -444,6 +445,16 @@ def chat(req: ChatRequest) -> dict[str, str]:
 # -----------------------------------------------------------------------------
 # Resume Builder: structured profile -> LaTeX -> PDF, plus AI assists.
 # -----------------------------------------------------------------------------
+
+
+@app.get("/resume-builder/templates")
+def resume_builder_templates() -> dict[str, Any]:
+    """The LaTeX shells a resume can be rendered with, for the builder's picker.
+
+    Served from the backend registry so the list can never drift from the
+    templates that actually exist on disk.
+    """
+    return {"templates": list_templates()}
 
 
 @app.post("/resume-builder/pdf")

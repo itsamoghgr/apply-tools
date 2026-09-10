@@ -12,6 +12,11 @@ httpx>=0.27.0
 sqlalchemy>=2.0.0
 psycopg[binary]>=3.1.0
 pypdf>=4.0.0
+# Test-only: test_resume_templates.py uses pdfplumber's per-glyph bounding boxes
+# to assert no template overflows the right margin. The server never imports it,
+# and that check skips cleanly when it's absent — so this is safe to omit in
+# production installs.
+pdfplumber>=0.11.0
 structlog>=24.1.0
 google-auth>=2.30.0
 requests>=2.31.0

@@ -27,6 +27,7 @@ export default async function EditResumeProfilePage({
     skills: row.skills,
     projects: row.projects,
     sectionOrder: row.sectionOrder,
+    template: row.template,
   });
 
   // Whether this resume shows in the applications / AI pickers.

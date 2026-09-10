@@ -200,6 +200,10 @@ model ResumeProfile {
   skills      Json     @default("[]")
   projects    Json     @default("[]")
   sectionOrder Json    @default("[]")
+  // Slug of the LaTeX shell this resume renders with (backend/resume_templates.py).
+  // Unknown/legacy values fall back to the default template at render time, so
+  // this never has to be validated here.
+  template    String   @default("classic")
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   // Companion plaintext Resume synced from this profile so it can be selected

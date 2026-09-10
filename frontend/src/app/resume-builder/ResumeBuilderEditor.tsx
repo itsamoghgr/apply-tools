@@ -37,6 +37,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { saveResumeProfile, deleteResumeProfile, setResumeProfileActive } from "./actions";
 import Modal from "./Modal";
+import TemplatePicker from "./TemplatePicker";
 import BoldEditor from "./BoldEditor";
 import {
   type ResumeProfileData,
@@ -538,6 +539,19 @@ export default function ResumeBuilderEditor({
     setDirty(true);
   }
 
+  // Switching template changes how much fits on a page, so the last render's
+  // page count no longer describes this resume. Clear it (rather than leave a
+  // stale value) so export isn't wrongly blocked — or wrongly allowed — until
+  // the next Preview/Export re-renders and reports a fresh count.
+  function setTemplate(slug: string) {
+    if (slug === profile.template) return;
+    setPageCount(null);
+    update((p) => {
+      p.template = slug;
+      return p;
+    });
+  }
+
   function setHeader<K extends keyof ResumeProfileData["header"]>(
     key: K,
     val: string,
@@ -972,6 +986,11 @@ export default function ResumeBuilderEditor({
         >
           <Gauge className="h-4 w-4" /> Score role
         </button>
+        <TemplatePicker
+          value={profile.template}
+          onChange={setTemplate}
+          disabled={previewing || exporting}
+        />
         <button
           type="button"
           onClick={preview}

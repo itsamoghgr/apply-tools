@@ -23,6 +23,7 @@ frontend builder) is:
       "projects": [
         {"name": str, "date": str, "bullets": [str, ...]}
       ],
+      "template": str,   # shell slug, see resume_templates.py; absent = default
     }
 
 Bullet text may contain a *whitelist* of inline markup — ``\\textbf{...}`` and
@@ -34,13 +35,10 @@ sanitisation strategy as generate.py (stash markup → escape → restore).
 from __future__ import annotations
 
 import re
-from pathlib import Path
 from typing import Any
 
 from latex_utils import compile_latex, count_pdf_pages, escape_latex
-
-BACKEND_DIR = Path(__file__).resolve().parent
-RESUME_TEMPLATE_PATH = BACKEND_DIR / "resume_template.tex"
+from resume_templates import get_template
 
 
 # --- inline markup -----------------------------------------------------------
@@ -236,16 +234,25 @@ def _education_section(education: list[dict[str, Any]]) -> str:
     if not rows:
         return ""
     out = ["%-----------EDUCATION-----------", "\\section{EDUCATION}"]
+    # ONE list wrapping every entry — matching _experience_section. Opening and
+    # closing the itemize per entry (as this used to) charged a full inter-list
+    # gap between consecutive schools, so education entries sat visibly further
+    # apart than experience ones.
+    out.append("  \\resumeSubHeadingListStart")
     for e in rows:
-        out.append("  \\resumeSubHeadingListStart")
-        out.append("    \\resumeSubheading")
+        # Education emits its OWN macro rather than \resumeSubheading so a
+        # template can style the two differently. Every shell defines it; most
+        # simply alias it to \resumeSubheading, but `compact` keeps education on
+        # two lines (degree titles are long and wrap badly on one) while still
+        # collapsing experience entries to a single line.
+        out.append("    \\resumeEducationSubheading")
         out.append(
             f"      {{{escape_latex(_g(e, 'school'))}}}{{{escape_latex(_date_range(e))}}}"
         )
         out.append(
             f"      {{{escape_latex(_g(e, 'degree'))}}}{{{escape_latex(_g(e, 'location'))}}}"
         )
-        out.append("  \\resumeSubHeadingListEnd")
+    out.append("  \\resumeSubHeadingListEnd")
     return "\n".join(out) + "\n"
 
 
@@ -260,11 +267,27 @@ def _experience_section(experience: list[dict[str, Any]]) -> str:
     ]
     for x in rows:
         out.append("  \\resumeSubheading")
+        # ROLE FIRST: the title goes in the macro's bold slot and the company in
+        # the italic one — "Data Scientist Intern, Fulton Bank" rather than the
+        # reverse. A recruiter scans for the role before the employer, so the
+        # role gets the visual weight. (Education is deliberately the opposite:
+        # see _education_section — a degree name is generic while the school is
+        # the distinguishing fact.)
+        #
+        # When an entry has no title, the company is promoted into the bold slot
+        # rather than left in the italic one. Otherwise the bold slot renders
+        # empty and the company sits alone on the second line, which reads as a
+        # blank line above the entry (and in the one-line `compact` layout would
+        # start the entry with a stray comma). Entries are filtered on `company`
+        # above, so the promoted value is always present.
+        title = _g(x, "title")
+        company = _g(x, "company")
+        primary, secondary = (title, company) if title else (company, "")
         out.append(
-            f"      {{{escape_latex(_g(x, 'company'))}}}{{{escape_latex(_date_range(x))}}}"
+            f"      {{{escape_latex(primary)}}}{{{escape_latex(_date_range(x))}}}"
         )
         out.append(
-            f"      {{{escape_latex(_g(x, 'title'))}}}{{{escape_latex(_g(x, 'location'))}}}"
+            f"      {{{escape_latex(secondary)}}}{{{escape_latex(_g(x, 'location'))}}}"
         )
         bullets = [b for b in (x.get("bullets") or []) if isinstance(b, str) and b.strip()]
         if bullets:
@@ -363,7 +386,10 @@ _SECTION_RENDERERS = {
 
 def render_resume_tex(profile: dict[str, Any]) -> str:
     """Render structured `profile` data into a complete .tex source string."""
-    template = RESUME_TEMPLATE_PATH.read_text(encoding="utf-8")
+    # The shell (preamble, margins, \resume* macro definitions) is chosen by the
+    # profile's `template` slug; the section LaTeX below is shared by all of them.
+    # get_template is total — an unknown/missing slug falls back to the default.
+    template = get_template(profile.get("template")).read()
     header = profile.get("header") or {}
 
     # Build the body from the profile's ordered, visibility-aware section list.
